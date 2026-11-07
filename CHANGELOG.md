@@ -8,6 +8,14 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Changed
+- The browser smoke check waits for the page the way an author would: it polls for the screen it expects, up to ten
+  seconds, instead of sleeping 1.2 seconds after each load and looking once. After a reload it waits for whichever
+  first screen the page draws, the welcome or the library, chooses browser storage only if it is the welcome, and
+  then waits for the book's card, because the library draws at once and its cards when the listing comes back.
+  When a wait times out, the failure now says what the page showed and how many page errors there were, so a failure
+  on a slow runner can be told from a broken page. One Linux run failed the welcome check two seconds after the
+  load, on a commit whose other runs passed; the cause was not reproduced locally, so this makes the check
+  tolerant of a slow first draw and its next failure self-explanatory.
 - Rename the product to Open Book Studio everywhere an author, a command line or a file reader sees the name: the library header, the
   window title, error and refusal messages, the `bookwriter` usage banner and MCP server text, the sign-in loopback page, the glasses page,
   open/save dialog filters, the exported EPUB creator fallback, the licenses dialog and the microphone permission text. Identifiers stay as

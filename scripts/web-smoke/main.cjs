@@ -35,6 +35,51 @@ app.whenReady().then(async () => {
   });
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  // The page draws after the load event, and on a slow runner that can take longer than any fixed wait,
+  // so every wait for the page polls (up to ten seconds) instead of sleeping once and checking once.
+  const inPage = (script) =>
+    window.webContents.executeJavaScript(`(() => { try { return Boolean(${script}); } catch { return false; } })()`);
+  const pollPage = async (script) => {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (await inPage(script)) return true;
+      await sleep(250);
+    }
+    return false;
+  };
+  // What an author would see, for a failure message: the first words on screen and the page error count.
+  const describePage = async () => {
+    try {
+      const text = await window.webContents.executeJavaScript(
+        `(document.body?.innerText ?? "").replace(/\\s+/g, " ").trim().slice(0, 160)`
+      );
+      return `the page says "${text}" with ${consoleErrors.length} page error(s)`;
+    } catch (error) {
+      return `the page could not be read (${error.message})`;
+    }
+  };
+  const waitPage = async (script, what) => {
+    if (await pollPage(script)) return true;
+    throw new Error(`the ${what} never appeared: ${await describePage()}`);
+  };
+  const WELCOME = `document.querySelector('[data-testid="web-welcome"]')`;
+  const LIBRARY = `document.querySelector('[data-testid="library-view"]')`;
+  // The library draws at once and its book cards when the listing comes back, so a script that is
+  // about to click the book waits for its card instead of assuming the listing has finished.
+  const BOOK_CARD = `[...document.querySelectorAll('[data-testid="book-card"]')].some((entry) => (entry.textContent ?? "").includes("Web Smoke Book"))`;
+  // Load the page again as a returning author would: wait for whichever first screen it draws, choose
+  // browser storage if that screen is the welcome, then wait for the smoke book's card (every reload in
+  // this script comes after the book was created).
+  const reloadPage = async () => {
+    await window.loadURL(url);
+    await waitPage(`${WELCOME} || ${LIBRARY}`, "welcome or library screen");
+    if (await inPage(WELCOME)) {
+      await window.webContents.executeJavaScript(
+        `document.querySelector('[data-testid="use-browser-storage"]')?.click()`
+      );
+    }
+    await waitPage(BOOK_CARD, "Web Smoke Book card");
+  };
+
   const { createRunDir, redactLine } = await import(
     pathToFileURL(path.join(__dirname, "..", "failure-artifacts.mjs")).href
   );
@@ -58,12 +103,12 @@ app.whenReady().then(async () => {
 
   try {
     await window.loadURL(url);
-    await sleep(1200);
-
-    const welcome = await window.webContents.executeJavaScript(
-      "Boolean(document.querySelector('[data-testid=\"web-welcome\"]'))"
+    const welcome = await pollPage(WELCOME);
+    record(
+      "the web welcome offers a storage choice",
+      welcome,
+      welcome ? "welcome rendered" : `welcome missing: ${await describePage()}`
     );
-    record("the web welcome offers a storage choice", welcome, welcome ? "welcome rendered" : "welcome missing");
     if (!welcome) return finish();
 
     await window.webContents.executeJavaScript(
@@ -237,25 +282,10 @@ app.whenReady().then(async () => {
       exported: false,
       error: null
     };
-    const inPage = (script) =>
-      window.webContents.executeJavaScript(`(() => { try { return Boolean(${script}); } catch { return false; } })()`);
-    const waitPage = async (script, what) => {
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        if (await inPage(script)) return true;
-        await sleep(250);
-      }
-      throw new Error(`the ${what} never appeared`);
-    };
     try {
       // The books above were created through the bridge, bypassing the page's list state.
       // Reload so the library view fetches the committed books like a returning author would.
-      await window.loadURL(url);
-      await sleep(1200);
-      if (await inPage(`document.querySelector('[data-testid="web-welcome"]')`)) {
-        await window.webContents.executeJavaScript(
-          `document.querySelector('[data-testid="use-browser-storage"]')?.click()`
-        );
-      }
+      await reloadPage();
       await waitPage(`document.querySelector('[data-testid="library-view"]')`, "library for the interface journey");
       const openBook = await window.webContents.executeJavaScript(`(() => {
         const cards = [...document.querySelectorAll('[data-testid="book-card"]')];
@@ -311,14 +341,7 @@ app.whenReady().then(async () => {
       }
       ui.saved = true;
 
-      await window.loadURL(url);
-      await sleep(1200);
-      const rewarm = await inPage(`document.querySelector('[data-testid="web-welcome"]')`);
-      if (rewarm) {
-        await window.webContents.executeJavaScript(
-          `document.querySelector('[data-testid="use-browser-storage"]')?.click()`
-        );
-      }
+      await reloadPage();
       await waitPage(`document.querySelector('[data-testid="library-view"]')`, "library after reload");
       const reopenBook = await window.webContents.executeJavaScript(`(() => {
         const cards = [...document.querySelectorAll('[data-testid="book-card"]')];
@@ -366,13 +389,7 @@ app.whenReady().then(async () => {
         "conflict status after the stale save"
       );
       ui.conflict = true;
-      await window.loadURL(url);
-      await sleep(1200);
-      if (await inPage(`document.querySelector('[data-testid="web-welcome"]')`)) {
-        await window.webContents.executeJavaScript(
-          `document.querySelector('[data-testid="use-browser-storage"]')?.click()`
-        );
-      }
+      await reloadPage();
       await waitPage(`document.querySelector('[data-testid="library-view"]')`, "library after the conflict");
       const reopenConflicted = await window.webContents.executeJavaScript(`(() => {
         const cards = [...document.querySelectorAll('[data-testid="book-card"]')];
@@ -389,13 +406,7 @@ app.whenReady().then(async () => {
       if (!listed) throw new Error("the conflict copy is not named in the workspace");
       ui.conflictListed = true;
 
-      await window.loadURL(url);
-      await sleep(1200);
-      if (await inPage(`document.querySelector('[data-testid="web-welcome"]')`)) {
-        await window.webContents.executeJavaScript(
-          `document.querySelector('[data-testid="use-browser-storage"]')?.click()`
-        );
-      }
+      await reloadPage();
       await waitPage(`document.querySelector('[data-testid="library-view"]')`, "library before export");
       await window.webContents.executeJavaScript(`(() => {
         window.__smokeChunks = [];
