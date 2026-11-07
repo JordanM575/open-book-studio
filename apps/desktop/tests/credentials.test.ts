@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Library } from "../src/main/library/store";
-import { FileCredentialVault, newConnectionId, type Cipher } from "../src/main/credential-file";
+import { FileCredentialVault, newConnectionId, selectTestCipher, type Cipher } from "../src/main/credential-file";
 import { ProviderService } from "../src/main/providers";
 
 const cipher: Cipher = {
@@ -33,6 +33,33 @@ async function filesUnder(dir: string): Promise<string[]> {
 }
 
 describe("credential vault", () => {
+  test("the explicit isolated test mode never calls the protected-storage cipher", async () => {
+    let calls = 0;
+    const protectedCipher: Cipher = {
+      available: () => {
+        calls += 1;
+        return true;
+      },
+      encrypt: () => {
+        calls += 1;
+        return "unused";
+      },
+      decrypt: () => {
+        calls += 1;
+        return "unused";
+      }
+    };
+    const isolated = selectTestCipher(protectedCipher, { STUDIO_TEST: "1", STUDIO_NO_KEYCHAIN: "1" });
+    expect(await isolated.available()).toBe(false);
+    expect(() => isolated.encrypt("synthetic")).toThrow();
+    expect(() => isolated.decrypt("synthetic")).toThrow();
+    expect(calls).toBe(0);
+    // Either flag alone leaves the cipher it was given.
+    expect(selectTestCipher(protectedCipher, { STUDIO_NO_KEYCHAIN: "1" })).toBe(protectedCipher);
+    expect(selectTestCipher(protectedCipher, { STUDIO_TEST: "1" })).toBe(protectedCipher);
+    expect(selectTestCipher(protectedCipher, {})).toBe(protectedCipher);
+  });
+
   test("reports protected storage status without a secret", async () => {
     const { vault } = await workspace();
     expect(await vault.status()).toEqual({ available: true, backend: "Protected storage", detail: "" });

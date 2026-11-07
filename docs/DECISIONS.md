@@ -607,6 +607,17 @@ enforcement, and the D-124 device-identity question stands.
 | **Evidence** | `packages/core/src/library/schema-guard.ts`; `apps/desktop/tests/book-json-safety.test.ts` (unknown fields at every level through the studio's own saves and the agent's tools, the documented arrays, and a schema-2 refusal on every write path with the bytes unchanged); `packages/core/tests/format-profile-premises.test.ts`. |
 | **Owner** | spec 002 FR-008 |
 
+### D-191 · A no-keychain mode for hidden interface checks
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-07, on the author's approval of the file-safety fixes) |
+| **Question** | How can a hidden interface check run the real app without it ever asking the operating system's protected storage, which on macOS can reach the author's keychain? |
+| **Decision** | An unpackaged run started with both `STUDIO_TEST=1` and `STUDIO_NO_KEYCHAIN=1` uses a cipher that reports protected storage as unavailable and refuses to encrypt or decrypt, before the operating system is asked (`selectTestCipher`, chosen by the desktop vault's constructor, so its availability and status reads never reach `safeStorage` either). It is a refusal and not a fallback: nothing is written, no plaintext file exists, and the interface says protected storage is unavailable as it would on a machine without it. Either flag alone, or a packaged build, keeps protected storage. `scripts/smoke.mjs` sets both flags and starts the app with an allowlisted environment (`scripts/headless-environment.mjs`), so a provider key or STUDIO_ flag from the caller's shell never reaches it. |
+| **Rejected** | Reusing D-184's in-memory vault for the smoke run: it reports storage as available and holds keys, which the interface checks have no use for. A single flag: a STUDIO_TEST left in a shell would then switch protected storage off for an ordinary run. |
+| **Evidence** | `apps/desktop/tests/credential-isolation.test.ts`, `apps/desktop/tests/credentials.test.ts`, `apps/desktop/tests/headless-environment.test.ts`; AGENTS.md "Credentials". |
+| **Owner** | spec 012 |
+
 ## Resolved browser decisions
 
 ### D-104 · OpenRouter OAuth redirect on desktop and web

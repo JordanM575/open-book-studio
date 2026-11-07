@@ -353,6 +353,14 @@ smoke is 13/13, and coverage is 86.0% of functions and 93.0% of lines.
 
 ## Phase 9 — The agent loop, end to end
 
+- [x] T034a Keep the hidden smoke run away from the author's keychain (D-191). An unpackaged run
+      started with `STUDIO_TEST=1` and `STUDIO_NO_KEYCHAIN=1` uses a cipher that refuses protected
+      storage without asking the operating system, through the desktop vault's constructor, so its
+      availability and status reads never reach `safeStorage`. It is a refusal and not a fallback.
+      `scripts/smoke.mjs` sets both flags and passes only allowlisted host fields to the app.
+      `apps/desktop/tests/credential-isolation.test.ts` (4 tests) proves the truth table, zero
+      safeStorage calls, nothing written and a packaged build keeping its storage;
+      `credentials.test.ts` covers the cipher choice and `headless-environment.test.ts` the allowlist.
 - [x] T034 Prove one real agent turn through the built app without the author's keychain (D-184).
       Current evidence: `createDesktopVault` (`apps/desktop/src/main/credentials.ts`) returns an
       in-memory vault only for an unpackaged run started with `STUDIO_TEST=1` and

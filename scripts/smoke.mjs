@@ -17,6 +17,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headlessEnvironment } from "./headless-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const appDir = join(root, "apps", "desktop");
@@ -188,15 +189,14 @@ function pngSquare(size, [r, g, b]) {
   ]);
 }
 
-const env = { ...process.env };
-// T3 Code and some terminals export this; it would start Electron as plain Node.
-delete env.ELECTRON_RUN_AS_NODE;
-// This shell may carry a fetch proxy installed for the coding agent itself. The app must not
-// inherit it: the proxy authorises the agent's own traffic, not the app's, and every provider
-// request would come back as an unauthorised refusal that has nothing to do with the app.
-delete env.NODE_OPTIONS;
-for (const key of Object.keys(env)) if (key.startsWith("HEADROOM_")) delete env[key];
+// Only the host fields the app needs to start, so nothing from this shell reaches it: not
+// ELECTRON_RUN_AS_NODE (it would start Electron as plain Node), not NODE_OPTIONS or a fetch proxy
+// installed for the coding agent itself (it authorises the agent's traffic, not the app's), and
+// not a provider key.
+const env = headlessEnvironment(process.env);
 env.STUDIO_TEST = "1";
+// The hidden run never asks the operating system for protected storage either.
+env.STUDIO_NO_KEYCHAIN = "1";
 env.STUDIO_HEADLESS = "1";
 env.STUDIO_SMOKE = "1";
 env.STUDIO_USER_DATA = profile;

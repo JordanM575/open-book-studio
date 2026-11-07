@@ -82,6 +82,15 @@ written to disk. A packaged build, or a run without `STUDIO_TEST`, refuses the f
 A computer without protected storage still refuses to save a key. `apps/desktop/tests/memory-vault.test.ts`
 proves each case with the shared Electron mock.
 
+### Hidden checks without the keychain
+
+The `smoke` run starts the app with `STUDIO_TEST=1 STUDIO_NO_KEYCHAIN=1` and an allowlisted
+environment. An unpackaged run with both flags refuses protected storage without asking the
+operating system (D-191), so the check never reaches the author's keychain; Settings shows storage
+as unavailable and a save is refused, with nothing written. Either flag alone, or a packaged build,
+keeps protected storage. `apps/desktop/tests/credential-isolation.test.ts` proves each case with the
+shared Electron mock, and `apps/desktop/tests/headless-environment.test.ts` covers the allowlist.
+
 A hidden window is never visible, so the studio treats every finished turn as one to notify about.
 A hidden run now logs those notifications instead of posting them
 (`apps/desktop/src/main/launch-mode.ts`). The check still turns desktop notifications off inside the

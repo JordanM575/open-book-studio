@@ -29,6 +29,20 @@ export interface Cipher {
 }
 
 /**
+ * The cipher an isolated test run uses. A run started with both `STUDIO_TEST=1` and
+ * `STUDIO_NO_KEYCHAIN=1` refuses protected storage without asking the operating system, so a hidden
+ * check never reaches the author's keychain. It is a refusal and not a fallback: nothing is
+ * written, and a run without both flags keeps the cipher it was given.
+ */
+export function selectTestCipher(cipher: Cipher, env: Readonly<Record<string, string | undefined>>): Cipher {
+  if (env.STUDIO_TEST !== "1" || env.STUDIO_NO_KEYCHAIN !== "1") return cipher;
+  const refuse = (): never => {
+    throw new Error("Protected storage is switched off for this isolated test run.");
+  };
+  return { available: () => false, encrypt: refuse, decrypt: refuse };
+}
+
+/**
  * Credential storage without a dependency on Electron, so it can be tested directly under Bun.
  * The desktop wrapper supplies the operating system's cipher; the file format is identical either
  * way and never contains a plaintext secret.

@@ -2,7 +2,7 @@ import { app, safeStorage } from "electron";
 import { join } from "node:path";
 import { MemoryVault, type CredentialVault } from "@ai-book-studio/core/providers/credentials";
 import type { CredentialStatus } from "@ai-book-studio/core/providers/types";
-import { FileCredentialVault, type Cipher } from "./credential-file";
+import { FileCredentialVault, selectTestCipher, type Cipher } from "./credential-file";
 
 export { newConnectionId } from "./credential-file";
 
@@ -44,7 +44,9 @@ async function answerWithin(answer: Promise<boolean>, ms: number): Promise<boole
 
 export class DesktopCredentialVault extends FileCredentialVault {
   constructor() {
-    super(join(app.getPath("userData"), "credentials.json"), osCipher);
+    // Only an unpackaged run can switch protected storage off, as for the in-memory vault, so a
+    // packaged build keeps it whatever the environment says.
+    super(join(app.getPath("userData"), "credentials.json"), app.isPackaged ? osCipher : selectTestCipher(osCipher, process.env));
   }
 
   private static backend(): string {
@@ -61,7 +63,7 @@ export class DesktopCredentialVault extends FileCredentialVault {
    */
   override async status(waitMs = STATUS_WAIT_MS): Promise<{ available: boolean; backend: string; detail: string }> {
     const backend = DesktopCredentialVault.backend();
-    const answer = await answerWithin(safeStorage.isAsyncEncryptionAvailable(), waitMs);
+    const answer = await answerWithin(this.isAvailable(), waitMs);
     if (answer === "late") {
       return {
         available: false,

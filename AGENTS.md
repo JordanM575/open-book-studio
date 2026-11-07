@@ -204,6 +204,11 @@ Test what the author sees rather than implementation details.
   `STUDIO_TEST=1 STUDIO_TEST_MEMORY_VAULT=1` keeps connections in memory only, for
   `scripts/agent-check.mjs`. It is not a fallback: the choice never reads safeStorage, and packaged
   builds and unflagged runs refuse it (`apps/desktop/tests/memory-vault.test.ts`).
+- D-191's no-keychain mode is the other test-only switch. An unpackaged run started with
+  `STUDIO_TEST=1 STUDIO_NO_KEYCHAIN=1` (the hidden smoke run) refuses protected storage without
+  asking the operating system, so it never reaches the author's keychain. It is a refusal and not a
+  fallback: nothing is written, either flag alone changes nothing, and packaged builds ignore it
+  (`apps/desktop/tests/credential-isolation.test.ts`).
 
 ## Spec-driven development
 
