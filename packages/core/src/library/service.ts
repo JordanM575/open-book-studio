@@ -712,6 +712,9 @@ export class LibraryService {
    */
   async restoreChapter(bookId: string, chapterId: string, trashedAt: string): Promise<Chapter> {
     return this.serializeWrite(bookId, async () => {
+      if ((await this.readChapters(bookId)).some((chapter) => chapter.id === chapterId)) {
+        throw new LibraryError("invalid", "That chapter is already in the book. Nothing was moved.");
+      }
       const source = trashedChapterPath(bookId, trashedAt);
       const trashName = source[source.length - 1] ?? "";
       const snapshot = await this.env.storage.readFile(source);
@@ -719,9 +722,6 @@ export class LibraryService {
       const trashed = await this.chapterFromSnapshot(bookId, trashName, snapshot);
       if (trashed.id !== chapterId) {
         throw new LibraryError("invalid", "That file in the trash is another chapter. Nothing was moved.");
-      }
-      if ((await this.readChapters(bookId)).some((chapter) => chapter.id === chapterId)) {
-        throw new LibraryError("invalid", "That chapter is already in the book. Nothing was moved.");
       }
       await this.ensureBookLayout(bookId);
 

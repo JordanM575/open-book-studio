@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { encode } from "gpt-tokenizer";
@@ -209,6 +209,46 @@ describe("chapter tools", () => {
     const detail = await library.readBook(book.id);
     expect(detail.chapters).toHaveLength(1);
     expect(detail.chapters[0]?.content).toBe("One.\n\nTwo.\n");
+  });
+
+  test("restores the original second chapter from trash when the first save conflicts", async () => {
+    const { root, tools, chapter, library, book } = await fixture("One.\n");
+    const second = await library.createChapter(book.id, { title: "Two", content: "Two.\n" });
+    await library.updateChapterMeta(
+      book.id,
+      second.id,
+      { synopsis: "The crossing.", notes: "Keep the details." },
+      { baseVersion: second.version, baseHash: second.hash }
+    );
+    const originalSaveChapter = library.saveChapter.bind(library);
+    library.saveChapter = async (...args: Parameters<Library["saveChapter"]>) => {
+      const current = await originalSaveChapter(book.id, chapter.id, "One, revised.\n", {
+        baseVersion: chapter.version,
+        baseHash: chapter.hash
+      });
+      expect(current.status).toBe("saved");
+      return originalSaveChapter(...args);
+    };
+
+    const result = await run(tools, "merge_chapters", {
+      firstChapterId: chapter.id,
+      secondChapterId: second.id
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      message: "The first chapter changed on disk, so the merge was not saved. The second chapter was restored."
+    });
+    const detail = await library.readBook(book.id);
+    expect(detail.chapters.map((entry) => [entry.id, entry.title, entry.content])).toEqual([
+      [chapter.id, "The Door", "One, revised.\n"],
+      [second.id, "Two", "Two.\n"]
+    ]);
+    expect(detail.chapters[1]).toMatchObject({ synopsis: "The crossing.", notes: "Keep the details." });
+    expect(await readdir(join(root, ".studio", "trash", book.id))).toEqual([]);
+    const conflicts = await readdir(join(root, "books", book.id, "conflicts"));
+    expect(conflicts).toHaveLength(1);
+    expect(await readFile(join(root, "books", book.id, "conflicts", conflicts[0] ?? ""), "utf8")).toContain("Two.");
   });
 
   test("merges the chapters either side of a deleted one, which are next to each other in the book", async () => {

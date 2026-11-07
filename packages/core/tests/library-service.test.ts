@@ -357,7 +357,25 @@ describe("LibraryService over the in-memory port", () => {
       before?.sha256
     ]);
     expect(await port.readFile(libraryPathFromArchivePath(trashedAt))).toBeNull();
-    await expect(service.restoreChapter(book.id, chapter.id, trashedAt)).rejects.toMatchObject({ code: "not-found" });
+    await expect(service.restoreChapter(book.id, chapter.id, trashedAt)).rejects.toMatchObject({
+      code: "invalid",
+      message: "That chapter is already in the book. Nothing was moved."
+    });
+  });
+
+  test("refuses an already restored chapter before checking whether its trash file remains", async () => {
+    const { port, service } = await openLibrary();
+    const book = await service.createBook({ title: "Book" });
+    const chapter = await service.createChapter(book.id, { title: "One", content: "Keep me.\n" });
+    const { trashedAt } = await service.deleteChapter(book.id, chapter.id);
+
+    await port.moveFile(libraryPathFromArchivePath(trashedAt), chapterPath(book.id, chapter.path));
+
+    await expect(service.restoreChapter(book.id, chapter.id, trashedAt)).rejects.toMatchObject({
+      code: "invalid",
+      message: "That chapter is already in the book. Nothing was moved."
+    });
+    expect((await service.readBook(book.id)).chapters.map((entry) => entry.id)).toEqual([chapter.id]);
   });
 
   test("a newer schema is refused instead of silently dropped", async () => {

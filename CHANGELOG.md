@@ -524,6 +524,11 @@ Update the `Unreleased` section before every commit.
 
 ### Changed
 
+- Restoring a chapter from the trash checks whether that chapter is already in the book inside the book's write
+  lock, before it reads the trash file. A restore that races another one, or an undo that finds the chapter
+  already returned, now gets "that chapter is already in the book" and nothing is moved, instead of a missing-file
+  error. A test also covers a merge whose first save conflicts: the second chapter comes back from the trash
+  with its id, synopsis and notes, and the author's combined text is kept as a conflict copy.
 - The film script's 0:00 capture note also removes the copy's empty `checkpoints/`, `conflicts/` and
   `threads/` folders, so Finder shows only what existed before the event.
 - The web build leaves out code the browser never runs, so the SC-009 perf gate has room again
