@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_SPEECH_DURATION_MS,
+  bytesToBase64,
   inspectWav,
+  openRouterSpeechRequest,
+  OPENROUTER_STT_MODELS,
+  parseOpenRouterSpeechResponse,
   parseSpeechResponse,
   speechCapability,
+  speechModels,
   speechForm
 } from "../src/providers/speech";
 
@@ -123,6 +128,48 @@ describe("Meta speech request", () => {
     });
     expect(speechCapability("openai", "https://api.openai.com/v1")).toBeNull();
   });
+
+  test("encodes recording bytes as standard padded base64 at every length around a slice boundary", () => {
+    // The encoder works in slices of 24,576 bytes, so check lengths either side of one and two slices.
+    const slice = 3 * 8192;
+    for (const length of [0, 1, 2, 3, 4, 5, slice - 1, slice, slice + 1, slice + 2, 2 * slice, 2 * slice + 1]) {
+      const bytes = new Uint8Array(length).map((_, index) => (index * 17 + 3) & 255);
+      expect(bytesToBase64(bytes)).toBe(Buffer.from(bytes).toString("base64"));
+    }
+    // A view into a larger buffer encodes only its own bytes.
+    const whole = new Uint8Array([9, 9, 82, 73, 70, 70, 9]);
+    expect(bytesToBase64(whole.subarray(2, 6))).toBe("UklGRg==");
+  });
+
+  test("encodes a ten-minute recording without a pile of short-lived strings", () => {
+    // 600 s of 16 kHz 16-bit mono: the longest the provider accepts. The earlier encoder built about
+    // 800 MB of heap for this and took seconds in the main process.
+    const bytes = new Uint8Array(600 * 16_000 * 2).map((_, index) => (index * 31 + 7) & 255);
+    Bun.gc(true);
+    const before = process.memoryUsage().heapUsed;
+    const started = performance.now();
+    const encoded = bytesToBase64(bytes);
+    const elapsed = performance.now() - started;
+    const grown = process.memoryUsage().heapUsed - before;
+
+    expect(encoded.length).toBe(Math.ceil(bytes.length / 3) * 4);
+    expect(encoded.startsWith(Buffer.from(bytes.subarray(0, 300)).toString("base64"))).toBe(true);
+    expect(elapsed).toBeLessThan(2_000);
+    expect(grown).toBeLessThan(300_000_000);
+  });
+
+  test("lists the curated OpenRouter models and builds JSON/base64 audio requests", () => {
+    expect(speechModels("openrouter").map((choice) => choice.id)).toEqual([...OPENROUTER_STT_MODELS]);
+    expect(speechCapability("openrouter", undefined, "openai/whisper-large-v3-turbo")).toMatchObject({
+      endpoint: "https://openrouter.ai/api/v1/audio/transcriptions",
+      model: "openai/whisper-large-v3-turbo"
+    });
+    expect(openRouterSpeechRequest(new Uint8Array([82, 73, 70, 70]), "openai/whisper-1")).toEqual({
+      model: "openai/whisper-1",
+      input_audio: { data: "UklGRg==", format: "wav" }
+    });
+    expect(() => openRouterSpeechRequest(new Uint8Array(), "unlisted/model")).toThrow(/supported OpenRouter/i);
+  });
 });
 
 describe("Meta speech response", () => {
@@ -152,5 +199,21 @@ describe("Meta speech response", () => {
 
   test("refuses a response without a transcript", () => {
     expect(() => parseSpeechResponse({ turns: [] })).toThrow(/without a transcript/);
+  });
+});
+
+describe("OpenRouter speech response", () => {
+  test("preserves only provider-reported usage and trims text", () => {
+    expect(parseOpenRouterSpeechResponse({
+      text: "  The words are here. ",
+      usage: { seconds: 1.25, cost: 0.0004 }
+    })).toEqual({ text: "The words are here.", durationMs: 1250, costUsd: 0.0004 });
+  });
+
+  test("leaves usage unknown when the provider did not report it", () => {
+    expect(parseOpenRouterSpeechResponse({ text: "Hello." })).toEqual({
+      text: "Hello.", durationMs: null, costUsd: null
+    });
+    expect(() => parseOpenRouterSpeechResponse({ usage: { seconds: 1 } })).toThrow(/without a transcript/i);
   });
 });

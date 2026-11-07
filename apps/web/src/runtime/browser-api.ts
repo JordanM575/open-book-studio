@@ -339,6 +339,14 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
     },
     voice: {
       connections: () => safe(async () => []),
+      settings: () =>
+        Promise.resolve(
+          failure("unsupported", "Voice provider preferences are available in the desktop app only.")
+        ),
+      updateSettings: () =>
+        Promise.resolve(
+          failure("unsupported", "Voice provider preferences are available in the desktop app only.")
+        ),
       transcribe: () =>
         Promise.resolve(
           failure(
@@ -346,7 +354,16 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
             "Voice dictation is available in the desktop app. Meta browser access is not verified yet."
           )
         ),
-      speakers: () => safe(async () => ({ available: false, connectionLabel: null, endpoint: null, model: null, voices: [] })),
+      speakers: () => safe(async () => ({
+        available: false,
+        selected: false,
+        unavailable: false,
+        connectionId: null,
+        connectionLabel: null,
+        model: null,
+        voice: null,
+        voices: []
+      })),
       speak: () =>
         Promise.resolve(
           failure(

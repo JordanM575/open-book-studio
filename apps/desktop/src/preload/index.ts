@@ -128,6 +128,8 @@ const api: StudioApi = {
     summary: (bookId) => invoke(IPC.usage.summary, bookId)
   },
   voice: {
+    settings: () => invoke(IPC.voice.settings),
+    updateSettings: (preferences) => invoke(IPC.voice.updateSettings, preferences),
     connections: () => invoke(IPC.voice.connections),
     transcribe: (input) => invoke(IPC.voice.transcribe, input),
     speakers: () => invoke(IPC.voice.speakers),

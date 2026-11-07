@@ -72,7 +72,9 @@ import type { ProviderService } from "./providers";
 import type { AgentRuntime } from "./agent/runtime";
 import type { VoiceService } from "./voice";
 import type { SpeechService } from "./speech";
-import { ttsCapability } from "@ai-book-studio/core/providers/tts";
+import { ttsCapability, ttsModels } from "@ai-book-studio/core/providers/tts";
+import { speechModels } from "@ai-book-studio/core/providers/speech";
+import { isValidStoredVoicePreferences, voicePreferencesSchema } from "@ai-book-studio/core/providers/voice-preferences";
 import type { ImageService } from "./images";
 
 const folderInput = z.string().min(1).max(4096);
@@ -82,11 +84,9 @@ const hashInput = z.string().regex(/^[a-f0-9]{64}$/);
 const connectionId = connectionIdSchema;
 
 const speakInput = z.object({
-  connectionId: connectionIdSchema.optional(),
   text: z.string().min(1).max(200_000),
-  voice: z.string().min(1).max(40).optional(),
   speed: z.number().min(0.25).max(4).optional()
-});
+}).strict();
 
 const ambientRequestSchema = z.object({ bookId: idSchema, chapterId: idSchema });
 
@@ -938,38 +938,116 @@ export function registerIpc(
 
   /* --------------------------------------------------------------------- voice */
 
+  handle(IPC.voice.settings, () => settings.voicePreferences());
+
+  // Serialize validation with the corresponding write: an overlapping update must not restore
+  // an unavailable selection that an earlier update just cleared.
+  let pendingVoiceSettingsSave: Promise<void> = Promise.resolve();
+  handle(IPC.voice.updateSettings, async (payload) => {
+    const preferences = voicePreferencesSchema.parse(payload);
+    if (!isValidStoredVoicePreferences(preferences)) {
+      throw new ProviderError("invalid-request", "Choose a supported transcription model and speaking voice in Settings.");
+    }
+    const save = pendingVoiceSettingsSave.then(async () => {
+      const connected = await providers.list();
+      const previous = settings.voicePreferences();
+      const validateConnection = (
+        connectionId: string | null,
+        model: string | null,
+        kind: "transcription" | "speaking",
+        unchanged: boolean,
+        voice?: string | null
+      ): void => {
+        if (connectionId === null) return;
+        const connection = connected.find((entry) => entry.id === connectionId);
+        if (!connection) {
+          // Keep an already-saved stale choice only while repairing the other choice. Requests
+          // independently revalidate it and stop before sending; it is not a new selection.
+          if (unchanged) return;
+          throw new ProviderError("not-found", "That voice connection is no longer available. Choose another in Settings.");
+        }
+        const valid = kind === "transcription"
+          ? speechModels(connection.provider).some((choice) => choice.id === model)
+          : ttsModels(connection.provider).some((choice) => choice.id === model && choice.voices.includes(voice ?? ""));
+        if (!valid && !unchanged) {
+          throw new ProviderError(
+            "invalid-request",
+            kind === "transcription"
+              ? "That connection does not support the selected transcription model. Choose another model in Settings."
+              : "That connection does not support the selected model and voice. Choose another voice in Settings."
+          );
+        }
+      };
+      validateConnection(
+        preferences.transcription.connectionId,
+        preferences.transcription.model,
+        "transcription",
+        preferences.transcription.connectionId === previous.transcription.connectionId &&
+          preferences.transcription.model === previous.transcription.model
+      );
+      validateConnection(
+        preferences.speaking.connectionId,
+        preferences.speaking.model,
+        "speaking",
+        preferences.speaking.connectionId === previous.speaking.connectionId &&
+          preferences.speaking.model === previous.speaking.model &&
+          preferences.speaking.voice === previous.speaking.voice,
+        preferences.speaking.voice
+      );
+      await settings.update({ voicePreferences: preferences });
+      return preferences;
+    });
+    pendingVoiceSettingsSave = save.then(() => {}, () => {});
+    return save;
+  });
+
   handle(IPC.voice.connections, () => voice.connections());
 
   const voiceInput = z.object({
-    connectionId: connectionId.optional(),
     audio: z.union([z.instanceof(ArrayBuffer), z.instanceof(Uint8Array)]),
+    expectedSelection: z.object({
+      connectionId: connectionIdSchema,
+      model: z.string().min(1).max(200)
+    }).strict(),
     languageBias: z.array(z.string().trim().min(1).max(40)).max(4).optional(),
     keywords: z.array(z.string().trim().min(1).max(80)).max(50).optional()
-  });
+  }).strict();
 
   handle(IPC.voice.transcribe, async (payload) => {
     const input = voiceInput.parse(payload);
     return voice.transcribe({
-      ...(input.connectionId ? { connectionId: input.connectionId } : {}),
       audio: new Uint8Array(input.audio),
+      expectedSelection: input.expectedSelection,
       ...(input.languageBias?.length ? { languageBias: input.languageBias } : {}),
       ...(input.keywords?.length ? { keywords: input.keywords } : {})
     });
   });
 
   handle(IPC.voice.speakers, async (): Promise<VoiceSpeakers> => {
-    const available = await speech.connections();
-    const first = available[0];
-    if (!first) {
-      return { available: false, connectionLabel: null, endpoint: null, model: null, voices: [] };
+    const selected = settings.voicePreferences().speaking;
+    if (!selected.connectionId || !selected.model || !selected.voice) {
+      return {
+        available: false,
+        selected: false,
+        unavailable: false,
+        connectionId: null,
+        connectionLabel: null,
+        model: null,
+        voice: null,
+        voices: []
+      };
     }
-    const credential = await providers.credential(first.id);
-    const capability = ttsCapability(credential.provider, credential.metadata?.baseUrl);
+    const connection = (await providers.list()).find((entry) => entry.id === selected.connectionId);
+    const capability = connection ? ttsCapability(connection.provider, undefined, selected.model) : null;
+    const available = capability?.voices.includes(selected.voice) ?? false;
     return {
-      available: capability !== null,
-      connectionLabel: first.label,
-      endpoint: capability?.endpoint ?? null,
-      model: capability?.model ?? null,
+      available,
+      selected: true,
+      unavailable: !available,
+      connectionId: selected.connectionId,
+      connectionLabel: connection?.label ?? null,
+      model: selected.model,
+      voice: selected.voice,
       voices: capability ? [...capability.voices] : []
     };
   });
@@ -978,8 +1056,6 @@ export function registerIpc(
     const input = speakInput.parse(payload);
     const result = await speech.speak({
       text: input.text,
-      ...(input.connectionId ? { connectionId: input.connectionId } : {}),
-      ...(input.voice ? { voice: input.voice as never } : {}),
       ...(input.speed !== undefined ? { speed: input.speed } : {})
     });
     // The audio goes back as a data URL so the renderer can play it without a second request.
@@ -990,7 +1066,8 @@ export function registerIpc(
       characters: result.characters,
       chunks: result.chunks,
       connectionLabel: result.connectionLabel,
-      model: result.model
+      model: result.model,
+      voice: result.voice
     } satisfies SpokenReply;
   });
 

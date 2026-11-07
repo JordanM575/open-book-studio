@@ -62,6 +62,8 @@ interface Props {
   selection?: EditorSelection | null;
   /** The retry schedule after a failed save. Tests shorten it; the studio uses the default. */
   retryDelaysMs?: readonly number[];
+  /** Changes when a voice selection or connection is saved in Settings. */
+  voiceStatusRevision?: number;
 }
 
 interface Base {
@@ -81,7 +83,8 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     illustration,
     illustrationData,
     selection,
-    retryDelaysMs = SAVE_RETRY_DELAYS_MS
+    retryDelaysMs = SAVE_RETRY_DELAYS_MS,
+    voiceStatusRevision = 0
   },
   ref
 ) {
@@ -403,6 +406,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
             <VoiceButton
               onText={insertTranscript}
               onError={(error) => setVoiceError(error.message)}
+              voiceStatusRevision={voiceStatusRevision}
             />
           </span>
         </div>

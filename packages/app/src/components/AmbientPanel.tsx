@@ -3,7 +3,6 @@ import { ChevronDown, ChevronUp, Mic, MicOff, Pause, Play, Volume2 } from "lucid
 import type { AmbientStatus } from "@ai-book-studio/core/agent/ambient";
 import type { AgentEvent } from "@ai-book-studio/core/agent";
 import { Button } from "@ai-book-studio/ui/button";
-import { NativeSelect, NativeSelectOption } from "@ai-book-studio/ui/components/native-select";
 import { must } from "../lib/utils";
 import { useSpeech } from "../hooks/use-speech";
 import { useDictation } from "../hooks/use-dictation";
@@ -16,6 +15,8 @@ interface Props {
   chapterTitle: string;
   /** The chapter's text, so it can be read aloud without another round trip. */
   chapterContent: string;
+  /** Changes when Settings has saved a voice choice or changed a connection. */
+  voiceStatusRevision?: number;
   /** The next chapter, when there is one. */
   onNextChapter: () => void;
   /** One of this strip's turns, or its undo, may have changed chapters, so the workspace reloads them. */
@@ -43,6 +44,7 @@ export function AmbientPanel({
   chapterId,
   chapterTitle,
   chapterContent,
+  voiceStatusRevision,
   onNextChapter,
   onChanged,
   onNotice
@@ -53,25 +55,20 @@ export function AmbientPanel({
   const [note, setNote] = useState("");
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
-  const [voice, setVoice] = useState<string>("");
   const turnRef = useRef<string | null>(null);
   /** Whether the turn that just finished was spoken to, so its answer is spoken back. */
   const spokenRef = useRef(false);
   /** The answer so far. It is in state for the screen, and here for the handler that speaks it. */
   const replyRef = useRef("");
-  /*
-   * The chosen voice, for the event handler.
-   *
-   * The handler is reinstalled when the speaking function or the refresh changes, not on every voice
-   * change, so a ref is how it reads the voice the author picks later.
-   */
-  const voiceRef = useRef("");
-  voiceRef.current = voice;
   // Read through a ref for the same reason: the event handler is not reinstalled for it.
   const changedRef = useRef(onChanged);
   changedRef.current = onChanged;
-  const speech = useSpeech();
+  const speech = useSpeech(voiceStatusRevision);
   const [heard, setHeard] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (speech.error) setNote(speech.error);
+  }, [speech.error]);
 
   /*
    * The microphone.
@@ -139,8 +136,7 @@ export function AmbientPanel({
          */
         if (spokenRef.current) {
           spokenRef.current = false;
-          const chosen = voiceRef.current;
-          void speech.speak(replyRef.current.trim() || "Done.", chosen ? { voice: chosen } : {});
+          void speech.speak(replyRef.current.trim() || "Done.");
         }
       } else if (event.type === "stopped") {
         setRunning(false);
@@ -187,16 +183,16 @@ export function AmbientPanel({
       return;
     }
     setNote("");
-    void speech.speak(`${chapterTitle}. ${text}`, voice ? { voice } : {});
-  }, [chapterContent, chapterTitle, speech, voice]);
+    void speech.speak(`${chapterTitle}. ${text}`);
+  }, [chapterContent, chapterTitle, speech]);
 
   // Asked out loud, the answer is read fresh, so it is never a line from before the last change.
   const whereAmI = useCallback(async () => {
     setNote("");
     const fresh = (await refresh()) ?? status;
     if (!fresh) return;
-    void speech.speak(fresh.say, voice ? { voice } : {});
-  }, [refresh, status, speech, voice]);
+    void speech.speak(fresh.say);
+  }, [refresh, status, speech]);
 
   const undo = useCallback(async () => {
     try {
@@ -375,7 +371,7 @@ export function AmbientPanel({
             </Button>
             <input
               className="min-w-0 flex-1 rounded-[var(--corner-md)] border border-border bg-[var(--secondary)] px-3 py-2 text-(length:--text-subheadline-size) outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
-              placeholder={speech.supported ? "Say what you want, or type it" : "Type what you want"}
+              placeholder="Type what you want"
               value={input}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => {
@@ -407,38 +403,14 @@ export function AmbientPanel({
                   : `Listening… ${(dictation.elapsedMs / 1000).toFixed(1)}s`}
             </p>
           ) : null}
-          {speech.using === "tts" && speech.voices.length > 0 ? (
-            <label className="mt-3 flex items-center gap-2 text-(length:--text-caption-size) text-muted-foreground">
-              <span>Voice</span>
-              <NativeSelect
-                size="sm"
-                value={voice}
-                onChange={(event) => setVoice(event.target.value)}
-                data-testid="ambient-voice"
-              >
-                <NativeSelectOption value="">The studio&apos;s default</NativeSelectOption>
-                {speech.voices.map((name) => (
-                  <NativeSelectOption key={name} value={name}>
-                    {name}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </label>
-          ) : null}
-          {speech.fellBack ? (
-            <p className="mt-2 text-(length:--text-caption-size) text-muted-foreground" data-testid="ambient-fallback">
-              The studio&apos;s voice failed, so this computer&apos;s own voice read it instead.
-            </p>
-          ) : null}
           {speech.using === "device" ? (
             <p className="mt-2 text-(length:--text-caption-size) text-muted-foreground">
-              Speaking with this computer&apos;s own voice. Connect a voice service in Settings for
-              the studio&apos;s voice instead.
+              Speaking with this computer&apos;s own voice. Choose a provider, model and voice in Settings for read-aloud and spoken replies.
             </p>
           ) : null}
-          {!speech.supported ? (
+          {speech.statusMessage ? (
             <p className="mt-2 text-(length:--text-caption-size) text-muted-foreground">
-              This device cannot speak, so the agent shows its status instead of saying it.
+              {speech.statusMessage}
             </p>
           ) : null}
         </div>

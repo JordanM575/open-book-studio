@@ -3,6 +3,7 @@ import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, mock, tes
 import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
 import type { AmbientStatus } from "@ai-book-studio/core/agent/ambient";
+import type { Result, VoiceSpeakers } from "@ai-book-studio/core/ipc";
 
 /**
  * The minimal mode, end to end through its own component.
@@ -103,9 +104,8 @@ class FakeAudioContext {
 /**
  * What was said out loud.
  *
- * The panel asks the voice service first and falls back to the device's own voice. This test gives
- * it no service — the honest configuration for an author with no connection — and records the
- * utterances the device was asked to speak.
+ * Most tests select no service and record the utterances spoken by the device. A selected service
+ * never falls back to the device after a refusal or when the selection becomes unavailable.
  */
 let spoken: string[] = [];
 let started: Array<{ bookId: string; mode: string; prompt: string }> = [];
@@ -115,11 +115,13 @@ let listeners: Array<(event: { turnId: string; type: string; delta?: string; mes
 let turnId = "turn_amb000001";
 let voiceSpoken: string[] = [];
 let speakersAvailable = false;
+let speakersSelected = false;
 let startRefusal: string | null = null;
 let speakFails = false;
 /** When false, utterances stay open until a test ends them, which makes pausing observable. */
 let utteranceAutoEnd = true;
 let pendingEnds: Array<() => void> = [];
+let pendingErrors: Array<() => void> = [];
 let synthesisPauseCalls = 0;
 let synthesisResumeCalls = 0;
 /** The voice the room had before a test replaced it with the fake service reply. */
@@ -129,17 +131,24 @@ let audioOverridden = false;
 /** The voice service's reply, recorded rather than played. */
 class FakeAudio {
   static instances: FakeAudio[] = [];
+  static nextInitialPlay: Promise<void> | null = null;
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
   playedCount = 0;
   pausedCount = 0;
+  playResults: Array<Promise<void>> = [];
 
   constructor(readonly src: string) {
     FakeAudio.instances.push(this);
+    if (FakeAudio.nextInitialPlay) {
+      this.playResults.push(FakeAudio.nextInitialPlay);
+      FakeAudio.nextInitialPlay = null;
+    }
   }
 
   async play(): Promise<void> {
     this.playedCount += 1;
+    return this.playResults.shift();
   }
 
   pause(): void {
@@ -150,6 +159,17 @@ class FakeAudio {
   end(): void {
     this.onended?.();
   }
+
+  fail(): void {
+    this.onerror?.();
+  }
+}
+
+function deferredPlay() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((accept, refuse) => { resolve = accept; reject = refuse; });
+  return { promise, resolve, reject };
 }
 
 function studio() {
@@ -171,12 +191,24 @@ function studio() {
       }
     },
     voice: {
+      settings: async () => ({ ok: true, data: {
+        transcription: { connectionId: "conn_meta000001", model: "muse-voice-transcribe-1.0" },
+        speaking: { connectionId: null, model: null, voice: null }
+      } }),
+      connections: async () => ({ ok: true, data: [{ id: "conn_meta000001", provider: "meta" }] }),
       transcribe: async () => {
         if (transcribeFails) return { ok: false, error: { code: "invalid", message: "The key was rejected." } };
         return { ok: true, data: { text: transcript } };
       },
       // No speaking connection unless a test asks for one, which is what most authors have on day one.
-      speakers: async () => ({ ok: true, data: { available: speakersAvailable, voices: speakersAvailable ? ["alloy"] : [] } }),
+      speakers: async () => ({ ok: true, data: {
+        available: speakersAvailable,
+        selected: speakersSelected || speakersAvailable,
+        unavailable: speakersSelected && !speakersAvailable,
+        connectionLabel: null,
+        model: null,
+        voices: speakersAvailable ? ["alloy"] : []
+      } }),
       speak: async (input: { text: string }) => {
         voiceSpoken.push(input.text);
         if (speakFails) return { ok: false, error: { code: "invalid", message: "The voice was rejected." } };
@@ -194,13 +226,16 @@ beforeEach(() => {
   transcribeFails = false;
   voiceSpoken = [];
   speakersAvailable = false;
+  speakersSelected = false;
   startRefusal = null;
   speakFails = false;
   utteranceAutoEnd = true;
   pendingEnds = [];
+  pendingErrors = [];
   synthesisPauseCalls = 0;
   synthesisResumeCalls = 0;
   FakeAudio.instances = [];
+  FakeAudio.nextInitialPlay = null;
   FakeRecorder.instances = [];
   (window as unknown as { studio: unknown }).studio = studio();
   (globalThis as { MediaRecorder?: unknown }).MediaRecorder = FakeRecorder;
@@ -214,10 +249,13 @@ beforeEach(() => {
   };
   Object.defineProperty(window, "speechSynthesis", {
     value: {
-      speak: (utterance: { text: string; onend?: (() => void) | null }) => {
+      speak: (utterance: { text: string; onend?: (() => void) | null; onerror?: (() => void) | null }) => {
         spoken.push(utterance.text);
         if (utteranceAutoEnd) utterance.onend?.();
-        else pendingEnds.push(() => utterance.onend?.());
+        else {
+          pendingEnds.push(() => utterance.onend?.());
+          pendingErrors.push(() => utterance.onerror?.());
+        }
       },
       cancel: () => {},
       pause: () => {
@@ -252,19 +290,39 @@ afterEach(() => {
   }
 });
 
-function render() {
+function render(voiceStatusRevision = 0) {
   const onNotice = mock(() => {});
-  const view = testing.render(
-    React.createElement(AmbientPanel, {
-      bookId: BOOK,
-      chapterId: null,
-      chapterTitle: "The Light",
-      chapterContent: "The storm came in low.",
-      onNextChapter: () => {},
-      onNotice
-    })
-  );
-  return { view, onNotice };
+  const props = {
+    bookId: BOOK,
+    chapterId: null,
+    chapterTitle: "The Light",
+    chapterContent: "The storm came in low.",
+    onNextChapter: () => {},
+    onNotice
+  };
+  const view = testing.render(React.createElement(AmbientPanel, { ...props, voiceStatusRevision }));
+  const reviseVoiceStatus = (revision: number) =>
+    view.rerender(React.createElement(AmbientPanel, { ...props, voiceStatusRevision: revision }));
+  return { view, onNotice, reviseVoiceStatus };
+}
+
+function installFakeAudio() {
+  nativeAudio = (globalThis as { Audio?: unknown }).Audio;
+  (globalThis as { Audio?: unknown }).Audio = FakeAudio;
+  (window as { Audio?: unknown }).Audio = FakeAudio;
+  audioOverridden = true;
+}
+
+async function openProviderRead() {
+  speakersAvailable = true;
+  installFakeAudio();
+  const { view } = render();
+  await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+  await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+  await testing.act(async () => { await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud")); });
+  await testing.waitFor(() => expect(FakeAudio.instances).toHaveLength(1));
+  await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+  return { view, reply: FakeAudio.instances[0] as FakeAudio };
 }
 
 describe("the status line", () => {
@@ -550,6 +608,89 @@ describe("the hands-free loop", () => {
 });
 
 describe("reading the prose", () => {
+  test("refreshes speaking status after a Settings change and never falls back from an unavailable selection", async () => {
+    const { view, reviseVoiceStatus } = render();
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.waitFor(() => expect(view.getByText(/Speaking with this computer/)).toBeDefined());
+
+    speakersSelected = true;
+    reviseVoiceStatus(1);
+    await testing.waitFor(() => expect(view.getByText(/selected speaking connection is unavailable/)).toBeDefined());
+    expect(view.queryByText(/Speaking with this computer/)).toBeNull();
+    expect(view.queryByText(/This device cannot speak/)).toBeNull();
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent).toContain("unavailable"));
+    expect(spoken).toEqual([]);
+    expect(voiceSpoken).toEqual([]);
+
+    speakersSelected = false;
+    reviseVoiceStatus(2);
+    await testing.waitFor(() => expect(view.getByText(/Speaking with this computer/)).toBeDefined());
+  });
+
+  test("an old speaking-status response cannot overwrite a newer Settings change", async () => {
+    let finishFirst!: (result: Result<VoiceSpeakers>) => void;
+    let reads = 0;
+    const voice = (window as unknown as { studio: { voice: { speakers: () => Promise<Result<VoiceSpeakers>> } } }).studio.voice;
+    voice.speakers = async () => {
+      reads += 1;
+      if (reads === 1) return new Promise((resolve) => { finishFirst = resolve; });
+      return { ok: true, data: { available: false, selected: true, unavailable: true, connectionLabel: null, model: null, voices: [] } };
+    };
+    const { view, reviseVoiceStatus } = render();
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.waitFor(() => expect(reads).toBe(1));
+    reviseVoiceStatus(1);
+    await testing.waitFor(() => expect(view.getByText(/selected speaking connection is unavailable/)).toBeDefined());
+    await testing.act(async () => {
+      finishFirst({ ok: true, data: { available: false, selected: false, unavailable: false, connectionLabel: null, model: null, voices: [] } });
+    });
+    expect(view.getByText(/selected speaking connection is unavailable/)).toBeDefined();
+    expect(view.queryByText(/Speaking with this computer/)).toBeNull();
+  });
+
+  test("a stale status read cannot start device speech after Settings changes", async () => {
+    let finishSpeechRead!: (result: Result<VoiceSpeakers>) => void;
+    let reads = 0;
+    const voice = (window as unknown as { studio: { voice: { speakers: () => Promise<Result<VoiceSpeakers>> } } }).studio.voice;
+    voice.speakers = async () => {
+      reads += 1;
+      if (reads === 2) return new Promise((resolve) => { finishSpeechRead = resolve; });
+      return { ok: true, data: {
+        available: false, selected: reads > 2, unavailable: reads > 2,
+        connectionLabel: null, model: null, voices: []
+      } };
+    };
+    const { view, reviseVoiceStatus } = render();
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.waitFor(() => expect(view.getByText(/Speaking with this computer/)).toBeDefined());
+    await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    await testing.waitFor(() => expect(reads).toBe(2));
+
+    reviseVoiceStatus(1);
+    await testing.waitFor(() => expect(view.getByText(/selected speaking connection is unavailable/)).toBeDefined());
+    await testing.act(async () => {
+      finishSpeechRead({ ok: true, data: {
+        available: false, selected: false, unavailable: false,
+        connectionLabel: null, model: null, voices: []
+      } });
+    });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent).toContain("Speaking settings changed"));
+    expect(spoken).toEqual([]);
+    expect(voiceSpoken).toEqual([]);
+  });
+
+  test("a failed status read does not claim the device cannot speak", async () => {
+    const voice = (window as unknown as { studio: { voice: { speakers: () => Promise<Result<VoiceSpeakers>> } } }).studio.voice;
+    voice.speakers = async () => ({ ok: false, error: { code: "unknown", message: "Unavailable." } });
+    const { view } = render();
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.waitFor(() => expect(view.getByText(/Speaking settings could not be read/)).toBeDefined());
+    expect(view.queryByText(/This device cannot speak/)).toBeNull();
+  });
+
   test("offers to read the chapter, and reads it when asked", async () => {
     const { view } = render();
     await testing.waitFor(() =>
@@ -562,7 +703,7 @@ describe("reading the prose", () => {
     await testing.waitFor(() => expect(spoken[0] ?? "").toContain("The Light. The storm came in low."));
   });
 
-  test("a refused voice service falls back to the device voice and says so", async () => {
+  test("a refused selected voice service does not fall back to another voice", async () => {
     speakersAvailable = true;
     speakFails = true;
     const { view } = render();
@@ -570,15 +711,12 @@ describe("reading the prose", () => {
       expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One")
     );
     await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
-    // Wait for the voice listing so the read goes through the service first, not straight
-    // to the device.
-    await testing.waitFor(() => expect(view.getByTestId("ambient-voice")).toBeDefined());
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
     });
-    await testing.waitFor(() => expect(spoken).toEqual(["The Light. The storm came in low."]));
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent).toContain("The voice was rejected."));
+    expect(spoken).toEqual([]);
     expect(voiceSpoken).toEqual(["The Light. The storm came in low."]);
-    expect(view.getByTestId("ambient-fallback").textContent).toContain("studio's voice failed");
   });
 
   test("says where you are out loud, from the same status the line shows", async () => {
@@ -658,19 +796,188 @@ describe("reading the prose", () => {
     expect(synthesisPauseCalls).toBe(1);
   });
 
+  for (const outcome of ["resolve", "reject"] as const) {
+    test(`an old resume ${outcome} cannot change a newer paused provider utterance`, async () => {
+      const { view, reply } = await openProviderRead();
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading"));
+      const pending = deferredPlay();
+      reply.playResults.push(pending.promise);
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      expect(reply.playedCount).toBe(2);
+
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+      await testing.waitFor(() => expect(FakeAudio.instances).toHaveLength(2));
+      const newer = FakeAudio.instances[1] as FakeAudio;
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading"));
+      await testing.act(async () => {
+        if (outcome === "resolve") pending.resolve();
+        else pending.reject(new Error("old playback failure"));
+      });
+      expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+      expect(view.queryByTestId("ambient-note")).toBeNull();
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.waitFor(() => expect(newer.playedCount).toBe(2));
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+      expect(spoken).toEqual([]);
+    });
+  }
+
+  test("a failed resume reports playback failure without switching voice", async () => {
+    const { view, reply } = await openProviderRead();
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    const pending = deferredPlay();
+    reply.playResults.push(pending.promise);
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    await testing.act(async () => { pending.reject(new Error("private playback detail")); });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent)
+      .toBe("The selected speaking service returned audio, but playback was blocked. Try reading again."));
+    expect(view.queryByTestId("ambient-pause")).toBeNull();
+    expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One");
+    expect(voiceSpoken).toEqual(["The Light. The storm came in low."]);
+    expect(spoken).toEqual([]);
+  });
+
+  test("repeated resume presses do not start overlapping play attempts", async () => {
+    const { view, reply } = await openProviderRead();
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    const pending = deferredPlay();
+    reply.playResults.push(pending.promise);
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    expect(reply.playedCount).toBe(2);
+    await testing.act(async () => { pending.resolve(); });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+  });
+
+  for (const rejectAfterResume of [false, true]) {
+    test(`an interrupted initial play rejection cannot end the utterance ${rejectAfterResume ? "after resume" : "while paused"}`, async () => {
+      const pending = deferredPlay();
+      FakeAudio.nextInitialPlay = pending.promise;
+      const { view, reply } = await openProviderRead();
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      if (!rejectAfterResume) {
+        await testing.act(async () => { pending.reject(new Error("play interrupted by pause")); });
+        expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+      }
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.waitFor(() => expect(reply.playedCount).toBe(2));
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+      if (rejectAfterResume) {
+        await testing.act(async () => { pending.reject(new Error("play interrupted by pause")); });
+        expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading");
+      }
+      expect(view.queryByTestId("ambient-note")).toBeNull();
+    });
+  }
+
+  for (const event of ["end", "fail"] as const) {
+    test(`an old provider ${event} callback cannot change a newer utterance`, async () => {
+      const { view, reply } = await openProviderRead();
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+      await testing.waitFor(() => expect(FakeAudio.instances).toHaveLength(2));
+      const newer = FakeAudio.instances[1] as FakeAudio;
+      await testing.waitFor(() => expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading"));
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.act(async () => { reply[event](); });
+      expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+      expect(view.queryByTestId("ambient-note")).toBeNull();
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.waitFor(() => expect(newer.playedCount).toBe(2));
+      await testing.act(async () => { newer.end(); });
+      await testing.waitFor(() => expect(view.queryByTestId("ambient-pause")).toBeNull());
+    });
+  }
+
+  for (const event of ["end", "error"] as const) {
+    test(`an old device ${event} callback cannot change a newer utterance`, async () => {
+      utteranceAutoEnd = false;
+      const { view } = render();
+      await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+      await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+      await testing.waitFor(() => expect(pendingEnds).toHaveLength(1));
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+      await testing.waitFor(() => expect(pendingEnds).toHaveLength(2));
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      await testing.act(async () => { (event === "end" ? pendingEnds[0] : pendingErrors[0])?.(); });
+      expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+      expect(view.queryByTestId("ambient-note")).toBeNull();
+      await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+      expect(synthesisResumeCalls).toBe(1);
+      await testing.act(async () => { pendingEnds[1]?.(); });
+      await testing.waitFor(() => expect(view.queryByTestId("ambient-pause")).toBeNull());
+    });
+  }
+
+  test("an old provider failure cannot interrupt a newer device utterance", async () => {
+    utteranceAutoEnd = false;
+    const { view, reply } = await openProviderRead();
+    speakersAvailable = false;
+    await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    await testing.waitFor(() => expect(pendingEnds).toHaveLength(1));
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    await testing.act(async () => { reply.fail(); });
+    expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+    expect(view.queryByTestId("ambient-note")).toBeNull();
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    expect(synthesisResumeCalls).toBe(1);
+  });
+
+  test("an old device failure cannot interrupt a newer provider utterance", async () => {
+    utteranceAutoEnd = false;
+    installFakeAudio();
+    const { view } = render();
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    await testing.waitFor(() => expect(pendingEnds).toHaveLength(1));
+    speakersAvailable = true;
+    await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    await testing.waitFor(() => expect(FakeAudio.instances).toHaveLength(1));
+    const reply = FakeAudio.instances[0] as FakeAudio;
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    await testing.act(async () => { pendingErrors[0]?.(); });
+    expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+    expect(view.queryByTestId("ambient-note")).toBeNull();
+    await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+    await testing.waitFor(() => expect(reply.playedCount).toBe(2));
+    expect(spoken).toEqual(["The Light. The storm came in low."]);
+  });
+
+  test("a current provider audio failure is visible", async () => {
+    const { view, reply } = await openProviderRead();
+    await testing.act(async () => { reply.fail(); });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent)
+      .toBe("The selected speaking service returned audio that could not be played."));
+    expect(view.queryByTestId("ambient-pause")).toBeNull();
+    expect(spoken).toEqual([]);
+  });
+
+  test("a current device speech failure is visible", async () => {
+    utteranceAutoEnd = false;
+    const { view } = render();
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    await testing.waitFor(() => expect(pendingErrors).toHaveLength(1));
+    await testing.act(async () => { pendingErrors[0]?.(); });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-note").textContent)
+      .toBe("This device could not play the speech. Try reading again."));
+    expect(view.queryByTestId("ambient-pause")).toBeNull();
+    expect(voiceSpoken).toEqual([]);
+  });
+
   test("holds and goes on with the voice service's reply the same way", async () => {
     speakersAvailable = true;
-    nativeAudio = (globalThis as { Audio?: unknown }).Audio;
-    (globalThis as { Audio?: unknown }).Audio = FakeAudio;
-    (window as { Audio?: unknown }).Audio = FakeAudio;
-    audioOverridden = true;
+    installFakeAudio();
     const { view } = render();
     await testing.waitFor(() =>
       expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One")
     );
     await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
-    // Wait for the voice listing so the read goes through the service, not the device.
-    await testing.waitFor(() => expect(view.getByTestId("ambient-voice")).toBeDefined());
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
     });

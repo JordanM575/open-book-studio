@@ -30,6 +30,7 @@
     "tests/review-report.test.tsx",
     "tests/story-bible-dialog.test.tsx",
     "tests/settings-status.test.tsx",
+    "tests/voice-settings.test.tsx",
     "tests/dictation-hook.test.ts",
     "tests/ambient-panel.test.ts",
     "tests/notice.test.tsx",

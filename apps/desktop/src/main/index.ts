@@ -8,6 +8,7 @@ import {
   SYNC_EVENT_CHANNEL
 } from "@ai-book-studio/core/ipc";
 import type { DriftReport } from "@ai-book-studio/core/sync/types";
+import { DEFAULT_VOICE_PREFERENCES } from "@ai-book-studio/core/providers/voice-preferences";
 import { DraftBuffer } from "./drafts";
 import { ExitGuard, type ExitQuestion } from "./exit-guard";
 import { RecoveryStore } from "./recovery";
@@ -67,6 +68,7 @@ if (isTest && process.env.STUDIO_USER_DATA) {
 let mainWindow: BrowserWindow | null = null;
 let studio: Studio;
 let providers: ProviderService;
+let settingsStore: SettingsStore | null = null;
 let agentRuntime: AgentRuntime;
 let notifier: BackgroundNotifier;
 let backend: LocalBackend | null = null;
@@ -238,7 +240,11 @@ function createWindow(): BrowserWindow {
   if (process.env.STUDIO_LIVE_CHECK === "1") {
     void (async () => {
       try {
-        const results = await runLiveCheckInApp(providers, sampleLibraryPath());
+        const results = await runLiveCheckInApp(
+          providers,
+          sampleLibraryPath(),
+          settingsStore?.voicePreferences() ?? DEFAULT_VOICE_PREFERENCES
+        );
         const failed = results.filter((result) => result.outcome === "failed").length;
         console.log(`[live] result ${JSON.stringify(results)}`);
         app.exit(failed === 0 ? 0 : 1);
@@ -390,6 +396,7 @@ const started = app.whenReady().then(async () => {
   }
 
   const settings = new SettingsStore();
+  settingsStore = settings;
   await settings.load();
   studio = new Studio(settings, new DraftBuffer(), new RecoveryStore(join(app.getPath("userData"), "recovery")));
   exitGuard = new ExitGuard(studio, { headless, ask: askBeforeExit });
@@ -475,8 +482,8 @@ const started = app.whenReady().then(async () => {
 
   const vault = createDesktopVault();
   providers = new ProviderService(vault, (url) => shell.openExternal(url));
-  const voice = new VoiceService(providers);
-  const speech = new SpeechService(providers);
+  const voice = new VoiceService(providers, fetch, () => settings.voicePreferences());
+  const speech = new SpeechService(providers, fetch, () => settings.voicePreferences());
   const images = new ImageService(providers);
   void vault.repairPermissions().then((permissions) => {
     if (permissions === "corrected") {

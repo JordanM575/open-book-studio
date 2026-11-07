@@ -44,6 +44,7 @@ spec's Assumptions section. An `Open` decision blocks the task that needs it, no
 | D-114 | Bun tests core/adapters; Playwright on Node for browser and Electron E2E; live-provider tests opt in | spec 012 |
 | D-161 | Provider settings shows each connection's status from the author's last explicit Test only, with a volatile check time that clears when Settings closes; opening Settings never probes. Voice shows configured availability from `voice.connections()`/`voice.speakers()` with no check time and states it is never tested automatically. A stored health fact would need its own sync (FR-001), background checks would violate the no-background-network-call non-goal, and probing voice via TTS/transcribe would send author text or audio. The protected-storage availability read on open is awaited, but for at most 2 seconds; an answer that has not arrived, or that fails, reads as unavailable and points at Check keychain. | spec 028 |
 | D-162 | Biome is the configured linter; `bun run lint` fails on errors and runs first in `verify`. Warnings stay advisory debt, headed by non-null assertions; suppressions name the reason and sit on the diagnostic line. | spec 012 T002 |
+| D-192 | Voice provider/model/voice choices are explicit, catalog-validated profile preferences; voice requests never switch to another paid connection | ADR 0015 |
 
 ## Open decisions
 
@@ -606,6 +607,18 @@ enforcement, and the D-124 device-identity question stands.
 | **Rejected** | Last writer wins: a Story Bible save wiped another device's character and the toolkit's memory. A version number in `book.json`: older files and other tools would not keep one. Refusing the documented arrays: one unknown shape would hide the whole book. Stripping unknown nested keys: silent data loss for whatever a newer build added. Copying only the overlapping fields: a copy that is a complete `book.json` can be read, diffed and restored by hand. Checking the schema only when the book is opened: another device can upgrade `book.json` while it is open. |
 | **Evidence** | `packages/core/src/library/book-merge.ts`, `packages/core/src/library/schema-guard.ts`; `packages/core/tests/book-merge.test.ts`; `apps/desktop/tests/story-bible-dialog.test.tsx` (real IPC over a temp library: another device's character, the toolkit's `add_memory`, an overlap with its copy); `apps/desktop/tests/book-json-safety.test.ts` (unknown nested fields, documented arrays, the agent's tools when another writer changed the same details, and a schema-2 refusal on every write path with the bytes unchanged). |
 | **Owner** | spec 002 FR-005, FR-008, FR-019 |
+
+### D-192 · Voice provider, model and voice choices
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-04, on the author's direction) |
+| **Question** | How do authors choose transcription and speaking services without provider probes, hidden model changes, manuscript storage or silent paid-provider fallback? |
+| **Decision** | Keep transcription connection/model and speaking connection/model/voice in the desktop app's `studio.json` profile, separate from book files and chat-model settings. Settings reads only local connection summaries and a curated catalog. The author explicitly selects each connection; no missing or removed choice triggers another provider. Keep Meta's multipart transcription contract, add OpenRouter's documented JSON/base64 STT contract, and use the documented OpenRouter speech endpoint only for curated models with verified model-specific voices and output formats. Preserve provider-reported usage only; otherwise cost remains unknown. Audio stays in memory and WAV is validated before a transcription request. The browser build refuses provider voice operations and may use only its existing device speech. |
+| **Alternatives rejected** | Select the first connected provider (connection order could change where paid text/audio goes); use the chat model as a speech model (different catalogs and endpoints); fetch catalogs when Settings opens (unneeded network call); accept arbitrary voice IDs (the provider can reject them); estimate cost from catalog prices (not request usage); fall back to a different paid connection after a refusal (silent spend and data disclosure). |
+| **Evidence** | [Spec 038 research](../specs/038-voice-options/research.md), the local catalog and provider-contract tests, `apps/desktop/tests/settings-store.test.ts`, `voice-service.test.ts`, `speech.test.ts` and `ipc-handlers.test.ts`. |
+| **Unblocks** | Spec 038 profile persistence, provider routes and Settings controls. |
+| **Owner** | spec 038 |
 
 ## Resolved browser decisions
 

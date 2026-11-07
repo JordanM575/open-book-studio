@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import type { AgentEvent } from "@ai-book-studio/core/agent";
 import { MUSE_SPARK_CONTRIBUTOR } from "@ai-book-studio/core/providers/compatibility";
 import { ProviderError } from "@ai-book-studio/core/providers/types";
+import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
 import { AgentRuntime } from "./agent/runtime";
 import { ImageService } from "./images";
 import { VoiceService } from "./voice";
@@ -39,9 +40,10 @@ const PHRASE = "The lighthouse keeper counted the ships that never came.";
  */
 export async function runLiveChecks(
   providers: ProviderService,
-  options: { sampleRoot: string }
+  options: { sampleRoot: string; voicePreferences?: VoicePreferences }
 ): Promise<LiveResult[]> {
   const results: LiveResult[] = [];
+  const voicePreferences = options.voicePreferences ?? DEFAULT_VOICE_PREFERENCES;
   const record = (name: string, outcome: LiveOutcome, detail: string): void => {
     results.push({ name, outcome, detail });
   };
@@ -156,7 +158,13 @@ export async function runLiveChecks(
 
   /* ------------------------------------------------------------- dictation */
 
-  {
+  if (!voicePreferences.transcription.connectionId || !voicePreferences.transcription.model) {
+    record("dictation", "blocked", "Choose a transcription connection and model in Settings to run the dictation check.");
+  } else {
+    const expectedSelection = {
+      connectionId: voicePreferences.transcription.connectionId,
+      model: voicePreferences.transcription.model
+    };
     const temp = await mkdtemp(join(tmpdir(), "studio-live-voice-"));
     try {
       const aiff = join(temp, "phrase.aiff");
@@ -167,7 +175,7 @@ export async function runLiveChecks(
       await run("say", ["-o", aiff, PHRASE]);
       await run("afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", aiff, wav]);
       const audio = new Uint8Array(await readFile(wav));
-      const transcript = await new VoiceService(providers).transcribe({ audio });
+      const transcript = await new VoiceService(providers, fetch, () => voicePreferences).transcribe({ audio, expectedSelection });
       const said = transcript.text.toLowerCase().replace(/[^a-z ]/g, "").trim();
       const words = PHRASE.toLowerCase().replace(/[^a-z ]/g, "").trim().split(" ");
       const heard = words.filter((word) => said.includes(word)).length;
@@ -186,13 +194,16 @@ export async function runLiveChecks(
 
   /* ------------------------------------------------------------- speaking */
 
-  {
+  if (!voicePreferences.speaking.connectionId || !voicePreferences.speaking.model || !voicePreferences.speaking.voice) {
+    record("speaking", "blocked", "Choose a speaking connection, model and voice in Settings to run the speaking check.");
+  } else {
     try {
-      const speakers = await new SpeechService(providers).connections();
+      const speech = new SpeechService(providers, fetch, () => voicePreferences);
+      const speakers = await speech.connections();
       if (speakers.length === 0) {
         record("speaking", "blocked", "No voice service is connected, so there is nothing to speak with.");
       } else {
-        const spoken = await new SpeechService(providers).speak({
+        const spoken = await speech.speak({
           text: "The lighthouse keeper counted the ships that never came. Shall I read it to you?"
         });
         const level = loudness(spoken.bytes, spoken.mimeType);

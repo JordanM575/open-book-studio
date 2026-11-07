@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { Loader2, Mic, MicOff, Square } from "lucide-react";
 import { Button } from "@ai-book-studio/ui/button";
-import { useDictation } from "../hooks/use-dictation";
+import { dictationReadiness, useDictation } from "../hooks/use-dictation";
 
 interface Props {
   onText: (text: string) => void;
   onError: (error: Error) => void;
   disabled?: boolean;
+  voiceStatusRevision?: number;
 }
 
 type Availability = "checking" | "ready" | "unavailable";
@@ -17,50 +18,29 @@ function elapsed(ms: number): string {
 }
 
 /**
- * The microphone is only enabled when a Meta connection exists and the build can call the desktop
- * transcription service. The web build reports no connections and gets the honest refusal.
+ * The indicator follows the saved selection, not the presence of an unrelated connection. The
+ * button can still be pressed when unavailable so its reason is announced through onError.
  */
-export function VoiceButton({ onText, onError, disabled = false }: Props) {
+export function VoiceButton({ onText, onError, disabled = false, voiceStatusRevision = 0 }: Props) {
   const [availability, setAvailability] = useState<Availability>("checking");
   const [reason, setReason] = useState("Checking voice access…");
   const { state, elapsedMs, start, stop } = useDictation({ onText, onError });
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: voiceStatusRevision triggers a fresh local settings check after the author changes Voice settings
   useEffect(() => {
     let live = true;
-    const voice = window.studio.voice;
-    if (!voice) {
-      setAvailability("unavailable");
-      setReason("Voice dictation is available in the desktop app.");
-      return () => {
-        live = false;
-      };
-    }
-    void voice
-      .connections()
+    setAvailability("checking");
+    setReason("Checking voice access…");
+    void dictationReadiness()
       .then((result) => {
         if (!live) return;
-        if (!result.ok) {
-          setAvailability("unavailable");
-          setReason(result.error.message);
-          return;
-        }
-        if (result.data.length === 0) {
-          setAvailability("unavailable");
-          setReason("Connect Meta in Settings to dictate with Muse Voice Transcribe.");
-          return;
-        }
-        setAvailability("ready");
-        setReason("Dictate with Muse Voice Transcribe");
-      })
-      .catch((error: unknown) => {
-        if (!live) return;
-        setAvailability("unavailable");
-        setReason(error instanceof Error ? error.message : "Voice dictation is not available.");
+        setAvailability(result.available ? "ready" : "unavailable");
+        setReason(result.reason);
       });
     return () => {
       live = false;
     };
-  }, []);
+  }, [voiceStatusRevision]);
 
   const busy = state === "requesting" || state === "transcribing";
   const recording = state === "recording";
@@ -76,7 +56,7 @@ export function VoiceButton({ onText, onError, disabled = false }: Props) {
         aria-label={recording ? "Stop dictation" : "Start dictation"}
         aria-pressed={recording}
         title={unavailable ? reason : recording ? "Stop and transcribe" : "Start dictation"}
-        disabled={unavailable || busy}
+        disabled={disabled || busy}
         onClick={() => {
           if (recording) stop();
           else void start();

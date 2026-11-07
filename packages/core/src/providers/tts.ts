@@ -3,12 +3,8 @@ import { ProviderError, type ProviderId } from "./types";
 /**
  * Speaking.
  *
- * `speech.ts` is the listening half: Meta's transcription endpoint takes a WAV and returns words.
- * This is the other half. A voice pipeline needs both, because the agent's answer has to come back
- * out of the machine in a voice the author would recognise, not in the browser's default one.
- *
- * OpenAI's text-to-speech is the first adapter: a JSON request, and audio bytes back. The seam is
- * the provider, not OpenAI, so another voice service can be added without touching the caller.
+ * `speech.ts` handles transcription; this module describes the curated OpenAI and OpenRouter
+ * speaking models, their model-specific voices and audio formats, and the shared request helpers.
  */
 
 /** The OpenAI voices. Each one is a different speaker, not a different tone of the same one. */
@@ -41,6 +37,17 @@ export const TTS_MODELS = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"] as const;
 
 export type TtsModel = (typeof TTS_MODELS)[number];
 
+/**
+ * The voices each model can speak with. `gpt-4o-mini-tts` offers all of them; `tts-1` and `tts-1-hd`
+ * support a smaller set, without `ballad` or `verse`, so a request that pairs those models with the
+ * other voices is refused by the provider.
+ */
+export function openAiVoices(model: string): readonly TtsVoice[] {
+  return model === "tts-1" || model === "tts-1-hd"
+    ? TTS_VOICES.filter((voice) => voice !== "ballad" && voice !== "verse")
+    : TTS_VOICES;
+}
+
 export const DEFAULT_TTS_MODEL: TtsModel = "gpt-4o-mini-tts";
 
 /**
@@ -52,17 +59,41 @@ export const DEFAULT_TTS_MODEL: TtsModel = "gpt-4o-mini-tts";
 export const MAX_TTS_CHARACTERS = 4_000;
 
 /**
- * The free path.
- *
- * OpenRouter has a real text-to-speech endpoint — the same `audio/speech` shape as OpenAI's — with
- * fifteen models behind it, and one of them is free. `fish-audio/s2.1-pro-free:free` needs no
- * voice, takes the words, and returns MP3, so a check that runs on every change costs nothing and
- * says exactly what it was given. Some of the other models there require a voice and reject one
- * they do not know, so a voice is only sent when the caller asked for it.
+ * The curated OpenRouter choices. This local snapshot is not a promise of provider availability;
+ * each model lists only its own voices and expected response format.
  */
-export const OPENROUTER_TTS_MODEL = "fish-audio/s2.1-pro-free:free";
-export const OPENROUTER_TTS_VOICES = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"] as const;
-export const OPENROUTER_TTS_SAMPLE_RATE = 24_000;
+export const OPENROUTER_TTS_MODELS = [
+  {
+    id: "heygen/heygen-voice-1",
+    label: "HeyGen Voice",
+    voices: ["nadine", "tabitha", "bram", "gareth", "noelle", "meredith", "sabrina", "lucian", "weston", "vincent"],
+    responseFormat: "pcm",
+    sampleRate: 44_100
+  },
+  {
+    id: "heygen/heygen-voice-1-turbo",
+    label: "HeyGen Voice Turbo",
+    voices: ["nadine", "tabitha", "bram", "gareth", "noelle", "meredith", "sabrina", "lucian", "weston", "vincent"],
+    responseFormat: "pcm",
+    sampleRate: 44_100
+  },
+  {
+    id: "mistralai/voxtral-mini-tts-2603",
+    label: "Mistral Voxtral Mini TTS",
+    voices: [
+      "en_paul_sad", "en_paul_neutral", "en_paul_happy", "en_paul_frustrated", "en_paul_cheerful",
+      "gb_oliver_sad", "gb_oliver_confident", "gb_jane_sarcasm", "gb_jane_sad", "gb_jane_frustrated",
+      "fr_marie_sad", "fr_marie_excited", "fr_marie_curious", "fr_marie_angry"
+    ],
+    responseFormat: "mp3",
+    sampleRate: null
+  }
+] as const;
+
+/** Backwards-compatible name for the first curated OpenRouter choice. */
+export const OPENROUTER_TTS_MODEL = OPENROUTER_TTS_MODELS[0].id;
+export const OPENROUTER_TTS_VOICES = OPENROUTER_TTS_MODELS[0].voices;
+export const OPENROUTER_TTS_SAMPLE_RATE = OPENROUTER_TTS_MODELS[0].sampleRate;
 
 /** OpenAI's slowest and fastest speaking rates. */
 export const MIN_TTS_SPEED = 0.25;
@@ -75,14 +106,33 @@ export interface TtsCapability {
   /** The voices worth offering. Empty when the provider picks its own. */
   voices: readonly string[];
   /**
-   * The voice to send when the caller did not choose one.
-   *
-   * OpenAI requires a voice, so it names one. OpenRouter's free model does not, and its other
-   * models want voices the studio does not know, so the choice is left alone there.
+   * A catalog default for callers that need one. Saved author preferences are checked separately
+   * and a failed or unavailable saved selection must not silently use this default.
    */
   defaultVoice?: string;
   /** The sample rate of raw PCM, when a provider may answer with that instead of a file. */
   sampleRate?: number;
+  responseFormat: "mp3" | "pcm";
+}
+
+export interface TtsModelChoice {
+  id: string;
+  label: string;
+  voices: readonly string[];
+}
+
+export function ttsModels(provider: ProviderId): TtsModelChoice[] {
+  if (provider === "openai") {
+    return TTS_MODELS.map((id) => ({ id, label: id, voices: openAiVoices(id) }));
+  }
+  if (provider === "openrouter") {
+    return OPENROUTER_TTS_MODELS.map(({ id, label, voices }) => ({ id, label, voices }));
+  }
+  return [];
+}
+
+export function isTtsChoice(provider: ProviderId, model: string, voice: string): boolean {
+  return ttsModels(provider).some((choice) => choice.id === model && choice.voices.includes(voice));
 }
 
 /**
@@ -92,23 +142,30 @@ export interface TtsCapability {
  * is one request and one set of responses to handle, not two. What differs is the model, and
  * whether a voice has to be named.
  */
-export function ttsCapability(provider: ProviderId, baseUrl?: string): TtsCapability | null {
+export function ttsCapability(provider: ProviderId, baseUrl?: string, model?: string): TtsCapability | null {
   if (provider === "openai") {
+    const selectedModel = model ?? DEFAULT_TTS_MODEL;
+    if (!TTS_MODELS.includes(selectedModel as TtsModel)) return null;
     return {
       provider,
       endpoint: `${normalizeTtsBase(baseUrl, "https://api.openai.com/v1")}/audio/speech`,
-      model: DEFAULT_TTS_MODEL,
-      voices: TTS_VOICES,
-      defaultVoice: DEFAULT_TTS_VOICE
+      model: selectedModel,
+      voices: openAiVoices(selectedModel),
+      defaultVoice: DEFAULT_TTS_VOICE,
+      responseFormat: "mp3"
     };
   }
   if (provider === "openrouter") {
+    const selected = OPENROUTER_TTS_MODELS.find((choice) => choice.id === (model ?? OPENROUTER_TTS_MODEL));
+    if (!selected) return null;
     return {
       provider,
       endpoint: `${normalizeTtsBase(baseUrl, "https://openrouter.ai/api/v1")}/audio/speech`,
-      model: OPENROUTER_TTS_MODEL,
-      voices: OPENROUTER_TTS_VOICES,
-      sampleRate: OPENROUTER_TTS_SAMPLE_RATE
+      model: selected.id,
+      voices: selected.voices,
+      defaultVoice: selected.voices[0],
+      ...(selected.sampleRate ? { sampleRate: selected.sampleRate } : {}),
+      responseFormat: selected.responseFormat
     };
   }
   return null;
@@ -134,7 +191,7 @@ function normalizeTtsBase(baseUrl: string | undefined, fallback: string): string
 }
 
 export interface TtsOptions {
-  voice?: TtsVoice | undefined;
+  voice?: string | undefined;
   /** The model to use. Each provider names its own, so this is not limited to OpenAI's three. */
   model?: string | undefined;
   /** 0.25 to 4. */
@@ -145,6 +202,7 @@ export interface TtsOptions {
    * "Read this slowly, and pause at the full stops." Ignored by the `tts-1` models.
    */
   instructions?: string;
+  responseFormat?: "mp3" | "pcm";
 }
 
 /** The JSON body OpenAI documents. */
@@ -164,7 +222,7 @@ export function ttsRequestBody(text: string, options: TtsOptions = {}): Record<s
     // Some providers require a voice and others reject one they do not know, so it is only sent
     // when the caller named it. The capability supplies the default where one is required.
     ...(options.voice ? { voice: options.voice } : {}),
-    response_format: "mp3",
+    response_format: options.responseFormat ?? "mp3",
     ...(options.speed !== undefined
       ? { speed: clampSpeed(options.speed) }
       : {}),

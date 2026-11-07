@@ -152,6 +152,15 @@ Update the `Unreleased` section before every commit.
   on write and not restore the final newline on read, so a save could change text it did not own.
   Seeded round-trip tests cover the serializer, the parser, CRLF headers and a save through the library service.
 
+- Keep concurrent local profile saves in order, and allow an author to repair removed voice
+  connections one at a time without introducing an unavailable choice or switching providers.
+  Reject incompatible, contradictory or truncated PCM speech responses instead of wrapping them
+  in a misleading WAV header; do not join explicitly non-MP3 responses as MP3. Refresh the
+  workspace's speaking status after Settings changes and distinguish unavailable choices from
+  a device that cannot speak; do not use a superseded status read to select a voice. Check the
+  selected transcription connection and model before opening the microphone, and refresh the
+  editor's dictation indicator when Settings changes. Bind each recording to its starting choice,
+  refuse a changed choice at submission, and isolate cancelled recording callbacks from later ones.
 - Recognize Meta's listed Muse Wonder 1.0 as a tool-capable writing model using the documented
   context size and Standard-mode prices when the catalogue omits metadata. Existing turn attribution
   is preserved; Wonder Full and unverified Contributor variants are not enabled by this preset.
@@ -223,6 +232,16 @@ Update the `Unreleased` section before every commit.
 
 ### Added
 
+- Add local voice preferences for choosing Meta or OpenRouter transcription and OpenAI or
+  OpenRouter speaking models and their supported voices. Settings reads a local catalog without
+  probing providers; requests use only the author's selected connection, and browser provider
+  voice operations remain unsupported (spec 038, D-192).
+  The OpenAI models `tts-1` and `tts-1-hd` are offered only the voices they support (not `ballad` or `verse`, which
+  only `gpt-4o-mini-tts` has), in Settings, in saved choices and in the check before a request, so a pairing the
+  provider would refuse is never offered, saved or reported as available.
+  OpenRouter transcription encodes the recording a slice at a time instead of appending four characters per three
+  bytes, so a ten-minute dictation no longer holds about 800 MB of strings or stalls the main process while it is
+  encoded (about 1 s and 820 MB before, 40 ms and 60 MB after in a Node measurement of 19 MB).
 - Front and back matter for every export (spec 035 T007–T013, D-169 and D-170, accepted on the
   author's delegation). The Format dialog has a **Front and back matter** section. The author turns
   the generated title page on or off and gives it an author and a subtitle. They add copyright,

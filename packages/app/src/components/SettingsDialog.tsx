@@ -5,9 +5,11 @@ import { BROWSER_CREDENTIAL_DISCLOSURE } from "@ai-book-studio/core/providers/cr
 import { OPENROUTER_KEYS_PAGE_URL } from "@ai-book-studio/core/providers/links";
 import type { ConnectionSummary, CredentialStatus, ModelInfo, ProviderDescription, ProviderErrorCode, ProviderId } from "@ai-book-studio/core/providers/types";
 import { providerStatus, type ProviderLastCheck } from "@ai-book-studio/core/providers/status";
-import type { SyncSettings, VoiceSpeakers } from "@ai-book-studio/core/ipc";
+import type { SyncSettings, VoicePreferences, VoiceSpeakers } from "@ai-book-studio/core/ipc";
 import type { StorageSummary } from "@ai-book-studio/core/library/storage";
 import { browserAvailabilityCopy } from "@ai-book-studio/core/providers/registry";
+import { speechModels } from "@ai-book-studio/core/providers/speech";
+import { ttsModels } from "@ai-book-studio/core/providers/tts";
 import { Button } from "@ai-book-studio/ui/button";
 import { Badge } from "@ai-book-studio/ui/components/badge";
 import { NativeSelect, NativeSelectOption } from "@ai-book-studio/ui/components/native-select";
@@ -31,6 +33,8 @@ interface Props {
   onCheckForChanges?: (() => Promise<{ dirty: boolean }>) | undefined;
   /** Open on a particular section; reconnect uses "providers". */
   section?: SettingsSection | undefined;
+  /** Tell the workspace when a saved voice choice or connection may have changed. */
+  onVoiceConfigurationChanged?: (() => void) | undefined;
 }
 
 const PROVIDER_ERROR_CODES: readonly ProviderErrorCode[] = [
@@ -82,7 +86,15 @@ function ConnectionStatusLine({ check }: { check: ProviderLastCheck | undefined 
  * Voice availability from configured capability only. Voice is never probed, so there is
  * no check time here — only whether dictation and read-aloud have a connection (D-161).
  */
-function VoiceStatus({ voice }: { voice: { speakers: VoiceSpeakers | null; transcribeConnections: number } | null }) {
+function VoiceStatus({
+  voice,
+  preferences,
+  connections
+}: {
+  voice: { speakers: VoiceSpeakers | null } | null;
+  preferences: VoicePreferences | null;
+  connections: ConnectionSummary[] | null;
+}) {
   if (voice === null) {
     return (
       <p className="mt-2 text-(length:--text-subheadline-size) text-muted-foreground" data-testid="voice-status">
@@ -91,16 +103,22 @@ function VoiceStatus({ voice }: { voice: { speakers: VoiceSpeakers | null; trans
     );
   }
   const output = voice.speakers?.available === true;
-  const input = voice.transcribeConnections > 0;
+  const inputConnection = connections?.find((connection) => connection.id === preferences?.transcription.connectionId);
+  const input = Boolean(inputConnection && speechModels(inputConnection.provider).some((choice) => choice.id === preferences?.transcription.model));
+  const inputSelected = Boolean(preferences?.transcription.connectionId);
   return (
     <div data-testid="voice-status">
       <p className="mt-2 text-(length:--text-subheadline-size) text-muted-foreground">
-        {output
+        {voice.speakers?.unavailable
+          ? "The selected speaking connection is unavailable or its model or voice is no longer supported."
+          : output
           ? `Read-aloud is available${voice.speakers?.connectionLabel ? ` through ${voice.speakers.connectionLabel}` : ""}.`
           : "Read-aloud is not set up."}{" "}
         {input
-          ? `Dictation is available through ${voice.transcribeConnections} ${voice.transcribeConnections === 1 ? "connection" : "connections"}.`
-          : "Dictation is not set up."}
+          ? `Dictation is set to ${inputConnection?.label ?? "this connection"}.`
+          : inputSelected
+            ? "The selected transcription connection is unavailable or its model is no longer supported."
+            : "Dictation is not set up."}
       </p>
       <p className="mt-1 text-(length:--text-caption-size) text-muted-foreground">
         Voice is never tested automatically, so there is no check time here.
@@ -115,7 +133,7 @@ const THEMES: Array<{ id: ThemeChoice; label: string; icon: typeof Sun }> = [
   { id: "dark", label: "Dark", icon: Moon }
 ];
 
-export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoot, storage, deviceName, onCheckForChanges, section }: Props) {
+export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoot, storage, deviceName, onCheckForChanges, section, onVoiceConfigurationChanged }: Props) {
   const [syncSettings, setSyncSettings] = useState<SyncSettings | null>(null);
   const [syncUnsupported, setSyncUnsupported] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
@@ -198,7 +216,10 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   const [models, setModels] = useState<Record<string, ModelInfo[]>>({});
   /** The author's last explicit Test per connection. Volatile: cleared whenever Settings opens. */
   const [checks, setChecks] = useState<Record<string, ProviderLastCheck>>({});
-  const [voice, setVoice] = useState<{ speakers: VoiceSpeakers | null; transcribeConnections: number } | null>(null);
+  const [voice, setVoice] = useState<{ speakers: VoiceSpeakers | null } | null>(null);
+  const [voicePreferences, setVoicePreferences] = useState<VoicePreferences | null>(null);
+  const [voicePreferencesSupported, setVoicePreferencesSupported] = useState(false);
+  const [savingVoicePreferences, setSavingVoicePreferences] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState<boolean | null>(null);
   const [credentialStatus, setCredentialStatus] = useState<CredentialStatus | null>(null);
   const [checkingKeychain, setCheckingKeychain] = useState(false);
@@ -208,11 +229,28 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   const [keyBaseUrl, setKeyBaseUrl] = useState("");
   const [addingKey, setAddingKey] = useState(false);
   const [keyResult, setKeyResult] = useState<string | null>(null);
+  const transcriptionConnections = (connections ?? []).filter((connection) => speechModels(connection.provider).length > 0);
+  const speakingConnections = (connections ?? []).filter((connection) => ttsModels(connection.provider).length > 0);
+  const selectedTranscriptionConnection = connections?.find(
+    (connection) => connection.id === voicePreferences?.transcription.connectionId
+  );
+  const selectedSpeakingConnection = connections?.find(
+    (connection) => connection.id === voicePreferences?.speaking.connectionId
+  );
+  const transcriptionChoices = selectedTranscriptionConnection
+    ? speechModels(selectedTranscriptionConnection.provider)
+    : [];
+  const speakingChoices = selectedSpeakingConnection
+    ? ttsModels(selectedSpeakingConnection.provider)
+    : [];
+  const selectedSpeakingModel = speakingChoices.find((choice) => choice.id === voicePreferences?.speaking.model);
 
   const refresh = useCallback(async () => {
     // Check times are volatile: a fresh open forgets every previous explicit Test.
-    setChecks({});
-    setVoice(null);
+      setChecks({});
+      setVoice(null);
+      setVoicePreferences(null);
+      setVoicePreferencesSupported(false);
     try {
       const [providerList, connectionList, status] = await Promise.all([
         must(window.studio.providers.list()),
@@ -227,24 +265,40 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
       // capability and credential metadata, and carry no check time.
       try {
         if (window.studio.voice) {
-          const [transcribe, speakers] = await Promise.all([
-            window.studio.voice.connections(),
-            window.studio.voice.speakers()
-          ]);
-          if (transcribe.ok && speakers.ok) {
-            setVoice({ speakers: speakers.data, transcribeConnections: transcribe.data.length });
+          const speakers = await window.studio.voice.speakers();
+          const settings = await window.studio.voice.settings();
+          if (speakers.ok && settings.ok) {
+            setVoice({ speakers: speakers.data });
+            setVoicePreferences(settings.data);
+            setVoicePreferencesSupported(true);
             return;
           }
         }
       } catch {
         // Voice stays "not set up" below when it cannot be read.
       }
-      setVoice({ speakers: null, transcribeConnections: 0 });
+      setVoice({ speakers: null });
     } catch (error) {
       onNotice(error);
       setConnections([]);
     }
   }, [onNotice]);
+
+  const saveVoicePreferences = useCallback(async (preferences: VoicePreferences): Promise<void> => {
+    setSavingVoicePreferences(true);
+    try {
+      setVoicePreferences(await must(window.studio.voice.updateSettings(preferences)));
+      onVoiceConfigurationChanged?.();
+      const currentSpeakers = await window.studio.voice.speakers();
+      if (currentSpeakers.ok) {
+        setVoice((current) => current ? { ...current, speakers: currentSpeakers.data } : current);
+      }
+    } catch (error) {
+      onNotice(error);
+    } finally {
+      setSavingVoicePreferences(false);
+    }
+  }, [onNotice, onVoiceConfigurationChanged]);
 
   const checkKeychain = async (): Promise<void> => {
     setCheckingKeychain(true);
@@ -268,6 +322,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
     setResult((current) => ({ ...current, openrouter: "" }));
     try {
       await must(window.studio.connections.startOpenRouter());
+      onVoiceConfigurationChanged?.();
       await refresh();
       setResult((current) => ({
         ...current,
@@ -358,6 +413,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
           ...(keyProvider === "meta" && keyBaseUrl.trim() ? { baseUrl: keyBaseUrl.trim() } : {})
         })
       );
+      onVoiceConfigurationChanged?.();
       setKeySecret("");
       setKeyLabel("");
       setKeyBaseUrl("");
@@ -382,6 +438,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   const remove = async (connection: ConnectionSummary): Promise<void> => {    setBusy(connection.id);
     try {
       await must(window.studio.connections.remove(connection.id));
+      onVoiceConfigurationChanged?.();
       setRemoving(null);
       await refresh();
     } catch (error) {
@@ -638,7 +695,143 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
 
         <section className="mt-6" aria-label="Voice">
           <h3 className="text-(length:--text-callout-size) font-medium">Voice</h3>
-          <VoiceStatus voice={voice} />
+          <VoiceStatus voice={voice} preferences={voicePreferences} connections={connections} />
+          {build?.target === "web" ? (
+            <p className="mt-2 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-muted-foreground">
+              Provider transcription and speaking choices are available in the desktop app only. This build does not send voice requests to a provider.
+            </p>
+          ) : voicePreferencesSupported && voicePreferences ? (
+            <div className="mt-3 space-y-4" data-testid="voice-preferences">
+              <div className="space-y-2">
+                <h4 className="text-(length:--text-subheadline-size) font-medium">Dictation</h4>
+                <NativeSelect
+                  aria-label="Transcription connection"
+                  value={voicePreferences.transcription.connectionId ?? ""}
+                  disabled={savingVoicePreferences}
+                  onChange={(event) => {
+                    const connectionId = event.currentTarget.value || null;
+                    const selected = transcriptionConnections.find((connection) => connection.id === connectionId);
+                    const model = selected ? speechModels(selected.provider)[0]?.id ?? null : null;
+                    void saveVoicePreferences({
+                      ...voicePreferences,
+                      transcription: { connectionId, model }
+                    });
+                  }}
+                >
+                  <NativeSelectOption value="">Choose a connection</NativeSelectOption>
+                  {voicePreferences.transcription.connectionId &&
+                  !transcriptionConnections.some((connection) => connection.id === voicePreferences.transcription.connectionId) ? (
+                    <NativeSelectOption value={voicePreferences.transcription.connectionId}>Saved connection unavailable</NativeSelectOption>
+                  ) : null}
+                  {transcriptionConnections.map((connection) => (
+                    <NativeSelectOption key={connection.id} value={connection.id}>
+                      {connection.label} · {connection.provider === "meta" ? "Meta" : "OpenRouter"}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                <NativeSelect
+                  aria-label="Transcription model"
+                  value={voicePreferences.transcription.model ?? ""}
+                  disabled={savingVoicePreferences || !selectedTranscriptionConnection}
+                  onChange={(event) => {
+                    if (!selectedTranscriptionConnection) return;
+                    void saveVoicePreferences({
+                      ...voicePreferences,
+                      transcription: { ...voicePreferences.transcription, model: event.currentTarget.value || null }
+                    });
+                  }}
+                >
+                  <NativeSelectOption value="">Choose a model</NativeSelectOption>
+                  {voicePreferences.transcription.model && !transcriptionChoices.some((choice) => choice.id === voicePreferences.transcription.model) ? (
+                    <NativeSelectOption value={voicePreferences.transcription.model}>Saved model unavailable</NativeSelectOption>
+                  ) : null}
+                  {transcriptionChoices.map((choice) => (
+                    <NativeSelectOption key={choice.id} value={choice.id}>{choice.label}</NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </div>
+
+              <div className="space-y-2">
+                <h4 className="text-(length:--text-subheadline-size) font-medium">Read-aloud and agent replies</h4>
+                <NativeSelect
+                  aria-label="Speaking connection"
+                  value={voicePreferences.speaking.connectionId ?? ""}
+                  disabled={savingVoicePreferences}
+                  onChange={(event) => {
+                    const connectionId = event.currentTarget.value || null;
+                    const selected = speakingConnections.find((connection) => connection.id === connectionId);
+                    const model = selected ? ttsModels(selected.provider)[0] : undefined;
+                    void saveVoicePreferences({
+                      ...voicePreferences,
+                      speaking: {
+                        connectionId,
+                        model: model?.id ?? null,
+                        voice: model?.voices[0] ?? null
+                      }
+                    });
+                  }}
+                >
+                  <NativeSelectOption value="">Choose a connection</NativeSelectOption>
+                  {voicePreferences.speaking.connectionId &&
+                  !speakingConnections.some((connection) => connection.id === voicePreferences.speaking.connectionId) ? (
+                    <NativeSelectOption value={voicePreferences.speaking.connectionId}>Saved connection unavailable</NativeSelectOption>
+                  ) : null}
+                  {speakingConnections.map((connection) => (
+                    <NativeSelectOption key={connection.id} value={connection.id}>
+                      {connection.label} · {connection.provider === "openrouter" ? "OpenRouter" : "OpenAI"}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                <NativeSelect
+                  aria-label="Speaking model"
+                  value={voicePreferences.speaking.model ?? ""}
+                  disabled={savingVoicePreferences || !selectedSpeakingConnection}
+                  onChange={(event) => {
+                    const model = speakingChoices.find((choice) => choice.id === event.currentTarget.value);
+                    if (!model) return;
+                    void saveVoicePreferences({
+                      ...voicePreferences,
+                      speaking: { ...voicePreferences.speaking, model: model.id, voice: model.voices[0] ?? null }
+                    });
+                  }}
+                >
+                  <NativeSelectOption value="">Choose a model</NativeSelectOption>
+                  {voicePreferences.speaking.model && !speakingChoices.some((choice) => choice.id === voicePreferences.speaking.model) ? (
+                    <NativeSelectOption value={voicePreferences.speaking.model}>Saved model unavailable</NativeSelectOption>
+                  ) : null}
+                  {speakingChoices.map((choice) => (
+                    <NativeSelectOption key={choice.id} value={choice.id}>{choice.label}</NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                <NativeSelect
+                  aria-label="Speaking voice"
+                  value={voicePreferences.speaking.voice ?? ""}
+                  disabled={savingVoicePreferences || !selectedSpeakingModel}
+                  onChange={(event) => {
+                    void saveVoicePreferences({
+                      ...voicePreferences,
+                      speaking: { ...voicePreferences.speaking, voice: event.currentTarget.value || null }
+                    });
+                  }}
+                >
+                  <NativeSelectOption value="">Choose a voice</NativeSelectOption>
+                  {voicePreferences.speaking.voice && !selectedSpeakingModel?.voices.includes(voicePreferences.speaking.voice) ? (
+                    <NativeSelectOption value={voicePreferences.speaking.voice}>Saved voice unavailable</NativeSelectOption>
+                  ) : null}
+                  {selectedSpeakingModel?.voices.map((choice) => (
+                    <NativeSelectOption key={choice} value={choice}>{choice}</NativeSelectOption>
+                  ))}
+                </NativeSelect>
+                <p className="text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-muted-foreground">
+                  Choices are saved on this computer. Settings does not test a provider or send audio or text.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="mt-2 text-(length:--text-caption-size) text-muted-foreground">
+              Voice choices are unavailable in this build.
+            </p>
+          )}
         </section>
 
         <section className="mt-6">

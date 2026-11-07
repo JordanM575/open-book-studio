@@ -30,17 +30,28 @@ import type { AmbientStatus } from "./agent/ambient";
 import type { ImportManuscriptInput, ImportSourcePick } from "./manuscript-import";
 import type { LocationHealth } from "./sync/health";
 import type { BookMatter, SaveMatterResult } from "./matter";
+import type { VoicePreferences } from "./providers/voice-preferences";
+
+export type { VoicePreferences } from "./providers/voice-preferences";
 
 /** What the studio can speak with, and in which voices. */
 export interface VoiceSpeakers {
   /** Whether any connection can speak at all. */
   available: boolean;
+  /** Whether an explicit speaking selection exists in this profile. */
+  selected?: boolean;
+  /** Whether that saved connection is no longer available or capable. */
+  unavailable?: boolean;
+  /** The id is safe to expose and lets Settings show the selected connection. */
+  connectionId?: string | null;
   /** The connection the voice would come from. */
   connectionLabel: string | null;
-  /** Where the audio goes. */
-  endpoint: string | null;
+  /** Legacy field retained in the type for older renderer test fixtures; no longer populated. */
+  endpoint?: string | null;
   /** The model that will read. */
   model: string | null;
+  /** The model-specific selected voice. */
+  voice?: string | null;
   /** The voices to offer. */
   voices: string[];
 }
@@ -56,6 +67,7 @@ export interface SpokenReply {
   chunks: number;
   connectionLabel: string;
   model: string;
+  voice?: string;
 }
 
 /** The bridge to the phone, as the app's settings panel drives it. */
@@ -196,6 +208,8 @@ export const IPC = {
     summary: "usage:summary"
   },
   voice: {
+    settings: "voice:settings",
+    updateSettings: "voice:updateSettings",
     connections: "voice:connections",
     transcribe: "voice:transcribe",
     /** Connections that can speak, and the voices they offer. */
@@ -548,12 +562,17 @@ export interface StudioApi {
     summary(bookId: string): Promise<Result<UsageSummary>>;
   };
   voice: {
+    /** The current profile-local choices; this read never contacts a provider. */
+    settings(): Promise<Result<VoicePreferences>>;
+    /** Validate and atomically save the complete voice preference object. */
+    updateSettings(preferences: VoicePreferences): Promise<Result<VoicePreferences>>;
     /** Connections that can accept audio. Empty means dictation is not configured. */
     connections(): Promise<Result<ConnectionSummary[]>>;
     transcribe(input: {
-      connectionId?: string;
       /** Mono 16-bit PCM WAV at 16 kHz or 24 kHz. The main process validates it. */
       audio: ArrayBuffer;
+      /** Choice read before recording; main refuses if the saved choice no longer matches. */
+      expectedSelection: { connectionId: string; model: string };
       languageBias?: string[];
       keywords?: string[];
     }): Promise<Result<VoiceTranscript>>;
@@ -566,9 +585,7 @@ export interface StudioApi {
      * joins the audio back into one sound, so the caller plays one thing and stops one thing.
      */
     speak(input: {
-      connectionId?: string;
       text: string;
-      voice?: string;
       speed?: number;
     }): Promise<Result<SpokenReply>>;
   };

@@ -5,6 +5,7 @@ import { ProviderError, type ConnectionSummary, type StoredCredential } from "@a
 import { endpointFor, parseProviderModels } from "@ai-book-studio/core/providers/keys";
 import { applyModelPreset } from "@ai-book-studio/core/providers/compatibility";
 import type { ProviderService } from "./providers";
+import type { VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
 
 /**
  * The live check, run inside the app.
@@ -23,7 +24,8 @@ import type { ProviderService } from "./providers";
  */
 export async function runLiveCheckInApp(
   providers: ProviderService,
-  sampleRoot: string
+  sampleRoot: string,
+  voicePreferences: VoicePreferences
 ): Promise<LiveResult[]> {
   const service = (await hasMetaConnection(providers))
     ? providers
@@ -42,7 +44,7 @@ export async function runLiveCheckInApp(
     return response;
   }) as typeof fetch;
 
-  const results = await runLiveChecks(service, { sampleRoot }).finally(() => {
+  const results = await runLiveChecks(service, { sampleRoot, voicePreferences }).finally(() => {
     globalThis.fetch = originalFetch;
   });
   for (const result of results) {

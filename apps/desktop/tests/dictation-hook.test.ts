@@ -33,6 +33,7 @@ class FakeRecorder {
   static instances: FakeRecorder[] = [];
   state: "inactive" | "recording" = "inactive";
   mimeType = "audio/webm";
+  deferStop = false;
   readonly listeners = new Map<string, Handler[]>();
 
   constructor(
@@ -60,6 +61,7 @@ class FakeRecorder {
   /** The browser's own stop: whatever was buffered, then the stop event. */
   stop(): void {
     this.state = "inactive";
+    if (this.deferStop) return;
     for (const handler of this.listeners.get("stop") ?? []) handler({ data: new Blob() });
   }
 
@@ -99,6 +101,17 @@ interface Harness {
 let harness: Harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {} };
 let texts: string[] = [];
 let errors: string[] = [];
+
+function configuredVoice(transcribe: (input: unknown) => Promise<unknown> = async () => ({ ok: true, data: { text: "Words." } })) {
+  return {
+    settings: async () => ({ ok: true, data: {
+      transcription: { connectionId: "conn_meta000001", model: "muse-voice-transcribe-1.0" },
+      speaking: { connectionId: null, model: null, voice: null }
+    } }),
+    connections: async () => ({ ok: true, data: [{ id: "conn_meta000001", provider: "meta" }] }),
+    transcribe
+  };
+}
 
 function Probe({ maxMs }: { maxMs?: number }) {
   const dictation = useDictation({
@@ -163,6 +176,7 @@ beforeEach(() => {
   texts = [];
   errors = [];
   harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {} };
+  (window as { studio?: unknown }).studio = { voice: configuredVoice() };
 });
 
 afterEach(() => {
@@ -188,6 +202,31 @@ describe("a build that cannot record", () => {
 });
 
 describe("asking for the microphone", () => {
+  test("an absent, removed or retired selection is explained before the microphone opens", async () => {
+    const getUserMedia = mock(async () => fakeStream().stream);
+    withMicrophone();
+    Object.defineProperty(navigator, "mediaDevices", { value: { getUserMedia }, configurable: true });
+    const voice = configuredVoice();
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+
+    const settings = [
+      { connectionId: null, model: null },
+      { connectionId: "conn_removed01", model: "muse-voice-transcribe-1.0" },
+      { connectionId: "conn_meta000001", model: "retired-model" }
+    ];
+    for (const transcription of settings) {
+      voice.settings = async () => ({ ok: true, data: { transcription, speaking: { connectionId: null, model: null, voice: null } } }) as never;
+      await testing.act(async () => { await harness.start(); });
+      expect(harness.state).toBe("idle");
+    }
+    expect(errors[0]).toContain("Choose a transcription connection and model");
+    expect(errors[1]).toContain("unavailable");
+    expect(errors[2]).toContain("unavailable");
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(FakeRecorder.instances).toHaveLength(0);
+  });
+
   test("records once permission is given", async () => {
     const { stream } = withMicrophone();
     mount();
@@ -199,6 +238,33 @@ describe("asking for the microphone", () => {
     expect(recorder?.stream).toBe(stream);
     // The hook asks for the narrowest stream it can: one channel, processed.
     expect(recorder?.options.mimeType).toBe("audio/webm;codecs=opus");
+  });
+
+  test("an OpenRouter selection can open the microphone without a Meta connection", async () => {
+    const { stream } = withMicrophone();
+    const voice = configuredVoice();
+    voice.settings = (async () => ({ ok: true, data: {
+      transcription: { connectionId: "conn_openrouter01", model: "openai/whisper-1" },
+      speaking: { connectionId: null, model: null, voice: null }
+    } })) as never;
+    voice.connections = (async () => ({ ok: true, data: [{ id: "conn_openrouter01", provider: "openrouter" }] })) as never;
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    expect(harness.state).toBe("recording");
+    expect(FakeRecorder.instances.at(-1)?.stream).toBe(stream);
+  });
+
+  test("a recorder that cannot start releases the microphone and reports the failure", async () => {
+    const { stopped } = withMicrophone();
+    (globalThis as { MediaRecorder?: unknown }).MediaRecorder = class extends FakeRecorder {
+      override start(): void { throw new Error("recorder failed"); }
+    };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    expect(stopped).toEqual(["first", "second"]);
+    expect(errors).toEqual(["The microphone could not start recording. Try again."]);
+    expect(harness.state).toBe("idle");
   });
 
   test("a second start while recording does nothing, so one press is one recording", async () => {
@@ -252,9 +318,7 @@ describe("asking for the microphone", () => {
 describe("finishing a recording", () => {
   function stubVoice(result: unknown) {
     (window as { studio?: unknown }).studio = {
-      voice: {
-        transcribe: mock(() => Promise.resolve(result))
-      }
+      voice: configuredVoice(mock(() => Promise.resolve(result)))
     };
   }
 
@@ -270,6 +334,24 @@ describe("finishing a recording", () => {
     });
     await testing.waitFor(() => expect(texts).toEqual(["The lamp would not turn."]));
     expect(harness.state).toBe("idle");
+  });
+
+  test("binds the recording to the transcription choice read before opening the microphone", async () => {
+    withMicrophone();
+    const transcribe = mock(async (_input: unknown) => ({ ok: true, data: { text: "Words." } }));
+    const voice = configuredVoice(transcribe);
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    voice.settings = (async () => ({ ok: true, data: {
+      transcription: { connectionId: "conn_openrouter01", model: "openai/whisper-1" },
+      speaking: { connectionId: null, model: null, voice: null }
+    } })) as never;
+    await testing.act(async () => { FakeRecorder.instances.at(-1)?.emit(8); });
+    await testing.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(1));
+    expect(transcribe.mock.calls[0]?.[0]).toMatchObject({
+      expectedSelection: { connectionId: "conn_meta000001", model: "muse-voice-transcribe-1.0" }
+    });
   });
 
   test("every track is stopped when the recording ends, so the light goes out", async () => {
@@ -334,10 +416,8 @@ describe("finishing a recording", () => {
     await testing.act(async () => {
       await harness.start();
     });
-    await testing.act(async () => {
-      FakeRecorder.instances.at(-1)?.emit(8);
-    });
     await testing.waitFor(() => expect(errors[0]).toContain("desktop app"));
+    expect(FakeRecorder.instances).toHaveLength(0);
   });
 });
 
@@ -345,7 +425,7 @@ describe("cancelling", () => {
   test("a cancel stops the microphone and inserts nothing", async () => {
     const { stopped } = withMicrophone();
     const transcribe = mock(() => Promise.resolve({ ok: true, data: { text: "never" } }));
-    (window as { studio?: unknown }).studio = { voice: { transcribe } };
+    (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
     mount();
     await testing.act(async () => {
       await harness.start();
@@ -367,12 +447,14 @@ describe("cancelling", () => {
     withMicrophone();
     const late = fakeStream();
     const slow = deferred();
+    const getUserMedia = mock(() => slow.promise);
     Object.defineProperty(navigator, "mediaDevices", {
-      value: { getUserMedia: () => slow.promise },
+      value: { getUserMedia },
       configurable: true
     });
     mount();
     const starting = harness.start();
+    await testing.waitFor(() => expect(getUserMedia).toHaveBeenCalledTimes(1));
     // The author changes their mind while the permission prompt is still up.
     await testing.act(async () => {
       harness.cancel();
@@ -384,6 +466,99 @@ describe("cancelling", () => {
     // Nothing is recording, and the stream that arrived late was released rather than left live.
     expect(FakeRecorder.instances).toHaveLength(0);
     expect(late.stopped).toEqual(["first", "second"]);
+  });
+
+  test("a cancel during the settings check never opens the microphone", async () => {
+    withMicrophone();
+    const getUserMedia = mock(async () => fakeStream().stream);
+    Object.defineProperty(navigator, "mediaDevices", { value: { getUserMedia }, configurable: true });
+    const slow = deferred();
+    const voice = configuredVoice();
+    voice.settings = (() => slow.promise) as never;
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+    const starting = harness.start();
+    await testing.act(async () => { harness.cancel(); });
+    slow.resolve({ ok: true, data: { transcription: { connectionId: "conn_meta000001", model: "muse-voice-transcribe-1.0" } } });
+    await testing.act(async () => { await starting; });
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(FakeRecorder.instances).toHaveLength(0);
+    expect(harness.state).toBe("idle");
+  });
+
+  test("a cancelled recorder's late events cannot stop or submit a newer recording", async () => {
+    withMicrophone();
+    const first = fakeStream();
+    const second = fakeStream();
+    let opens = 0;
+    Object.defineProperty(navigator, "mediaDevices", {
+      value: { getUserMedia: async () => (++opens === 1 ? first.stream : second.stream) },
+      configurable: true
+    });
+    const transcribe = mock(async () => ({ ok: true, data: { text: "New words." } }));
+    (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    const old = FakeRecorder.instances[0];
+    if (!old) throw new Error("missing first recorder");
+    old.deferStop = true;
+    await testing.act(async () => { harness.cancel(); });
+    await testing.act(async () => { await harness.start(); });
+    const current = FakeRecorder.instances[1];
+    if (!current) throw new Error("missing second recorder");
+    await testing.act(async () => { old.emit(8); });
+    expect(first.stopped).toEqual(["first", "second"]);
+    expect(second.stopped).toEqual([]);
+    expect(harness.state).toBe("recording");
+    expect(transcribe).not.toHaveBeenCalled();
+    await testing.act(async () => { current.emit(8); });
+    await testing.waitFor(() => expect(texts).toEqual(["New words."]));
+    expect(transcribe).toHaveBeenCalledTimes(1);
+    expect(second.stopped).toEqual(["first", "second"]);
+  });
+
+  test("cancelling during audio conversion prevents sending", async () => {
+    withMicrophone();
+    const slow = deferred();
+    const decode = mock(() => slow.promise);
+    (globalThis as { AudioContext?: unknown }).AudioContext = class {
+      decodeAudioData = decode;
+      async close() {}
+    };
+    const transcribe = mock(async () => ({ ok: true, data: { text: "never" } }));
+    (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    await testing.act(async () => { FakeRecorder.instances.at(-1)?.emit(8); });
+    await testing.waitFor(() => expect(decode).toHaveBeenCalledTimes(1));
+    await testing.act(async () => { harness.cancel(); });
+    slow.resolve({ numberOfChannels: 1, length: 4, sampleRate: 16_000, getChannelData: () => new Float32Array(4) });
+    await testing.act(async () => { await slow.promise; });
+    expect(transcribe).not.toHaveBeenCalled();
+    expect(texts).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(harness.state).toBe("idle");
+  });
+
+  test("cancelling a pending transcription ignores its later result without disturbing a restart", async () => {
+    withMicrophone();
+    const slow = deferred();
+    const transcribe = mock(() => slow.promise);
+    (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
+    mount();
+    await testing.act(async () => { await harness.start(); });
+    await testing.act(async () => { FakeRecorder.instances.at(-1)?.emit(8); });
+    await testing.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(1));
+    await testing.act(async () => { harness.cancel(); });
+    await testing.act(async () => { await harness.start(); });
+    await testing.act(async () => {
+      slow.resolve({ ok: true, data: { text: "Old words." } });
+      await slow.promise;
+    });
+    expect(texts).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(harness.state).toBe("recording");
+    expect(FakeRecorder.instances.at(-1)?.state).toBe("recording");
   });
 });
 

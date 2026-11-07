@@ -1,6 +1,8 @@
 import { app } from "electron";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DEFAULT_VOICE_PREFERENCES, isValidStoredVoicePreferences, isValidVoicePreferencesTransition, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
+import { ProviderError } from "@ai-book-studio/core/providers/types";
 import { writeFileAtomic } from "./library/atomic";
 
 export interface AppSettings {
@@ -20,6 +22,8 @@ export interface AppSettings {
   syncCheckIntervalMinutes?: number;
   /** When the drift scan last ran, as an ISO timestamp. Display only. */
   lastSyncScanAt?: string | null;
+  /** Machine-local speech choices; never copied into a library. */
+  voicePreferences?: VoicePreferences;
 }
 
 /** The focus-scan interval when nothing is configured. */
@@ -39,6 +43,10 @@ export function settingsFilePath(userDataDir: string): string {
 export class SettingsStore {
   private readonly path = settingsFilePath(app.getPath("userData"));
   private value: AppSettings = { ...DEFAULTS };
+  private pendingWrite: Promise<void> = Promise.resolve();
+
+  /** @internal The writer can be replaced for deterministic persistence-failure tests. */
+  constructor(private readonly write: typeof writeFileAtomic = writeFileAtomic) {}
 
   async load(): Promise<AppSettings> {
     try {
@@ -51,7 +59,8 @@ export class SettingsStore {
         Number.isFinite(parsed.syncCheckIntervalMinutes)
           ? { syncCheckIntervalMinutes: parsed.syncCheckIntervalMinutes }
           : {}),
-        ...(typeof parsed.lastSyncScanAt === "string" ? { lastSyncScanAt: parsed.lastSyncScanAt } : {})
+        ...(typeof parsed.lastSyncScanAt === "string" ? { lastSyncScanAt: parsed.lastSyncScanAt } : {}),
+        ...(isValidStoredVoicePreferences(parsed.voicePreferences) ? { voicePreferences: parsed.voicePreferences } : {})
       };
     } catch {
       this.value = { ...DEFAULTS };
@@ -64,7 +73,22 @@ export class SettingsStore {
   }
 
   async update(patch: Partial<AppSettings>): Promise<void> {
-    this.value = { ...this.value, ...patch };
-    await writeFileAtomic(this.path, `${JSON.stringify(this.value, null, 2)}\n`);
+    // Compute from the last successful write, not the value at invocation: resize, sync and
+    // voice settings can all save concurrently. A failed write must not poison the queue.
+    const write = this.pendingWrite.then(async () => {
+      if (patch.voicePreferences !== undefined &&
+          !isValidVoicePreferencesTransition(patch.voicePreferences, this.voicePreferences())) {
+        throw new ProviderError("invalid-request", "Choose a supported speech model and voice in Settings.");
+      }
+      const next = { ...this.value, ...patch };
+      await this.write(this.path, `${JSON.stringify(next, null, 2)}\n`);
+      this.value = next;
+    });
+    this.pendingWrite = write.catch(() => {});
+    await write;
+  }
+
+  voicePreferences(): VoicePreferences {
+    return this.value.voicePreferences ?? DEFAULT_VOICE_PREFERENCES;
   }
 }

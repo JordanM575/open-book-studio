@@ -1,137 +1,71 @@
-# The voice pipeline
+# Voice
 
-The studio both listens and speaks. This page is how, and why the two halves are separate.
+AI Book Studio has two separate voice paths: dictation sends an author-triggered recording for
+transcription, while speaking turns visible text into audio. Their provider choices are independent
+of the writing agent's chat model.
 
-## The loop
+## Dictation
 
-```
-   the author speaks
-          │
-          ▼
-   microphone ──▶ WAV 16 kHz mono ──▶ Muse Voice Transcribe ──▶ text
-                                                                 │
-                                                                 ▼
-                                                        the writing agent
-                                                                 │
-                                                                 ▼
-   the glasses' speaker ◀── audio ◀── text-to-speech ◀──── the reply
-```
+In desktop Settings → **Voice → Dictation**, choose a connected Meta or OpenRouter account and a
+supported transcription model. Meta offers Muse Voice Transcribe. OpenRouter's local catalog lists
+Whisper 1, Whisper Large v3 and Whisper Large v3 Turbo. The saved connection and model are used only
+when the author starts dictation; an empty or removed selection stops before audio is sent, rather
+than selecting another account. If the saved connection or model has changed by submission, the
+recording is refused and the author can record again with the current choice.
 
-Listening and speaking are different providers with different contracts, so they are different
-modules: [`speech.ts`](../packages/core/src/providers/speech.ts) listens, and
-[`tts.ts`](../packages/core/src/providers/tts.ts) speaks. The voice pipeline is the two of them
-either side of the agent.
+Before a request, the desktop app checks the recording is a complete RIFF/WAVE file containing mono,
+16-bit PCM at 16 kHz or 24 kHz, no longer than ten minutes or larger than 32 MB. Meta receives its
+documented multipart `request` and WAV parts. OpenRouter receives its documented JSON/base64 WAV
+request. Audio stays in memory and is discarded after the request; it is not saved to a book, profile
+or temporary file. The transcript follows the existing author-triggered insertion flow.
+Cancelling before the transcription call prevents sending; cancelling after a request has started
+ignores its result but cannot recall audio already sent.
 
-## Listening
+## Read-aloud and spoken agent replies
 
-Meta's file endpoint takes a multipart body — a JSON `request` part and a WAV part — and returns a
-transcript with turn timings. The studio validates the container before spending a request: RIFF/
-WAVE, 16-bit PCM, mono, 16 kHz or 24 kHz, up to ten minutes and 32 MB.
+In Settings → **Voice → Read-aloud and agent replies**, choose a connected speaking account, model and
+one of that model's listed voices. OpenAI's existing `gpt-4o-mini-tts`, `tts-1` and `tts-1-hd` models
+remain available with their documented voice family. The curated OpenRouter catalog offers:
 
-The recording never touches disk. It is read in the main process, sent, and the text comes back.
-
-**Live evidence:** the check speaks a known phrase with macOS `say`, converts it to the shape Meta
-accepts, and scores the transcript against the phrase. All nine words matched. See
-[`docs/research/live-meta-2026-10-26.md`](research/live-meta-2026-10-26.md).
-
-## Speaking
-
-OpenAI's `/audio/speech` takes a JSON body and returns audio. The studio asks for MP3, a named
-voice, and optionally an instruction about how to read — which only the `gpt-4o-mini-tts` model
-understands, so it is omitted for the older ones rather than silently ignored.
-
-### Two services, one shape
-
-| | OpenAI, direct | OpenRouter |
+| Model | Voices | Audio returned |
 | --- | --- | --- |
-| **Endpoint** | `/audio/speech` | `/audio/speech` — the same shape |
-| **Model** | `gpt-4o-mini-tts` | `fish-audio/s2.1-pro-free:free` |
-| **Cost, a sentence** | — | **free** |
-| **Voice** | Required; the studio sends `nova` unless the caller chose | The free model takes none; other models there want voices the studio does not know |
-| **Returns** | MP3 | MP3 |
+| `heygen/heygen-voice-1` | `nadine`, `tabitha`, `bram`, `gareth`, `noelle`, `meredith`, `sabrina`, `lucian`, `weston`, `vincent` | Raw mono 16-bit PCM at 44.1 kHz |
+| `heygen/heygen-voice-1-turbo` | The same ten voices | Raw mono 16-bit PCM at 44.1 kHz |
+| `mistralai/voxtral-mini-tts-2603` | `en_paul_sad`, `en_paul_neutral`, `en_paul_happy`, `en_paul_frustrated`, `en_paul_cheerful`, `gb_oliver_sad`, `gb_oliver_confident`, `gb_jane_sarcasm`, `gb_jane_sad`, `gb_jane_frustrated`, `fr_marie_sad`, `fr_marie_excited`, `fr_marie_curious`, `fr_marie_angry` | MP3 |
 
-Both are text-to-speech endpoints: the words go in and the audio comes out, unchanged. OpenRouter
-is the default for the check because it costs nothing, and OpenAI is the default for a real
-reading because it can be told how to read.
+Only the exact model/voice pairs in the local catalog are offered. Choosing a speaking connection
+selects its first listed model and voice; changing the model selects that model's first listed voice.
+These are local defaults, not provider probes. The models and voices are a curated snapshot, not a
+promise of current provider availability.
 
-**OpenRouter has fifteen TTS models**, discoverable with
-`GET /api/v1/models?output_modalities=speech` — the speech models are listed under `"speech"`, not
-`"audio"`, which is what a first look at the catalogue misses. The free one,
-`fish-audio/s2.1-pro-free:free`, needs no voice and answers in MP3. Named alternatives such as
-`hexgrad/kokoro-82m` work too but require a voice, and some reject one they do not know, so a voice
-is only sent when the caller asked for it.
+Text longer than one request is split at sentence boundaries where possible and sent in order. The
+audio is joined into one playable result. Raw PCM chunks are joined first and receive one WAV header
+at the model's sample rate. TTS endpoints return audio bytes without request usage or cost, so TTS
+cost remains unknown; transcription usage and cost are retained only when the selected provider
+actually supplies them.
 
-`audio/speech` is not the only shape a provider might answer with: a few return raw
-`audio/pcm`. The service wraps those in a 44-byte RIFF/WAVE header so the renderer still gets one
-playable sound.
+The selected speaking provider is used for both read-aloud and spoken agent replies. A missing
+selection may use the computer's local speech synthesis, which is separate from a provider voice. A
+saved selection that has become unavailable, a provider refusal, or a playback failure does **not**
+silently switch to another provider or voice. The safe error is shown and the words remain visible.
 
-### A chapter is longer than one request
+## Local preferences and browser behavior
 
-One request carries at most 4,000 characters. A chapter is several times that. So the text is
-split at **sentence boundaries**, sent in order, and the audio is **joined back into one sound** —
-MP3 frames concatenate, so the caller plays one thing and stops one thing.
+Voice preferences are stored in the desktop app's local `studio.json` profile, not in book files,
+manuscripts, archives or chat-model settings. Settings reads the local connection list and curated
+catalog only: opening it sends no audio or prose and does not test a voice provider. Adding or testing
+a provider connection remains a separate, explicit action.
 
-The splitting rules are deliberate:
-
-- A sentence is never cut in the middle.
-- A single sentence longer than the limit is split on **word** boundaries, so no word is broken.
-- An enormous single word is cut rather than allowed to loop, because it cannot be prose.
-- **Nothing is dropped.** A truncated sentence is a wrong sentence, so the last chunk is short
-  rather than clipped.
-
-`chunkForSpeech` is a pure function with tests for all four rules, and one of them asserts the
-joined chunks have exactly the same number of words as the input.
-
-### Two voices, and the better one wins
-
-| Voice | When | What it sounds like |
-| --- | --- | --- |
-| **A voice service** | A connection can speak — OpenAI today | The same voice on every surface, told how to read, independent of the machine |
-| **The device's own** | No voice service is connected | The operating system's voice. Free, no key, different on every computer |
-
-The renderer's `useSpeech` picks the first and falls back to the second. It also reports which one
-it is using, so the panel can say "Speaking with this computer's own voice" rather than pretend.
-
-**Either way the words are on the screen.** Someone who cannot hear, or who is in a room they do
-not want to talk in, still gets them. Speaking is an addition to the interface, never a
-replacement for it.
-
-### Where the voice comes from
-
-The key lives in the operating system's keychain, through the app's vault, like every other
-connection. Settings → Provider connections → **OpenAI** for the studio's voice, or **OpenRouter**
-for the cheap one. Nothing reads a key from `.env` at runtime: that file is for the check scripts,
-so a key never sits in plaintext next to the code.
-
-OpenRouter is optional, and it is there because a check that runs on every change should not cost
-a dollar. A user who never adds it gets the device's own voice and nothing breaks.
-
-**Correction, 2026-10-26.** An earlier version of this page said OpenRouter had no text-to-speech
-endpoint and used a speech model through a chat completion instead. That was wrong: OpenRouter
-added `/api/v1/audio/speech` in May 2026, with dedicated TTS models behind it. The chat-completion
-path was removed.
-
-## The panel
-
-The minimal mode's **Read aloud** and **Where am I?** both go through the pipeline. When a voice
-service is connected, the panel offers the voices; when it is not, it says which voice it is using
-and where to change it.
-
-## What is not built yet
-
-- **Barge-in.** Speaking while the author talks over it needs the microphone to stay open during
-  playback, which is a capture and echo-cancellation decision rather than a TTS one.
-- **Speech-to-speech.** Both halves are turn-based: a recording, then a reply. A continuous
-  conversation needs a streaming protocol neither provider offers here.
-- **The glasses.** The voice reaches the glasses through the phone, in the Device Access Toolkit
-  slice. Web Apps cannot use the microphone at all.
+Provider voice controls and operations are desktop-only. The browser build explains that provider
+voice integration is unavailable and refuses those operations; its existing device speech synthesis
+is separate and does not imply browser access to provider credentials.
 
 ## Verification
 
-- `bun test packages/core/tests/tts.test.ts` — the chunking rules, the request body, joining.
-- `bun test apps/desktop/tests/speech.test.ts` — one request, many requests joined, the voice and
-  speed, an empty reply, a refused key, an unreachable service.
-- `bun run live:check` — speaks a sentence, and measures it. A file of the right size proves
-  nothing, because a service that returns silence returns a file. For raw PCM the check computes
-  the root mean square of the samples; for a compressed stream it cannot, cheaply, so it says
-  "compressed, size checked" rather than inventing a number.
+- `bun test packages/core/tests/speech.test.ts packages/core/tests/tts.test.ts` — catalogs, request
+  contracts, WAV validation and audio handling.
+- `bun test apps/desktop/tests/voice-service.test.ts apps/desktop/tests/speech.test.ts apps/desktop/tests/voice-settings.test.tsx` — selected providers, safe failures, preference controls and no provider probes from Settings.
+- `bun run typecheck`, `bun run verify` and `bun run smoke` — repository checks and hidden desktop
+  profile/preload round-trip.
+
+No live provider, provider key, microphone or user profile is needed for these automated checks.

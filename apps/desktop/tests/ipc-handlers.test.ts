@@ -6,6 +6,7 @@ import { IPC, type Result } from "@ai-book-studio/core/ipc";
 import { MATTER_LIMITS, matterHash, newMatterSection, readMatter } from "@ai-book-studio/core/matter";
 import { agentMessageSchema } from "@ai-book-studio/core/agent/messages";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
+import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
 import { ProviderError } from "@ai-book-studio/core/providers/types";
 import type { Chapter } from "@ai-book-studio/core/schema";
 import { DraftBuffer } from "../src/main/drafts";
@@ -138,6 +139,7 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
   const saved: Record<string, unknown> = {};
   const settings = {
     get: () => saved,
+    voicePreferences: () => (saved.voicePreferences as VoicePreferences | undefined) ?? DEFAULT_VOICE_PREFERENCES,
     update: async (patch: Record<string, unknown>) => {
       Object.assign(saved, patch);
     }
@@ -207,7 +209,7 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
     (bookId) => working.has(bookId)
   );
   const services = [providers, agent, voice, speech, images];
-  return { root, library, studio, saved, providers, agent, voice, speech, images, bridge, working, services };
+  return { root, library, studio, saved, settings, providers, agent, voice, speech, images, bridge, working, services };
 }
 
 async function call(channel: string, payload?: unknown): Promise<Result<unknown>> {
@@ -317,6 +319,8 @@ describe("ipc boundary", () => {
       [IPC.agent.threads.remove, {}],
       [IPC.agent.threads.fork, { bookId: id, threadId: "thread_ipc0001", turnId: "" }],
       [IPC.voice.transcribe, { audio: "UklGRg==" }],
+      [IPC.voice.transcribe, { audio: new Uint8Array(), expectedSelection: { connectionId: "conn_!", model: "x" } }],
+      [IPC.voice.transcribe, { audio: new Uint8Array() }],
       [IPC.voice.speak, { text: "Read this.", speed: 5 }],
       [IPC.images.list, "img_abcdef01"],
       [IPC.images.read, { bookId: id, imageId: "img_" }],
@@ -950,25 +954,205 @@ describe("the agent", () => {
 
 describe("voice and illustrations", () => {
   test("transcription and speech receive only what the author chose", async () => {
-    const { voice, speech, providers } = await setup();
+    const { voice, speech, saved } = await setup();
     expect(await data(IPC.voice.connections)).toEqual([CONNECTION]);
     const audio = new Uint8Array([82, 73, 70, 70, 0, 0]);
-    await data(IPC.voice.transcribe, { audio, languageBias: [], keywords: ["Mara"] });
-    expect(voice.transcribe).toHaveBeenLastCalledWith({ audio, keywords: ["Mara"] });
-    await data(IPC.voice.transcribe, { connectionId: CONNECTION.id, audio: audio.buffer, languageBias: ["en"] });
-    expect(voice.transcribe).toHaveBeenLastCalledWith({ connectionId: CONNECTION.id, audio, languageBias: ["en"] });
+    const expectedSelection = { connectionId: CONNECTION.id, model: "openai/whisper-1" };
+    await data(IPC.voice.transcribe, { audio, expectedSelection, languageBias: [], keywords: ["Mara"] });
+    expect(voice.transcribe).toHaveBeenLastCalledWith({ audio, expectedSelection, keywords: ["Mara"] });
+    await data(IPC.voice.transcribe, { audio: audio.buffer, expectedSelection, languageBias: ["en"] });
+    expect(voice.transcribe).toHaveBeenLastCalledWith({ audio, expectedSelection, languageBias: ["en"] });
 
-    expect(await data(IPC.voice.speakers)).toEqual({ available: false, connectionLabel: null, endpoint: null, model: null, voices: [] });
-    speech.connections.mockImplementation(async () => [{ ...CONNECTION, provider: "openai", label: "OpenAI" }]);
-    providers.credential.mockImplementation(async (id: string) => ({ ...CONNECTION, id, provider: "openai" as never, label: "OpenAI", secret: KEY }));
-    const speakers = await data<{ available: boolean; endpoint: string; voices: string[] }>(IPC.voice.speakers);
-    expect(speakers).toEqual(expect.objectContaining({ available: true, connectionLabel: "OpenAI", endpoint: "https://api.openai.com/v1/audio/speech" }));
-    expect(speakers.voices.length).toBeGreaterThan(0);
+    expect(await data(IPC.voice.settings)).toEqual(DEFAULT_VOICE_PREFERENCES);
+    const preferences: VoicePreferences = {
+      transcription: { connectionId: CONNECTION.id, model: "openai/whisper-1" },
+      speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "nadine" }
+    };
+    await data(IPC.voice.updateSettings, preferences);
+    expect(saved.voicePreferences).toEqual(preferences);
+    const speakers = await data<{ available: boolean; selected: boolean; model: string | null; voice: string | null; voices: string[] }>(IPC.voice.speakers);
+    expect(speakers).toMatchObject({
+      available: true,
+      selected: true,
+      model: "heygen/heygen-voice-1",
+      voice: "nadine",
+      voices: expect.arrayContaining(["nadine", "vincent"])
+    });
 
-    const spoken = await data<{ dataUrl: string; chunks: number }>(IPC.voice.speak, { text: "Read this.", voice: "alloy", speed: 1.25 });
+    const spoken = await data<{ dataUrl: string; chunks: number }>(IPC.voice.speak, { text: "Read this.", speed: 1.25 });
     expect(spoken.dataUrl).toBe(`data:audio/wav;base64,${Buffer.from([82, 73, 70, 70]).toString("base64")}`);
     expect(spoken.chunks).toBe(1);
-    expect(speech.speak).toHaveBeenCalledWith({ text: "Read this.", voice: "alloy", speed: 1.25 });
+    expect(speech.speak).toHaveBeenCalledWith({ text: "Read this.", speed: 1.25 });
+  });
+
+  test("voice preference IPC rejects mismatched models and unsupported voices", async () => {
+    await setup();
+    const invalidProvider: VoicePreferences = {
+      ...DEFAULT_VOICE_PREFERENCES,
+      transcription: { connectionId: CONNECTION.id, model: "muse-voice-transcribe-1.0" }
+    };
+    await expect(data(IPC.voice.updateSettings, invalidProvider)).rejects.toThrow(/does not support|supported transcription/i);
+    const invalidVoice: VoicePreferences = {
+      ...DEFAULT_VOICE_PREFERENCES,
+      speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "custom-voice" }
+    };
+    await expect(data(IPC.voice.updateSettings, invalidVoice)).rejects.toThrow(/does not support|supported transcription model and speaking voice/i);
+  });
+
+  test("removed voice connections can be cleared one at a time in either order", async () => {
+    const stale: VoicePreferences = {
+      transcription: { connectionId: "conn_removed01", model: "openai/whisper-1" },
+      speaking: { connectionId: "conn_removed02", model: "heygen/heygen-voice-1", voice: "nadine" }
+    };
+    for (const first of ["transcription", "speaking"] as const) {
+      const { saved, providers } = await setup();
+      saved.voicePreferences = stale;
+      const intermediate: VoicePreferences = first === "transcription"
+        ? { ...stale, transcription: DEFAULT_VOICE_PREFERENCES.transcription }
+        : { ...stale, speaking: DEFAULT_VOICE_PREFERENCES.speaking };
+      expect(await data(IPC.voice.updateSettings, intermediate)).toEqual(intermediate);
+      expect(saved.voicePreferences).toEqual(intermediate);
+      expect(await data(IPC.voice.updateSettings, DEFAULT_VOICE_PREFERENCES)).toEqual(DEFAULT_VOICE_PREFERENCES);
+      expect(saved.voicePreferences).toEqual(DEFAULT_VOICE_PREFERENCES);
+      expect(providers.credential).not.toHaveBeenCalled();
+      expect(providers.test).not.toHaveBeenCalled();
+    }
+  });
+
+  test("a stale choice can be kept unchanged, but not introduced or edited", async () => {
+    const { saved } = await setup();
+    const stale: VoicePreferences = {
+      transcription: { connectionId: "conn_removed01", model: "openai/whisper-1" },
+      speaking: { connectionId: "conn_removed02", model: "heygen/heygen-voice-1", voice: "nadine" }
+    };
+    saved.voicePreferences = stale;
+    const replacement: VoicePreferences = {
+      ...stale,
+      transcription: { connectionId: CONNECTION.id, model: "openai/whisper-1" }
+    };
+    expect(await data(IPC.voice.updateSettings, replacement)).toEqual(replacement);
+    for (const invalid of [
+      { ...replacement, transcription: stale.transcription },
+      { ...replacement, speaking: { ...stale.speaking, voice: "weston" } },
+      { ...replacement, speaking: { ...stale.speaking, connectionId: "conn_removed03" } }
+    ]) {
+      await expect(data(IPC.voice.updateSettings, invalid)).rejects.toThrow(/no longer available/i);
+      expect(saved.voicePreferences).toEqual(replacement);
+    }
+    const repaired = {
+      ...replacement,
+      speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "weston" }
+    };
+    expect(await data(IPC.voice.updateSettings, repaired)).toEqual(repaired);
+  });
+
+  test("an unchanged provider/model mismatch does not prevent repairing the other choice", async () => {
+    const { saved, providers } = await setup();
+    const mismatched: VoicePreferences = {
+      transcription: { connectionId: CONNECTION.id, model: "muse-voice-transcribe-1.0" },
+      speaking: { connectionId: "conn_removed02", model: "heygen/heygen-voice-1", voice: "nadine" }
+    };
+    saved.voicePreferences = mismatched;
+    const clearSpeaking = { ...mismatched, speaking: DEFAULT_VOICE_PREFERENCES.speaking };
+    expect(await data(IPC.voice.updateSettings, clearSpeaking)).toEqual(clearSpeaking);
+    expect(providers.credential).not.toHaveBeenCalled();
+    const changedMismatch = { ...clearSpeaking, transcription: { ...mismatched.transcription, model: "muse-voice-transcribe-1.0" } };
+    // A valid saved branch may be retained, not changed to a mismatched provider/model pair.
+    saved.voicePreferences = DEFAULT_VOICE_PREFERENCES;
+    await expect(data(IPC.voice.updateSettings, changedMismatch)).rejects.toThrow(/does not support/i);
+  });
+
+  test("retired model and voice choices stay unavailable and can be repaired separately", async () => {
+    for (const first of ["transcription", "speaking"] as const) {
+      const { saved, providers } = await setup();
+      const retired: VoicePreferences = {
+        transcription: { connectionId: CONNECTION.id, model: "retired/transcription" },
+        speaking: { connectionId: CONNECTION.id, model: "retired/speaking", voice: "retired-voice" }
+      };
+      saved.voicePreferences = retired;
+      const status = await data<{ available: boolean; selected: boolean; unavailable: boolean }>(IPC.voice.speakers);
+      expect(status).toMatchObject({ available: false, selected: true, unavailable: true });
+      const intermediate = first === "transcription"
+        ? { ...retired, transcription: DEFAULT_VOICE_PREFERENCES.transcription }
+        : { ...retired, speaking: DEFAULT_VOICE_PREFERENCES.speaking };
+      expect(await data(IPC.voice.updateSettings, intermediate)).toEqual(intermediate);
+      expect(saved.voicePreferences).toEqual(intermediate);
+      const changed = first === "transcription"
+        ? { ...intermediate, speaking: { ...retired.speaking, voice: "another-retired-voice" } }
+        : { ...intermediate, transcription: { ...retired.transcription, model: "retired/another-model" } };
+      await expect(data(IPC.voice.updateSettings, changed)).rejects.toThrow(/does not support/i);
+      expect(saved.voicePreferences).toEqual(intermediate);
+      expect(await data(IPC.voice.updateSettings, DEFAULT_VOICE_PREFERENCES)).toEqual(DEFAULT_VOICE_PREFERENCES);
+      expect(providers.credential).not.toHaveBeenCalled();
+      expect(providers.test).not.toHaveBeenCalled();
+    }
+  });
+
+  test("retired selections can be replaced with supported choices in either order", async () => {
+    for (const first of ["transcription", "speaking"] as const) {
+      const { saved } = await setup();
+      const retired: VoicePreferences = {
+        transcription: { connectionId: CONNECTION.id, model: "retired/transcription" },
+        speaking: { connectionId: CONNECTION.id, model: "retired/speaking", voice: "retired-voice" }
+      };
+      const supported: VoicePreferences = {
+        transcription: { connectionId: CONNECTION.id, model: "openai/whisper-1" },
+        speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "weston" }
+      };
+      saved.voicePreferences = retired;
+      const intermediate = first === "transcription"
+        ? { ...retired, transcription: supported.transcription }
+        : { ...retired, speaking: supported.speaking };
+      expect(await data(IPC.voice.updateSettings, intermediate)).toEqual(intermediate);
+      expect(await data(IPC.voice.updateSettings, supported)).toEqual(supported);
+    }
+  });
+
+  test("overlapping voice saves cannot reintroduce a stale choice cleared by an earlier save", async () => {
+    const { saved, settings } = await setup();
+    const stale: VoicePreferences = {
+      transcription: { connectionId: "conn_removed01", model: "openai/whisper-1" },
+      speaking: { connectionId: "conn_removed02", model: "heygen/heygen-voice-1", voice: "nadine" }
+    };
+    saved.voicePreferences = stale;
+    let entered!: () => void;
+    let release!: () => void;
+    const writing = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    settings.update = async (patch) => {
+      if (++calls === 1) {
+        entered();
+        await held;
+      }
+      Object.assign(saved, patch);
+    };
+    const first = data(IPC.voice.updateSettings, { ...stale, transcription: DEFAULT_VOICE_PREFERENCES.transcription });
+    await writing;
+    const second = call(IPC.voice.updateSettings, { ...stale, speaking: DEFAULT_VOICE_PREFERENCES.speaking });
+    await Promise.resolve();
+    await Promise.resolve();
+    release();
+    await first;
+    expect(await second).toMatchObject({ ok: false, error: { code: "not-found" } });
+    expect(saved.voicePreferences).toEqual({ ...stale, transcription: DEFAULT_VOICE_PREFERENCES.transcription });
+  });
+
+  test("a failed voice settings write does not block the next save", async () => {
+    const { saved, settings } = await setup();
+    let writes = 0;
+    settings.update = async (patch) => {
+      if (++writes === 1) throw new ProviderError("invalid-request", "The settings write failed.");
+      Object.assign(saved, patch);
+    };
+    const selected: VoicePreferences = {
+      ...DEFAULT_VOICE_PREFERENCES,
+      speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "weston" }
+    };
+    await expect(data(IPC.voice.updateSettings, selected)).rejects.toThrow(/write failed/i);
+    expect(saved.voicePreferences).toBeUndefined();
+    expect(await data(IPC.voice.updateSettings, selected)).toEqual(selected);
+    expect(saved.voicePreferences).toEqual(selected);
   });
 
   test("an illustration is generated into the book, read back, attached and removed", async () => {

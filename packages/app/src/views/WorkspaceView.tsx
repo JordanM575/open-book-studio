@@ -172,6 +172,7 @@ export function WorkspaceView({
   const [railOpen, setRailOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [voiceStatusRevision, setVoiceStatusRevision] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
@@ -1141,6 +1142,7 @@ export function WorkspaceView({
               onStatus={setStatus}
               illustration={illustration}
               illustrationData={illustrationData}
+              voiceStatusRevision={voiceStatusRevision}
               selection={
                 evidenceSelection && evidenceSelection.chapterId === selected.id
                   ? { start: evidenceSelection.start, end: evidenceSelection.end, nonce: evidenceSelection.nonce }
@@ -1188,6 +1190,7 @@ export function WorkspaceView({
         chapterId={selected?.id ?? null}
         chapterTitle={selected?.title ?? ""}
         chapterContent={selected?.content ?? ""}
+        voiceStatusRevision={voiceStatusRevision}
         onNextChapter={nextChapter}
         onChanged={reloadAfterAgent}
         onNotice={onNotice}
@@ -1437,6 +1440,7 @@ export function WorkspaceView({
         deviceName={deviceName}
         onCheckForChanges={onCheckForChanges}
         section={settingsSection}
+        onVoiceConfigurationChanged={() => setVoiceStatusRevision((revision) => revision + 1)}
       />
 
       {reviewView.kind === "choice" || reviewView.kind === "saving" || reviewView.kind === "blocked" ? (

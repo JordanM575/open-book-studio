@@ -2,6 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
+import type { VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
 
 let testing!: typeof import("@testing-library/react/pure");
 // Loaded in beforeAll, once the DOM exists.
@@ -23,7 +24,7 @@ const NOW = "2026-11-03T12:00:00.000Z";
 const FAKE_KEY = "sk-test-FAKE-SECRET-1234567890";
 const CONN = {
   id: "conn_test000001",
-  provider: "openai",
+  provider: "openrouter",
   label: "Test key",
   kind: "api-key",
   createdAt: NOW
@@ -61,12 +62,27 @@ function mockStudio(overrides?: {
         ok: true,
         data: {
           available: overrides?.speakersAvailable ?? false,
+          selected: overrides?.speakersAvailable ?? false,
+          unavailable: false,
+          connectionId: overrides?.speakersAvailable ? CONN.id : null,
           connectionLabel: overrides?.speakersAvailable ? "Test key" : null,
-          endpoint: null,
-          model: null,
+          model: overrides?.speakersAvailable ? "heygen/heygen-voice-1" : null,
+          voice: overrides?.speakersAvailable ? "nadine" : null,
           voices: []
         }
-      }))
+      })),
+      settings: mock(async () => {
+        const preferences: VoicePreferences = {
+          transcription: overrides?.transcribeCount
+            ? { connectionId: CONN.id, model: "openai/whisper-1" }
+            : { connectionId: null, model: null },
+          speaking: overrides?.speakersAvailable
+            ? { connectionId: CONN.id, model: "heygen/heygen-voice-1", voice: "nadine" }
+            : { connectionId: null, model: null, voice: null }
+        };
+        return { ok: true, data: preferences };
+      }),
+      updateSettings: mock(async (preferences: VoicePreferences) => ({ ok: true, data: preferences }))
     }
   };
   return { test };
@@ -196,7 +212,7 @@ describe("provider and voice status in Settings", () => {
     );
     const voice = testing.within(document.body).getByTestId("voice-status").textContent ?? "";
     expect(voice).toContain("Read-aloud is available");
-    expect(voice).toContain("Dictation is available through 1 connection");
+    expect(voice).toContain("Dictation is set to Test key.");
     expect(voice).toContain("never tested automatically");
     expect(voice).not.toContain("checked");
     // Let bridge promises and dialog focus timers settle before teardown unmounts the DOM.

@@ -200,14 +200,66 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
         `(() => {
           const api = window.studio;
           if (!api) return "missing";
-          const missing = ["library", "books", "chapters", "conflicts", "drafts", "menu", "providers", "connections", "usage", "agent"].filter((key) => !(key in api));
+          const missing = ["library", "books", "chapters", "conflicts", "drafts", "menu", "providers", "connections", "usage", "voice", "agent"].filter((key) => !(key in api));
           if (missing.length) return \`missing: \${missing.join(", ")}\`;
+          const missingVoice = ["settings", "updateSettings", "transcribe", "speak"].filter((key) => !(key in api.voice));
+          if (missingVoice.length) return "missing voice methods";
           const missingAgent = ["start", "stop", "undoLast", "approve", "threads"].filter((key) => !(key in api.agent));
-          return missingAgent.length ? \`missing agent: \${missingAgent.join(", ")}\` : "library, books, chapters, conflicts, drafts, menu, providers, connections, usage, agent";
+          return missingAgent.length ? \`missing agent: \${missingAgent.join(", ")}\` : "library, books, chapters, conflicts, drafts, menu, providers, connections, usage, voice, agent";
         })()`
       );
-      if (shape !== "library, books, chapters, conflicts, drafts, menu, providers, connections, usage, agent") throw new Error(shape);
+      if (shape !== "library, books, chapters, conflicts, drafts, menu, providers, connections, usage, voice, agent") throw new Error(shape);
       return shape;
+    });
+
+    await check("voice preferences round-trip in the throwaway profile without a provider call", async () => {
+      const result = await evaluate<string>(
+        win,
+        `(async () => {
+          const before = await window.studio.voice.settings();
+          if (!before.ok) return "settings read refused: " + before.error.message;
+          const expected = {
+            transcription: { connectionId: null, model: null },
+            speaking: { connectionId: null, model: null, voice: null }
+          };
+          if (JSON.stringify(before.data) !== JSON.stringify(expected)) return "new profile did not start with unset voice choices";
+          const saved = await window.studio.voice.updateSettings(before.data);
+          if (!saved.ok) return "settings save refused: " + saved.error.message;
+          const after = await window.studio.voice.settings();
+          if (!after.ok || JSON.stringify(after.data) !== JSON.stringify(expected)) return "settings did not round-trip";
+          return "unset selections saved and read locally";
+        })()`
+      );
+      if (result !== "unset selections saved and read locally") throw new Error(result);
+      const profile = JSON.parse(await readFile(join(app.getPath("userData"), "studio.json"), "utf8")) as {
+        voicePreferences?: unknown;
+      };
+      const expected = {
+        transcription: { connectionId: null, model: null },
+        speaking: { connectionId: null, model: null, voice: null }
+      };
+      if (JSON.stringify(profile.voicePreferences) !== JSON.stringify(expected)) {
+        throw new Error("the voice choices were not persisted in the app profile");
+      }
+      return result;
+    });
+
+    await check("dictation preload requires the recording's transcription selection", async () => {
+      const result = await evaluate<string>(
+        win,
+        `(async () => {
+          const missing = await window.studio.voice.transcribe({ audio: new ArrayBuffer(0) });
+          if (missing.ok || missing.error.code !== "invalid") return "missing selection was not rejected";
+          const malformed = await window.studio.voice.transcribe({
+            audio: new ArrayBuffer(0),
+            expectedSelection: { connectionId: "conn_!", model: "example" }
+          });
+          if (malformed.ok || malformed.error.code !== "invalid") return "malformed selection was not rejected";
+          return "missing and malformed selections refused before transcription";
+        })()`
+      );
+      if (result !== "missing and malformed selections refused before transcription") throw new Error(result);
+      return result;
     });
 
     await check("the library lists the fixture book", async () => {
@@ -228,6 +280,10 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
     });
 
     await check("the library shows the location health line", async () => {
+      await waitUntil(
+        async () => (await evaluate<string>(win, `document.querySelector('[data-testid="location-health"]')?.innerText ?? ""`)).includes("Ready"),
+        "the ready location health line"
+      );
       const line = await evaluate<string>(
         win,
         `document.querySelector('[data-testid="location-health"]')?.innerText ?? ""`

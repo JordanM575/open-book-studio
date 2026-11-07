@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentEvent } from "@ai-book-studio/core/agent";
 import { wrapPcmAsWav } from "@ai-book-studio/core/providers/tts";
+import type { VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
 import { ProviderError } from "@ai-book-studio/core/providers/types";
 import { AgentRuntime } from "../src/main/agent/runtime";
 import { Library } from "../src/main/library/store";
@@ -23,7 +24,20 @@ const KEY = ["live", "check", "fixture", "secret"].join("-");
 
 const META = { id: "conn_livemeta01", provider: "meta" as const, label: "Meta", kind: "api-key" as const, createdAt: "2026-11-03T00:00:00.000Z" };
 const OPENAI = { ...META, id: "conn_liveopenai1", provider: "openai" as const, label: "OpenAI" };
-const BASES: Record<string, string> = { [META.id]: "https://meta.invalid/v1", [OPENAI.id]: "https://openai.invalid/v1" };
+const OPENROUTER = { ...META, id: "conn_liverouter1", provider: "openrouter" as const, label: "OpenRouter" };
+const LIVE_VOICE_PREFERENCES: VoicePreferences = {
+  transcription: { connectionId: META.id, model: "muse-voice-transcribe-1.0" },
+  speaking: { connectionId: OPENAI.id, model: "gpt-4o-mini-tts", voice: "nova" }
+};
+const PCM_VOICE_PREFERENCES: VoicePreferences = {
+  ...LIVE_VOICE_PREFERENCES,
+  speaking: { connectionId: OPENROUTER.id, model: "heygen/heygen-voice-1", voice: "weston" }
+};
+const BASES: Record<string, string> = {
+  [META.id]: "https://meta.invalid/v1",
+  [OPENAI.id]: "https://openai.invalid/v1",
+  [OPENROUTER.id]: "https://openrouter.invalid/v1"
+};
 
 const realFetch = globalThis.fetch;
 const realPath = process.env.PATH;
@@ -44,7 +58,7 @@ async function temp(prefix: string): Promise<string> {
 type Catalogue = { models: Array<{ id: string }> };
 
 /** The provider service the check reads: connections, a catalogue and the secret for a request. */
-function providers(options: { connections?: Array<typeof META | typeof OPENAI>; models?: string[]; list?: () => Promise<never> } = {}) {
+function providers(options: { connections?: Array<typeof META | typeof OPENAI | typeof OPENROUTER>; models?: string[]; list?: () => Promise<never> } = {}) {
   const connections = options.connections ?? [META, OPENAI];
   return {
     list: options.list ?? (async () => connections),
@@ -197,13 +211,13 @@ describe("live checks", () => {
       const calls = network({
         "meta.invalid/v1/chat/completions": () => turns.shift() ?? reply("Done."),
         "meta.invalid/v1/asr/transcribe": () => Response.json({ transcript: PHRASE, audioDurationMs: 2400 }),
-        "openai.invalid/v1/audio/speech": () => new Response(pcm(true), { headers: { "content-type": "audio/pcm" } }),
+        "openrouter.invalid/v1/audio/speech": () => new Response(pcm(true), { headers: { "content-type": "audio/pcm; rate=44100; channels=1" } }),
         "meta.invalid/v1/images/generations": () =>
           Response.json({ data: [{ b64_json: Buffer.from(png).toString("base64") }], output_format: "png" })
       });
 
       const models = ["muse-spark-1.2-contributor", "muse-spark-1.3-contributor", "muse-spark-1.3"];
-      const results = await runLiveChecks(providers({ models }) as never, { sampleRoot });
+      const results = await runLiveChecks(providers({ models, connections: [META, OPENROUTER] }) as never, { sampleRoot, voicePreferences: PCM_VOICE_PREFERENCES });
 
       expect(verdicts(results)).toEqual({
         "the model catalogue": "ok",
@@ -221,6 +235,10 @@ describe("live checks", () => {
       // The turn ran on the Contributor model the spec names, not the first one listed.
       const turn = calls.find((call) => call.url.pathname.endsWith("/chat/completions"));
       expect(JSON.parse(turn?.body ?? "{}").model).toBe("muse-spark-1.3-contributor");
+      const speaking = calls.find((call) => call.url.pathname.endsWith("/audio/speech"));
+      expect(JSON.parse(speaking?.body ?? "{}")).toMatchObject({
+        model: "heygen/heygen-voice-1", voice: "weston", response_format: "pcm"
+      });
       expect(calls.every((call) => call.url.hostname.endsWith(".invalid"))).toBe(true);
       // The library it wrote to was a temporary copy, and it is gone.
       expect(await leftovers()).toEqual(before);
@@ -235,7 +253,7 @@ describe("live checks", () => {
       network({
         "meta.invalid/v1/chat/completions": () => reply("I read the chapter and left it as it was."),
         "meta.invalid/v1/asr/transcribe": () => Response.json({ transcript: "Something else entirely." }),
-        "openai.invalid/v1/audio/speech": () => new Response(pcm(false), { headers: { "content-type": "audio/pcm" } }),
+        "openrouter.invalid/v1/audio/speech": () => new Response(pcm(false), { headers: { "content-type": "audio/pcm" } }),
         "meta.invalid/v1/images/generations": () =>
           Response.json({
             data: [
@@ -248,7 +266,7 @@ describe("live checks", () => {
           })
       });
 
-      const results = await runLiveChecks(providers({ models: ["muse-spark-1.3-contributor"] }) as never, { sampleRoot });
+      const results = await runLiveChecks(providers({ models: ["muse-spark-1.3-contributor"], connections: [META, OPENROUTER] }) as never, { sampleRoot, voicePreferences: PCM_VOICE_PREFERENCES });
 
       expect(verdicts(results)).toEqual({
         "the model catalogue": "ok",
@@ -284,7 +302,7 @@ describe("live checks", () => {
       const logged = spyOn(console, "error").mockImplementation(() => {});
       let results: LiveResult[];
       try {
-        results = await runLiveChecks(providers({ models: ["muse-spark-1.3-contributor"] }) as never, { sampleRoot });
+        results = await runLiveChecks(providers({ models: ["muse-spark-1.3-contributor"] }) as never, { sampleRoot, voicePreferences: LIVE_VOICE_PREFERENCES });
       } finally {
         logged.mockRestore();
       }
@@ -312,13 +330,13 @@ describe("live checks", () => {
 
     expect(verdicts(results)).toEqual({
       "the model catalogue": "blocked",
-      dictation: "failed",
+      dictation: "blocked",
       speaking: "blocked",
       "Muse Image": "failed"
     });
     expect(detail(results, "the model catalogue")).toBe("There is no Meta connection in the studio.");
-    expect(detail(results, "dictation")).toBe("[invalid-request] Connect Meta in Settings before using voice dictation.");
-    expect(detail(results, "speaking")).toBe("No voice service is connected, so there is nothing to speak with.");
+    expect(detail(results, "dictation")).toBe("Choose a transcription connection and model in Settings to run the dictation check.");
+    expect(detail(results, "speaking")).toBe("Choose a speaking connection, model and voice in Settings to run the speaking check.");
     expect(detail(results, "Muse Image")).toBe("[invalid-request] Connect Meta in Settings before generating an illustration.");
     expect(calls).toEqual([]);
   });
@@ -337,7 +355,7 @@ describe("live checks", () => {
         });
       }
     });
-    const results = await runLiveChecks(unreadable as never, { sampleRoot });
+    const results = await runLiveChecks(unreadable as never, { sampleRoot, voicePreferences: LIVE_VOICE_PREFERENCES });
     expect(detail(results, "the model catalogue")).toBe(
       "[offline] The studio could not list its connections. — cause: ECONNRESET"
     );
