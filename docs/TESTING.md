@@ -54,7 +54,7 @@ order:
 
 | Check | What it drives |
 | --- | --- |
-| `smoke` | The built app through its own renderer: the preload bridge, the library, editing, autosave, undo, chapter moves, **a Word export with its illustration**, a Markdown export, a rename and a delete. |
+| `smoke` | The built app through its own renderer: the preload bridge, the library, editing, autosave, undo, chapter moves, **a Word export with its illustration**, a Markdown export, a damaged chapter file (named in a notice, the rest still readable, both manuscript exports refused and earlier exports untouched), a rename and a delete. |
 | `web` | The browser build over its own storage: create, save, reopen, conflict copies, a portable archive, reduced motion. |
 | `audit` | The real window at 1440×900 for dead ends, missing controls, console errors, and the accessibility basics: every control named, big enough to hit, every image with an `alt`, one `h1`, and a keyboard that reaches something with a visible focus ring. |
 | `phone` | The same walk at 390×844, because the phone layout is a surface people use and it has its own ways to strand someone. |

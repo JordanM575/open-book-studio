@@ -8,6 +8,11 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Changed
+- The hidden smoke run checks a damaged chapter file in the real app. While the book is open it writes a chapter file with
+  broken front matter into the disposable smoke library, as another editor might, and confirms the workspace names the
+  file in its notice, the readable chapters stay readable, a Word export and a Markdown export through the real bridge
+  are refused with the fixed message, the exports already in the folder are byte for byte unchanged, and no source file
+  changes. It then removes the file and takes the removal in. With the export refusal switched off the check fails.
 - Rename the product to Open Book Studio everywhere an author, a command line or a file reader sees the name: the library header, the
   window title, error and refusal messages, the `bookwriter` usage banner and MCP server text, the sign-in loopback page, the glasses page,
   open/save dialog filters, the exported EPUB creator fallback, the licenses dialog and the microphone permission text. Identifiers stay as

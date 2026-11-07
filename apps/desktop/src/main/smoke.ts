@@ -1,10 +1,10 @@
 import type { BrowserWindow } from "electron";
 import { app } from "electron";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { renderPdfInHiddenWindow } from "./pdf";
 import type { Studio } from "./studio";
 
@@ -1564,6 +1564,113 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       const chapters = (text.match(/^## /gm) ?? []).length;
       if (chapters === 0) throw new Error("the Markdown file has no chapter headings");
       return `${chapters} chapter heading${chapters === 1 ? "" : "s"}, ${text.length} characters`;
+    });
+
+    await check("a damaged chapter file is reported, the rest stays readable, and a manuscript export is refused", async () => {
+      const library = studio.requireLibrary();
+      const profile = process.env.STUDIO_USER_DATA;
+      if (!profile || library.root !== resolve(dirname(profile), "library")) {
+        throw new Error("the damaged-file check only runs in the disposable smoke library");
+      }
+      const folder = process.env.STUDIO_EXPORT_PATH;
+      if (!folder) throw new Error("STUDIO_EXPORT_PATH is not set");
+      const book = (await library.listBooks())[0];
+      if (book?.id !== "book_smoke0001") throw new Error("the synthetic smoke book disappeared");
+      const before = await library.readBook(book.id);
+      if (before.chapters.length === 0) throw new Error("the smoke book has no readable chapter");
+      if (before.chapterReadIssues.length > 0) throw new Error("the smoke book already had an unreadable chapter file");
+      const sourcePaths = [
+        join(library.root, "books", book.id, "book.json"),
+        ...before.chapters.map((chapter) => join(library.root, "books", book.id, "chapters", chapter.path))
+      ];
+      const sourceBytes = await Promise.all(sourcePaths.map((source) => readFile(source)));
+      // Everything the earlier exports left, byte for byte, so a refused export can be seen to leave it alone.
+      const snapshotExports = async (): Promise<Map<string, Buffer>> => {
+        const names = (await readdir(folder)).sort();
+        return new Map(await Promise.all(names.map(async (name) => [name, await readFile(join(folder, name))] as const)));
+      };
+      const exportsBefore = await snapshotExports();
+      if (![...exportsBefore.keys()].some((name) => name.endsWith(".docx"))) {
+        throw new Error("the earlier complete Word export is missing");
+      }
+
+      const name = "0000-damaged-smoke.md";
+      const path = join(library.root, "books", book.id, "chapters", name);
+      const damagedBytes = "---\nid: [broken\n---\nSynthetic damaged text.\n";
+      const bannerUp = (): Promise<boolean> =>
+        evaluate<boolean>(win, inPage(`document.querySelector('[data-testid="external-change"]')`));
+      const refresh = async (): Promise<void> => {
+        await waitUntil(bannerUp, "the external-change banner");
+        const clicked = await evaluate<boolean>(
+          win,
+          `(() => {
+            const banner = document.querySelector('[data-testid="external-change"]');
+            const button = [...(banner?.querySelectorAll("button") ?? [])].find((item) => item.textContent?.trim() === "Refresh");
+            if (!button) return false;
+            button.click();
+            return true;
+          })()`
+        );
+        if (!clicked) throw new Error("the external-change banner had no Refresh button");
+      };
+      const notice = `document.querySelector('[data-testid="chapter-read-issues"]')`;
+
+      // Act like another editor, but only inside the smoke runner's temporary library, and after the
+      // grace period for the studio's own writes.
+      await delay(2200);
+      await writeFile(path, damagedBytes, { flag: "wx" });
+      let outcome = "";
+      try {
+        await refresh();
+        await waitUntil(
+          () => evaluate<boolean>(win, inPage(`(${notice}?.textContent ?? "").includes(${JSON.stringify(name)})`)),
+          "the notice naming the damaged chapter file"
+        );
+        const detail = await library.readBook(book.id);
+        if (!detail.chapterReadIssues.some((issue) => issue.fileName === name)) {
+          throw new Error("the book response did not identify the damaged file");
+        }
+        if (detail.chapters.length !== before.chapters.length) throw new Error("a readable chapter disappeared");
+
+        // Both manuscript exports that have a control on the workspace go through the real bridge and
+        // are refused before anything is asked or written.
+        for (const method of ["exportDocx", "exportMarkdown"] as const) {
+          const refused = await evaluate<{ ok: boolean; code?: string; message?: string }>(
+            win,
+            `(async () => {
+              const result = await window.studio.books.${method}(${JSON.stringify(book.id)});
+              return result.ok ? { ok: true } : { ok: false, code: result.error.code, message: result.error.message };
+            })()`
+          );
+          if (refused.ok || refused.code !== "format" || !refused.message?.includes("not exported")) {
+            throw new Error(`${method} did not give the fixed refusal`);
+          }
+        }
+        const exportsAfter = await snapshotExports();
+        if (JSON.stringify([...exportsAfter.keys()]) !== JSON.stringify([...exportsBefore.keys()])) {
+          throw new Error("a refused export created or removed a file");
+        }
+        for (const [file, bytes] of exportsBefore) {
+          if (!bytes.equals(exportsAfter.get(file) ?? Buffer.alloc(0))) throw new Error(`a refused export changed ${file}`);
+        }
+
+        if ((await readFile(path, "utf8")) !== damagedBytes) throw new Error("the damaged source file changed");
+        const afterBytes = await Promise.all(sourcePaths.map((source) => readFile(source)));
+        if (afterBytes.some((bytes, index) => !bytes.equals(sourceBytes[index] ?? Buffer.alloc(0)))) {
+          throw new Error("another source file changed while reading the book");
+        }
+        outcome = "the notice names the file; readable chapters, source bytes and earlier exports are untouched; both exports are refused";
+      } finally {
+        await rm(path, { force: true });
+      }
+
+      // Take the file's removal in too, so the next checks start from the screen they expect.
+      await refresh();
+      await waitUntil(
+        () => evaluate<boolean>(win, inPage(`!${notice}`)),
+        "the notice to go once the damaged file was removed"
+      );
+      return outcome;
     });
 
     await check("front and back matter saves from the Format dialog and reaches the e-book in order", async () => {
