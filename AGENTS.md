@@ -54,6 +54,7 @@ bun run tokens       # regenerate tokens.generated.css from design/tokens.json
 bun run toolkit:build # compile the `bookwriter` CLI/MCP binary into apps/toolkit/dist
 bun run toolkit      # run the CLI from source
 bun run keys:check   # provider key status; prints no key material
+bun run local:pass   # opt-in OpenRouter writing turn; skips unless OPENROUTER_LOCAL_PASS=1 and a key are set
 ```
 
 Quirks:

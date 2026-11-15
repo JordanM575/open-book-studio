@@ -7,6 +7,11 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Model-agnostic local pass
+
+- The public README no longer presents the studio as a hackathon or Meta-only product. OpenRouter, OpenAI, Anthropic, Gemini and Meta are writing choices; illustrations stay on this build's Meta image adapter.
+- `bun run local:pass` is an opt-in OpenRouter Playwright turn. It is not part of `e2e` or `verify`, and it exits before Electron unless `OPENROUTER_LOCAL_PASS=1` and `OPENROUTER_API_KEY` are both set. The default model is `openai/gpt-4o-mini`.
+
 ### Invalidated task projection
 
 - `projectInvalidatedTasks` builds the next task revisions for one direction's impact keys. An incomplete impact or a shared key matches, and a task that depends on a match matches too. A dependency that does not match is left out. The result is a frozen copy in input order: revision plus one, a sha256 base of the caller-supplied digest at the old revision, the supplied direction reference, `retryAllowed: true`, and the caller-supplied timestamp. A cached `status` is dropped. `currentAttempt`, `needsDirection`, `generation`, `createdAt`, and `definition` are copied. It does not hash, write, mark an attempt historical, clear a live attempt, bump generation, compare the new direction with the task's current direction, step the run, schedule, or resume cadence, and the host does not call it. No task box is closed.

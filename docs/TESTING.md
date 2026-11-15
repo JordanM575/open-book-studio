@@ -8,6 +8,7 @@ Four layers, and each one catches what the others cannot.
 | **Coverage** | That the unit layer has not quietly thinned out | `bun run coverage` | seconds |
 | **End to end** | The built app, a real browser, a separate process | `bun run e2e` | under a minute |
 | **Live** | A real provider, a real key, a real cost | `bun run live:check` | a few cents |
+| **Local pass** | One opted-in OpenRouter writing turn through the built app | `bun run local:pass` | a few cents, only when opted in |
 
 A change is not done because the tests pass. It is done when `bun run verify` and `bun run e2e`
 both pass, and — if it touches a provider — `bun run live:check` still does.
@@ -23,6 +24,8 @@ journey), `node scripts/browser-matrix.mjs` (multi-engine findings), `bun run a1
 (accessibility scans), `bun run visual` (visual baselines), `node scripts/e2e.mjs` (the
 all-up run), `bun run smoke:packaged` (packaged app), and `bun run release` (the release
 gate). `bun run live:check` is further out still: opt-in, cheapest call, real cost.
+`bun run local:pass` is separate again. It is not part of `e2e` or `verify`, and it makes no
+network call unless `OPENROUTER_LOCAL_PASS=1` and `OPENROUTER_API_KEY` are both set.
 
 ## Recorded baseline
 
@@ -124,6 +127,20 @@ They all need something a unit test cannot have: a real Electron window, a real 
 600×600, a real second process on another address, or a real docx on disk. The export check
 unzips the file it produced and looks for `word/media/`, because the thing that goes wrong is
 never the writer's opinion of what it wrote.
+
+## The OpenRouter local pass
+
+`bun run local:pass` is an opt-in Playwright check of one real OpenRouter writing turn. It is not
+a replacement for `bun run live:check`, and it is not part of `bun run e2e`.
+
+Without `OPENROUTER_LOCAL_PASS=1` and `OPENROUTER_API_KEY`, it prints a skip and exits 0 before
+Electron starts. With both, it launches the built app on the in-memory test vault, adds the key
+through the app's own connection channel, removes provider keys and proxy variables from that
+process, and requires a stored OpenRouter turn plus a changed chapter. `OPENROUTER_MODEL`
+overrides the default `openai/gpt-4o-mini`.
+
+Illustrations in this build still go through the Meta image adapter. This pass does not generate
+an image and does not claim that they have moved.
 
 ## The live layer
 
