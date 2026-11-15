@@ -15,12 +15,12 @@
  * `OPENROUTER_MODEL` overrides the default `openai/gpt-4o-mini`. A missing flag or key
  * exits 0. A bad key or model id exits 1 before any provider request.
  */
-import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { LOCAL_PASS_BOOK, writeLocalPassFixture } from "./openrouter-local-fixture.mjs";
 import { planOpenRouterLocalPass } from "./openrouter-local-plan.mjs";
 
 const plan = planOpenRouterLocalPass({
@@ -40,36 +40,14 @@ if (plan.action === "fail") {
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appDir = join(root, "apps", "desktop");
-const BOOK = "book_localpass01";
+const BOOK = LOCAL_PASS_BOOK;
 const MODEL = plan.model;
 const PROMPT =
   "Read the opening chapter and add exactly one new sentence at the end about the lamp. Do not replace the chapter.";
 const key = process.env.OPENROUTER_API_KEY.trim();
 
 const temp = await mkdtemp(join(tmpdir(), "studio-openrouter-local-pass-"));
-const profile = join(temp, "profile");
-const libraryRoot = join(temp, "library");
-const backendFile = join(temp, "backend.json");
-const bookDir = join(libraryRoot, "books", BOOK);
-await mkdir(join(bookDir, "chapters"), { recursive: true });
-const now = "2026-11-15T12:00:00.000Z";
-await writeFile(
-  join(bookDir, "book.json"),
-  `${JSON.stringify(
-    {
-      schemaVersion: 1,
-      id: BOOK,
-      title: "The Salt Road",
-      description: "A synthetic fixture for the opted-in OpenRouter local pass.",
-      stage: "drafting",
-      createdAt: now,
-      updatedAt: now
-    },
-    null,
-    2
-  )}\n`
-);
-await writeFile(join(profile, "studio.json"), `${JSON.stringify({ libraryRoot }, null, 2)}\n`);
+const { profile, backendFile, bookDir } = await writeLocalPassFixture(temp);
 
 const env = { ...process.env };
 delete env.ELECTRON_RUN_AS_NODE;

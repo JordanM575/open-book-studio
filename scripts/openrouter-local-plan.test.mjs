@@ -1,4 +1,8 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { writeLocalPassFixture } from "./openrouter-local-fixture.mjs";
 import { DEFAULT_OPENROUTER_MODEL, planOpenRouterLocalPass } from "./openrouter-local-plan.mjs";
 
 const KEY = "sk-or-local-pass-fixture";
@@ -26,5 +30,20 @@ describe("the OpenRouter local pass plan", () => {
       action: "run",
       model: "anthropic/claude-3.5-haiku"
     });
+  });
+});
+
+describe("the OpenRouter local pass fixture", () => {
+  test("creates the profile directory before writing studio.json", async () => {
+    const temp = await mkdtemp(join(tmpdir(), "studio-openrouter-local-fixture-"));
+    try {
+      const layout = await writeLocalPassFixture(temp);
+      const settings = JSON.parse(await readFile(join(layout.profile, "studio.json"), "utf8"));
+      expect(settings.libraryRoot).toBe(layout.libraryRoot);
+      const book = JSON.parse(await readFile(join(layout.bookDir, "book.json"), "utf8"));
+      expect(book.id).toBe("book_localpass01");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
   });
 });

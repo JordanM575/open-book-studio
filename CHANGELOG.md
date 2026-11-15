@@ -10,7 +10,7 @@ Update the `Unreleased` section before every commit.
 ### Model-agnostic local pass
 
 - The public README no longer presents the studio as a hackathon or Meta-only product. OpenRouter, OpenAI, Anthropic, Gemini and Meta are writing choices; illustrations stay on this build's Meta image adapter.
-- `bun run local:pass` is an opt-in OpenRouter Playwright turn. It is not part of `e2e` or `verify`, and it exits before Electron unless `OPENROUTER_LOCAL_PASS=1` and `OPENROUTER_API_KEY` are both set. The default model is `openai/gpt-4o-mini`.
+- `bun run local:pass` is an opt-in OpenRouter Playwright turn. It is not part of `e2e` or `verify`, and it exits before Electron unless `OPENROUTER_LOCAL_PASS=1` and `OPENROUTER_API_KEY` are both set. The default model is `openai/gpt-4o-mini`. The throwaway profile directory is created before `studio.json` is written.
 
 ### Invalidated task projection
 
