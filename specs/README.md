@@ -63,7 +63,7 @@ them as one product. Numbers are not reused.
 
 The browser build is 010 on purpose: it depends on the core/port split in ADR 0009, which is a refactor
 of 001, and on the storage-tier requirements added to 002 as FR-071…FR-076. Specs 011–013 are the
-hackathon delivery track: model access, the verification suite and the two build targets. They refine
+model-access and verification track: model access, the verification suite and the two build targets. They refine
 002 rather than replace it; where they disagree, the newer spec wins and 002 is amended. The agent harness runtimes
 (`@ai-sdk/harness`) are deferred in ADR 0007 rather than given a spec number; no work is planned until a
 local sandbox and a stable API exist.

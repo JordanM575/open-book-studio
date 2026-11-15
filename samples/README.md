@@ -1,6 +1,6 @@
 # Sample library: The Salt Road
 
-`samples/the-salt-road` is a small, original library for the hackathon demo and for anyone who wants to
+`samples/the-salt-road` is a small, original library for a demo and for anyone who wants to
 open a complete book without touching their own work.
 
 - **Book:** *The Salt Road*, a lighthouse-keeper story written for this project.

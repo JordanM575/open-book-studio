@@ -7,19 +7,13 @@ Markdown and JSON on your own disk, in iCloud Drive, Google Drive, Dropbox or an
 with no account, no server and no database that can quietly disagree with your prose. A writing agent
 works on that folder directly: it reads the Story Bible and the chapters, edits through checked saves
 you can undo, and can keep working after you close the window.
-The agent works on the actual book, and the author keeps the actual files.
-
-Built for the Meta Global AI Developer Hackathon (Indie Developer track, "Build for Your World").
-This local-first studio is a fresh implementation of an earlier cloud/web writing idea, developed
-with Spec Kit's specification-driven workflow. The idea, designs and specifications predated the
-event. The public history preserves a labelled October 26 implementation baseline, followed by
-the event additions. The [submission packet](hackathon/SUBMISSION.md) explains the rewrite,
-the dated baseline, Meta integration and what the demo actually verifies.
+The agent works on the actual book, and the author keeps the actual files. The writing model is
+yours to choose: OpenRouter, OpenAI, Anthropic, Google Gemini, or a Meta connection. No provider
+is the product.
 
 [![Watch the Open Book Studio demo](https://img.youtube.com/vi/0RsFzUq97xU/hqdefault.jpg)](https://youtu.be/0RsFzUq97xU)
 
-[Watch the current demo](https://youtu.be/0RsFzUq97xU) ·
-[Original submitted hackathon cut](https://www.youtube.com/watch?v=tLFCn9V193E)
+[Watch the current demo](https://youtu.be/0RsFzUq97xU)
 
 ## Current state
 
@@ -35,10 +29,11 @@ status table below says what is complete, in progress and planned.
   retain overlapping edits as visible conflict copies, preserve unknown nested fields and refuse
   writes to a newer book schema. Failed close/quit saves have recoverable draft copies.
 - **Voice choices.** Desktop Settings now saves separate dictation and speaking connections, models
-  and voices. Meta and OpenRouter transcription and OpenAI/OpenRouter speech use those explicit
-  choices; a failure never silently switches to another paid provider.
-- **Models.** Muse Wonder 1.0 is recognised as a tool-capable writing model alongside Muse
-  Spark 1.3.
+  and voices. The selected transcription and speech adapters use those explicit choices; a failure
+  never silently switches to another paid provider.
+- **Models.** The writing agent uses the connection and model saved on the book. OpenRouter is the
+  usual way to reach models from more than one company. A Meta connection remains available, and
+  Muse Wonder 1.0 is recognised as a tool-capable writing model alongside Muse Spark 1.3.
 - **Checks.** The November 7 integrated macOS baseline passed 2,280 unit/component tests, coverage
   and 47 hidden-app smoke checks. Linux `verify` and `e2e` both passed on `55b55b8`; either job
   failing now fails the workflow. See the [dated evidence](docs/TESTING.md#recorded-baseline).
@@ -49,8 +44,6 @@ status table below says what is complete, in progress and planned.
   names the first slices and their decision gates.
 
 ## What it does
-
-[SUBMISSION.md](hackathon/SUBMISSION.md) separates what existed before the event from event work.
 
 ### Feature status
 
@@ -65,12 +58,12 @@ there is a working slice with remaining work; **planned** means it is not availa
 | Writing agent and tool approvals | Complete | 22 manuscript tools, visible actions, conversation history and one-turn undo |
 | Model choice and usage | Complete | Per-turn provider/model attribution, reported usage/cost and informational spending warnings; unknown cost is not a free turn |
 | Protected desktop credentials | Complete | Electron safeStorage, macOS login Keychain protection, encrypted profile file, explicit keychain status/check and no plaintext fallback |
-| Dictation / speech-to-text (STT) | Complete for the desktop adapters | Choose Meta Muse Voice Transcribe or a curated OpenRouter Whisper model; audio stays in memory, and missing/stale choices are refused before sending |
+| Dictation / speech-to-text (STT) | Complete for the desktop adapters | Choose a transcription model on the saved connection, including Meta Muse Voice Transcribe or a curated OpenRouter Whisper model; audio stays in memory, and missing/stale choices are refused before sending |
 | Read aloud / text-to-speech (TTS) | Complete for the current adapters | OpenRouter and OpenAI speech output, sentence-based chunking and playback controls; disclosed device speech only when no provider is selected |
 | Voice provider, model and agent-voice preferences | Implemented; acceptance record open | Spec 038 merged in PR #26: profile-local Settings choices, model-specific voices and no provider probes; T022 remains unchecked at the author's direction |
 | Character voices, narrator casting and audiobooks | Planned / coming soon | Assign distinct voices to characters and a narrator, then create an audiobook; this is a roadmap item, not current export functionality |
 | Background agent turns | Complete on desktop | Explicit opt-in, reopening the active conversation, and notification when a reply or approval is ready |
-| Illustrations | Complete on desktop | Muse Image generation, chapter attachments and embedded Word illustrations; no SAM cutout claim |
+| Illustrations | Complete on desktop | Image generation through this build's Meta image adapter, chapter attachments and embedded Word illustrations; no SAM cutout claim |
 | Dedicated cover design | Planned | Image records can describe covers, but the current generation interface is for chapter illustrations |
 | Word, Markdown, PDF and EPUB export | Complete on desktop | Formatting and ordered front/back matter; an export refuses a book that has unreadable chapter files rather than leave them out; KDP, EPUBCheck and PDF/UA conformance remain unproven |
 | Markdown folder export | In progress; merged and usable on desktop | Ordered folder of Markdown files with matter and verified images from the saved book; broader publication checks remain open |
@@ -108,13 +101,14 @@ App store and release-download links will be posted in this repository when read
 - **Your library is a folder.** Each book is a folder of `book.json` and one Markdown file per chapter.
 - **A manuscript sheet** with a chapter rail, autosave, a visible save state and book search.
 - **A Story Bible** for the description, outline, three-act arc, characters and memories.
-- **Dictation** at the caret with Meta Muse Voice Transcribe or OpenRouter transcription, chosen in
-  **Settings → Voice** independently of the writing model. The recording is never written to disk.
+- **Dictation** at the caret with the transcription connection chosen in **Settings → Voice**,
+  independently of the writing model. The recording is never written to disk.
 
 ### Work with the agent
 
-- **A writing agent** on Muse Spark 1.3, or on a model from OpenRouter, OpenAI, Anthropic or Google
-  Gemini. It reads the Story Bible and chapters through 22 tools, and every edit is a checked save.
+- **A writing agent** on the model's connection saved for the book: OpenRouter, OpenAI, Anthropic,
+  Google Gemini or Meta. It reads the Story Bible and chapters through 22 tools, and every edit is
+  a checked save.
 - **Contributor consent.** Muse Spark 1.3 Contributor may train on what you send, so the studio
   refuses it until the book opts in.
 - **Approvals and undo.** Destructive edits, such as deleting or merging chapters, wait for your
@@ -132,7 +126,8 @@ App store and release-download links will be posted in this repository when read
 
 ### Illustrate and export
 
-- **Illustrations** with Muse Image 1.0, priced on the button (about $0.01) before you generate.
+- **Illustrations** through this build's Meta image adapter (Muse Image 1.0), priced on the button
+  (about $0.01) before you generate. Other writing providers do not generate images in this build.
 - **Exports:** Word with illustrations embedded, plus Markdown, PDF and EPUB from the Format dialog,
   and an ordered Markdown folder from the saved book. No KDP, EPUBCheck or PDF/UA acceptance is claimed.
 - **Images and archives:** every image in a book as a JPEG, or the whole library as an archive.
@@ -183,7 +178,10 @@ is sent without the author pressing Confirm and send.
 - **Plain warnings** for a library location or provider that needs attention; one studio per profile.
 - **Licenses.** Settings lists every open-source package each build ships, with its license text.
 
-## Meta models
+## Models
+
+OpenRouter, OpenAI, Anthropic, Google Gemini and Meta can each supply the writing agent. Pick the
+connection in Settings, then the model for the book. A Meta connection is one choice, not the default.
 
 | Need | Model | How the studio uses it |
 | --- | --- | --- |
