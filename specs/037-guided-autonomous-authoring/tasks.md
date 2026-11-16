@@ -84,6 +84,9 @@ with an explicit 037 exception. Earlier open/Proposed phrasing above is the hist
   FORMAT with a pure raw codec in `packages/core/src/authoring/wire.ts` and synthetic round-trip/refusal
   tests. Shared thread migration, host-permission schemas, checked writers, real streaming and
   independent review remain; T018 stays open.
+  **Partial (host permission):** the schema-1 host-permission wire schema and pure codec now exist.
+  A copied descriptor is not execution permission. Shared thread migration, checked writers, storage,
+  streaming, and independent review remain; T018 stays open.
 - [ ] T019 Implement checked/lossless shared threads, explicit migration, recoverable deletion and all callers.
   **Partial (2026-11-08):** v1 conversation storage now writes through the Library's per-book queue and
   journal-aware checked raw-hash commit, verifies readback, keeps stale intended documents as
