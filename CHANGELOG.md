@@ -10,6 +10,7 @@ Update the `Unreleased` section before every commit.
 ### Host permission descriptor
 
 - A host-local permission descriptor can be validated. A copied descriptor is not execution permission. The pure codec does not store the descriptor, resume a host, or close a task.
+- The authoring boundary now says that descriptor and its format section are present. The workflow codec still does not hash bytes. The host-permission codec hashes the exact input bytes only when a caller supplies an expected hash. It still does not store the descriptor, resume a host, or close a task.
 
 ### Desktop chapter history
 

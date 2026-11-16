@@ -306,17 +306,21 @@ accounting-reconciliation contract is required to attach later definitive billin
 
 T018 now supplies the schema-1 workflow records and this raw codec: field-level FORMAT definitions,
 exact reference/hash rules, command/receipt pagination, per-kind bounds and conflict/recovery rules.
-Shared thread migration and host-permission schemas, checked workflow writers, real streaming and
-independent review remain open. A snapshot here aggregates multiple records and command history; do
+The schema-1 host-permission descriptor and its pure codec are also present. Shared thread migration,
+checked workflow writers, host-permission storage, real streaming and independent review remain open.
+A snapshot here aggregates multiple records and command history; do
 **not** write it wholesale as `run.json` or infer that it fits the 2.5 MB run-file limit. New graph
 inputs enforce 2.5 MB/1,024 tasks and individual task/command/request values enforce 262,144 bytes.
-The codec validates hash shape but cannot compute a SHA-256, read a related file or verify currency;
-the host owns exact-byte hashing, storage and cross-file reconciliation.
+The workflow raw codec validates hash shape but cannot compute a SHA-256, read a related file or
+verify currency; the host owns that exact-byte hashing, storage and cross-file reconciliation.
+The host-permission codec hashes the exact input bytes when the caller supplies an expected hash.
+It does not store the descriptor, read a clock, or resume a host.
 
 T019/T020/T022–T025/T029/T032–T035 own checked conversation/storage, pinned host permission, durable
 reservation/effect receipts, lifecycle, real transport, quiescence and publication. No package global
-export, SDK/runtime, Library/API/IPC/preload/Workspace or ThreadStore is changed here; the FORMAT change
-is limited to the T018 workflow-record section.
+export, SDK/runtime, Library/API/IPC/preload/Workspace or ThreadStore is changed here. FORMAT includes
+the T018 workflow-record section and the schema-1 host-permission descriptor. The host-permission
+section does not authorize storage or a host resume.
 Host integration must prevent copied descriptors and worker text from entering privileged command/
 receipt/fact inputs, retain observations before projection errors, reconcile uncertain work explicitly,
 and never recreate a ledger on restart to erase charges. Source/exact-citation/context construction,
