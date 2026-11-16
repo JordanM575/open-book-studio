@@ -82,9 +82,12 @@ User-origin paste is typing, not a controlled replacement: during a hold it
 inserts the normalized text through the normal change path with the same
 isolated history unit as paste outside a hold. Controlled `replaceText`,
 dictation and evidence installation remain refused during a hold.
-`insertDictation(text, expectedRevision)` reuses the existing transcript-spacing
-helper at the current selection. Both report isolated history units. Dictation
-refusal leaves ownership of the uninserted transcript with the host for retry.
+`insertDictation(text, expectedRevision)` inserts at the start of the selection
+and keeps the selected text. `replaceDictation(text, expectedRevision)` removes
+only that range. Both keep line breaks, still add joining spaces when the
+neighboring prose needs them, go through `replaceText` with origin `dictation`,
+and report one isolated history unit. Dictation refusal leaves ownership of the
+uninserted transcript with the host for retry.
 Composition-time programmatic changes refuse; browser composition text itself
 continues through ordinary input/change notifications. Composition end/cancel waits
 for the native final input/observer turn before releasing the guard.

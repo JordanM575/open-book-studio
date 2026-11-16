@@ -783,6 +783,69 @@ is not implemented by the T023 context-manifest store.
 - In-memory run/admission snapshots are aggregates across these records. **They are never written as a
   wholesale `run.json`**, never used as a wire record and never assumed to fit a per-file bound.
 
+## Host permission descriptor (schema 1)
+
+D-194–D-196 / [ADR 0019](adr/0019-bounded-autonomous-authoring.md) keep host permission outside the
+library and the archive. This section specifies that schema-1 descriptor. It is **not** a file under
+`books/<bookId>/workflows/<runId>/`, it is not library content, and it does not travel in a folder
+copy, portable archive, or whole-book trash. The workflow schema above still does not authorize host
+permission.
+
+This section does not authorize a scheduler, a provider call, publication, storage, or execution.
+A copied descriptor is not execution permission. Decoding one does not grant it. The pure codec is
+`packages/core/src/authoring/host-permission.ts`. It performs no I/O, reads no clock, and writes no
+file. No writer, path, or host resume is specified here.
+
+### Record
+
+The descriptor is a closed object. Extra keys are refused, including inside `owner`. There is no
+prose, path, URL, body, or credential field, and unknown fields are not preserved. A missing field
+refuses. Any `schemaVersion` other than `1` refuses and is not migrated or rewritten.
+
+| Field | Rule |
+| --- | --- |
+| `schemaVersion` | Exactly `1`. |
+| `kind` | Exactly `host-permission`. |
+| `id` | Portable id with prefix `permit_`. |
+| `owner` | `{ libraryRegistration, bookId, runId }`, equal to the owner the caller expects. A mismatch is `foreign-owner`. |
+| `hostId` | Opaque host id. Not a path, username, or credential. A mismatch with the caller-expected host is `foreign-host`. |
+| `policyDigest` | Lowercase SHA-256, 64 hexadecimal digits. |
+| `generation` | Positive safe integer, at least 1. |
+| `expiresAt` | UTC instant with exactly millisecond precision: `YYYY-MM-DDTHH:mm:ss.sssZ`. |
+| `revocation` | `none`, `revoked`, or `persist-failed`. |
+| `resume` | `continue` or `same-host`. |
+
+### Bytes
+
+A descriptor is UTF-8 with no byte-order mark and at most 4,096 exact input bytes. Over-limit input
+is refused before parsing. Duplicate keys, invalid UTF-8, lone surrogates, `NaN`, `Infinity`, `-0`,
+and lossy numbers refuse, and no partial record is returned. Canonical bytes are compact JSON: object
+keys sorted by UTF-16 code-unit order, no insignificant whitespace, and no trailing newline. Encode
+does not write a file.
+
+When the caller supplies an expected hash, it is the SHA-256 of those exact input bytes, not of a
+rewritten canonical copy. A mismatch is refused as `changed` and the bytes are not rewritten. Omitting
+the hash makes no claim that the bytes are unchanged.
+
+### Reader
+
+The reader is separate from a successful decode. It is not an execution grant: it never returns
+`execute`, `authorized`, or `permission`. Expiry uses a caller-supplied instant in milliseconds.
+`nowMs >= expiresAt` is expired. An earlier instant is unexpired. The codec does not read a clock.
+Revocation is decided before expiry. A foreign host or owner is refused by decode, before this reader.
+
+| Condition | Result |
+| --- | --- |
+| `revocation` is `revoked` | `{ outcome: "refused", reason: "revoked" }` |
+| `revocation` is `persist-failed` | `{ outcome: "refused", reason: "revoke-persist-failed" }`, even when `resume` is `same-host`. Auto-resume stays disabled. |
+| expired | `{ outcome: "refused", reason: "expired" }` |
+| `resume` is `continue`, and the descriptor is otherwise unexpired and unrevoked on the expected host and owner | `{ outcome: "continue-required" }` |
+| `resume` is `same-host`, `revocation` is `none`, unexpired, expected host and owner | `{ outcome: "fresh-work-only" }` |
+
+`continue-required` is the default. It is not auto-resume and not execution permission.
+`fresh-work-only` describes only safe fresh work. It does not retry an uncertain attempt or an
+ambiguous effect.
+
 ## Saved review records (schema 1)
 
 D-199 and the revised D-171 / [ADR 0020](adr/0020-inline-editorial-review.md) select explicit,

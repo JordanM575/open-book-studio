@@ -58,6 +58,9 @@ integration, cleanup and end-to-end acceptance remain open.
 - [ ] T005 Expose history operations through the existing validated IPC/shared-runtime boundary.
   Keep filesystem access out of the renderer and use the shared library service for desktop and
   browser targets. Add contract tests for invalid IDs, labels, and request/result errors.
+  Partial desktop evidence: desktop IPC and preload for capture, list, read, and compare, with
+  draft and kept-failed-flush refusal and a focused synthetic test. Browser shared runtime, the
+  mounted entry point, and restore stay open. T005 stays unchecked.
 - [ ] T006 Add a chapter history entry point and read-only list/open/compare UI using existing
   shared components and token conventions. Show labels, capture times, source versions, corrupt or
   unavailable states, and whether a comparison excludes an unsaved editor draft. Test author-visible
