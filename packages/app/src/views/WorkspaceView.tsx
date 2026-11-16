@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { BookOpen, Bot, ChevronLeft, Cpu, Download, FileSearch, FileText, Image as ImageIcon, List, MessageSquare, Monitor, Moon, MoreHorizontal, Plus, Search, Settings2, Sun, Type, type LucideIcon } from "lucide-react";
+import { BookOpen, Bot, ChevronLeft, Cpu, Download, FileSearch, FileText, History, Image as ImageIcon, List, MessageSquare, Monitor, Moon, MoreHorizontal, Plus, Search, Settings2, Sun, Type, type LucideIcon } from "lucide-react";
 import type {
   BookDetail,
   Chapter,
@@ -50,6 +50,9 @@ import { analyzeReviewInWorker, verifyRepetitionInWorker } from "../lib/review-w
 import { REPETITION_VERSION } from "@ai-book-studio/core/review/repetition";
 import { mustCompatible, SchemaRefusalError } from "../lib/schema-refusal";
 import { clearEditorHistory } from "../lib/editor-history";
+import { createChapterHistoryApi, type BoundChapterHistoryApi, type ChapterHistoryClient } from "../lib/chapter-history-host";
+import { ChapterHistoryDialog } from "../components/chapter-history/ChapterHistoryDialog";
+import type { ChapterHistoryState } from "../components/chapter-history/types";
 import { editBook, formatCount, formatWords, keptCopyText, must, pluralize } from "../lib/utils";
 import type { ThemeChoice } from "../hooks/use-theme";
 import { PlanningPanel } from "../components/planning/PlanningPanel";
@@ -104,6 +107,28 @@ function compactStatus(status: SaveStatus): string {
     case "error":
       return "Not saved";
   }
+}
+
+/** A new value for every navigation lifetime, including a return to the same chapter. */
+let historyViewSerial = 0;
+function newHistoryViewId(): string {
+  historyViewSerial += 1;
+  return `chapter-history-${historyViewSerial}`;
+}
+
+/**
+ * The dialog's save picture. A selected chapter keeps its confirmed saved version and hash.
+ * Only a confirmed saved status, with none of the four flags, is clean.
+ */
+function chapterHistoryState(chapter: Chapter, status: SaveStatus, revision: number): ChapterHistoryState {
+  return {
+    revision,
+    saved: { version: chapter.version, hash: chapter.hash },
+    dirty: status.kind === "dirty",
+    pending: status.kind === "saving",
+    conflict: status.kind === "conflict",
+    failed: status.kind === "error"
+  };
 }
 
 const readIssueReasonCopy: Record<ChapterReadIssueReason, string> = {
@@ -189,6 +214,7 @@ export function WorkspaceView({
   const [agentOpen, setAgentOpen] = useState(false);
   const [railOpen, setRailOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [voiceStatusRevision, setVoiceStatusRevision] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined);
@@ -232,6 +258,31 @@ export function WorkspaceView({
   shownLibraryRoot.current = libraryRoot;
   const editorRef = useRef<EditorHandle>(null);
   const selected = detailIdentity.current === identity ? detail?.chapters.find((chapter) => chapter.id === selectedId) ?? null : null;
+  // One id per navigation lifetime. A return to the same chapter, or a reload, is a new visit.
+  const historyVisitKey = JSON.stringify([libraryRoot, bookId, selected?.id ?? null, reloadKey]);
+  const historyVisit = useRef({ key: historyVisitKey, viewId: newHistoryViewId() });
+  if (historyVisit.current.key !== historyVisitKey) {
+    historyVisit.current = { key: historyVisitKey, viewId: newHistoryViewId() };
+    // The open dialog belonged to the visit that just ended.
+    if (historyOpen) setHistoryOpen(false);
+  }
+  const historyViewId = historyVisit.current.viewId;
+  const historyLive = useRef({ key: historyVisitKey, viewId: historyViewId });
+  historyLive.current = { key: historyVisitKey, viewId: historyViewId };
+  // Counts every saved, draft, and save-state transition of this visit, including a batched
+  // intermediate. It starts again only when the visit itself changes, never for a status change.
+  const historyRevision = useRef({ viewId: historyViewId, value: 0 });
+  if (historyRevision.current.viewId !== historyViewId) historyRevision.current = { viewId: historyViewId, value: 0 };
+  const noteHistoryTransition = useCallback(() => {
+    historyRevision.current = { viewId: historyRevision.current.viewId, value: historyRevision.current.value + 1 };
+  }, []);
+  const historyClient: ChapterHistoryClient | null = window.studio.history ?? null;
+  const historyApi = historyClient
+    ? createChapterHistoryApi(historyClient, {
+        viewId: historyViewId,
+        current: () => historyLive.current.viewId === historyViewId && historyLive.current.key === historyVisitKey
+      })
+    : null;
   const committedVisit = useRef({ identity, chapterId: selected?.id ?? null, reloadKey });
   const approvedEvidenceSwitch = useRef<{ identity: string; reloadKey: number; selection: EditorSelection & { chapterId: string } } | null>(null);
   const isMac = window.studio.platform === "darwin";
@@ -1068,6 +1119,7 @@ export function WorkspaceView({
   );
 
   const onSaved = useCallback((saved: Chapter) => {
+    noteHistoryTransition();
     setDetail((current) =>
       current
         ? {
@@ -1078,14 +1130,27 @@ export function WorkspaceView({
           }
         : current
     );
-  }, []);
+  }, [noteHistoryTransition]);
+
+  const onEditorStatus = useCallback((next: SaveStatus) => {
+    noteHistoryTransition();
+    setStatus(next);
+  }, [noteHistoryTransition]);
 
   const displayedReportLifetime = reportLifetime.current;
   const wordTotal = detail?.chapters.reduce((total, chapter) => total + chapter.wordCount, 0) ?? 0;
   const conflict = status.kind === "conflict" ? status.conflict : null;
 
   return (
-    <div className="window-wash flex h-full flex-col" data-testid="workspace-view">
+    <div
+      className="window-wash flex h-full flex-col"
+      data-testid="workspace-view"
+      data-history-view={historyViewId}
+      {...(historyOpen && selected ? { "data-history-revision": historyRevision.current.value } : {})}
+      ref={(node) => {
+        if (node && historyApi) (node as HTMLElement & { historyApi?: BoundChapterHistoryApi }).historyApi = historyApi;
+      }}
+    >
       <header className={`titlebar-drag flex h-14 shrink-0 items-center justify-between gap-3 pr-2 pl-3 min-[700px]:h-16 min-[700px]:gap-4 min-[700px]:pr-4 ${isMac ? "min-[700px]:pl-[92px]" : "min-[700px]:pl-5"}`}>
         <div className="flex min-w-0 items-center gap-1.5 min-[700px]:gap-2">
           <Button variant="ghost" size="icon" onClick={() => { if (navigation.allow()) { invalidateReview(); onBack(); } }} aria-label="Back to library" title="Back to library" className="shrink-0">
@@ -1427,7 +1492,7 @@ export function WorkspaceView({
               chapter={selected}
               ordinal={ordinal}
               onSaved={onSaved}
-              onStatus={setStatus}
+              onStatus={onEditorStatus}
               illustration={illustration}
               illustrationData={illustrationData}
               voiceStatusRevision={voiceStatusRevision}
@@ -1599,6 +1664,20 @@ export function WorkspaceView({
               <Bot size={16} />
               Agent
             </Button>
+            {historyClient && selected ? (
+              <Button
+                variant="ghost"
+                className="justify-start"
+                data-testid="more-chapter-history"
+                onClick={() => {
+                  setMoreOpen(false);
+                  setHistoryOpen(true);
+                }}
+              >
+                <History size={16} />
+                Chapter history
+              </Button>
+            ) : null}
             <Button
               variant="ghost"
               className="justify-start"
@@ -1716,6 +1795,17 @@ export function WorkspaceView({
           </div>
         </DialogContent>
       </Dialog>
+
+      {historyClient && selected ? (
+        <ChapterHistoryDialog
+          open={historyOpen}
+          target={{ libraryId: libraryRoot, bookId, chapterId: selected.id, viewId: historyViewId }}
+          chapterTitle={selected.title}
+          state={chapterHistoryState(selected, status, historyRevision.current.value)}
+          api={historyApi}
+          onClose={() => setHistoryOpen(false)}
+        />
+      ) : null}
 
       <SettingsDialog
         open={settingsOpen}

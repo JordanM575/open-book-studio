@@ -71,6 +71,10 @@ integration, cleanup and end-to-end acceptance remain open.
   lifetime guards. See its README for the exact host contract. The entry point, real host draft gate,
   IPC/preload/browser adapters and light/dark/reduced-transparency visual acceptance remain parent
   integration work; T006 stays unchecked. No restore/undo or deletion action is exposed.
+  Partial desktop entry (2026-11-16): the desktop writing screen opens that dialog from More for the
+  selected chapter when the host exposes history. The visit id is new for each navigation lifetime,
+  and the revision counts saved, draft, and save-state transitions. Browser runtime, restore, undo,
+  and delete stay open. T005 and T006 stay unchecked.
 
 ## Phase 3 — Checked restore and its undo
 

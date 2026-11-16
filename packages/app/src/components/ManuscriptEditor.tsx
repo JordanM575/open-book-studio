@@ -164,16 +164,23 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     sourceEpoch.current += 1;
   }, []);
 
+  const onStatusRef = useRef(onStatus);
+  onStatusRef.current = onStatus;
+
   const updateStatus = useCallback((next: SaveStatus): SaveStatus => {
     statusRef.current = next;
     setStatus(next);
     touchSource();
+    // Report now, not from an effect on the rendered status. A later effect sees only the
+    // last status of a batch, so an intermediate saved, dirty, or failed state would be lost.
+    onStatusRef.current(next);
     return next;
   }, [touchSource]);
 
-  useEffect(() => {
-    onStatus(status);
-  }, [status, onStatus]);
+  // The first paint is already saved, before any transition has called updateStatus.
+  useLayoutEffect(() => {
+    onStatusRef.current(statusRef.current);
+  }, []);
 
   const readSource = useCallback(
     (): InlineSource => ({
