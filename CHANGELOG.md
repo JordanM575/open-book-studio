@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Independent continuation and stop
+
+- In-memory `reduceRun` tests prove a dispatched attempt whose impact does not share the changed direction keys stays that same live attempt: not historical, same generation, still `dispatch-intent`, and its task direction unchanged. A later `output-kept` then `completed` finishes that one attempt. Tasks whose impact matches, and a task whose impact is incomplete, take the new direction. The incomplete-impact task is projected `ready`, not `blocked`. A later `stopped` on that same attempt closes it; later `output-kept` and `completed` are refused, the task is `failed`, and another prepare is `task-not-ready`. Run-level pause, cancel, and revoke are unchanged. No reducer change. No task box is closed.
+
 ### Invalidated task projection
 
 - `projectInvalidatedTasks` builds the next task revisions for one direction's impact keys. An incomplete impact or a shared key matches, and a task that depends on a match matches too. A dependency that does not match is left out. The result is a frozen copy in input order: revision plus one, a sha256 base of the caller-supplied digest at the old revision, the supplied direction reference, `retryAllowed: true`, and the caller-supplied timestamp. A cached `status` is dropped. `currentAttempt`, `needsDirection`, `generation`, `createdAt`, and `definition` are copied. It does not hash, write, mark an attempt historical, clear a live attempt, bump generation, compare the new direction with the task's current direction, step the run, schedule, or resume cadence, and the host does not call it. No task box is closed.

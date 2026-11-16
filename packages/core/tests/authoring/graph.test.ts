@@ -222,3 +222,48 @@ test('direction text uses the bounded record envelope without inheriting the bri
     direction: ref('direction', 'direction_1', 1), exactText });
   expect(state.commands[0]?.action).toMatchObject({ exactText });
 });
+
+function dispatchedIsland(): ReturnType<typeof createRun> {
+  const state = step(prepare(createRun(graph()), 'c'), { type: 'attempt', attemptId: 'attempt_c', event: 'dispatch-intent' });
+  return step(state, { type: 'direction', keys: ['mara'], direction: ref('direction', 'direction_1', 1), exactText: 'mara only' });
+}
+
+test('an unrelated in-flight attempt continues through a mara-only direction change', () => {
+  const generation = createRun(graph()).generation;
+  const state = dispatchedIsland();
+  expect(state.generation).toBe(generation);
+  expect(state.attempts).toHaveLength(1);
+  const attempt = state.attempts[0];
+  expect(attempt?.historical).toBe(false);
+  expect(attempt?.generation).toBe(generation);
+  expect(attempt?.phase).toBe('dispatch-intent');
+  expect(attempt?.direction.id).toBe('direction_0');
+  expect(Object.fromEntries(state.tasks.map(task => [task.id, task.direction.id]))).toEqual({
+    a: 'direction_1', b: 'direction_1', c: 'direction_0', u: 'direction_1' });
+  expect(taskStatuses(state)).toEqual({ a: 'ready', b: 'blocked', c: 'executing', u: 'ready' });
+  const kept = step(state, { type: 'attempt', attemptId: 'attempt_c', event: 'output-kept', outputs: [ref('artifact', 'island')] });
+  const done = step(kept, { type: 'attempt', attemptId: 'attempt_c', event: 'completed' });
+  expect(done.attempts).toHaveLength(1);
+  expect(done.attempts[0]?.ref.id).toBe('attempt_c');
+  expect(done.attempts[0]?.historical).toBe(false);
+  expect(done.attempts[0]?.generation).toBe(generation);
+  expect(done.attempts[0]?.phase).toBe('completed');
+  expect(done.attempts[0]?.direction.id).toBe('direction_0');
+  expect(taskStatuses(done)).toEqual({ a: 'ready', b: 'blocked', c: 'completed', u: 'ready' });
+});
+
+test('a later stop closes that independent continuation and refuses its output', () => {
+  const state = step(dispatchedIsland(), { type: 'attempt', attemptId: 'attempt_c', event: 'stopped' });
+  expect(state.mode).toBe('running');
+  expect(runStatus(state)).toBe('active');
+  expect(state.attempts).toHaveLength(1);
+  expect(state.attempts[0]?.phase).toBe('stopped');
+  expect(state.attempts[0]?.historical).toBe(false);
+  expect(state.tasks.find(task => task.id === 'c')?.retryAllowed).toBe(false);
+  expect(taskStatuses(state).c).toBe('failed');
+  expect(() => step(state, { type: 'attempt', attemptId: 'attempt_c', event: 'output-kept', outputs: [ref('artifact', 'late')] })).toThrow('impossible-attempt-transition');
+  expect(() => step(state, { type: 'attempt', attemptId: 'attempt_c', event: 'completed' })).toThrow('impossible-attempt-transition');
+  expect(state.attempts[0]?.phase).toBe('stopped');
+  expect(state.attempts[0]?.outputs).toHaveLength(0);
+  expect(() => prepare(state, 'c', 'attempt_c_again')).toThrow('task-not-ready');
+});
