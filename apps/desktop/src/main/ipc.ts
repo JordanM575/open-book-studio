@@ -85,6 +85,12 @@ import { recordIdSchema } from "@ai-book-studio/core/review/record-format";
 import {
   ContinuationCheckinError, readContinuationCheckin, type CoordinatorIdentity
 } from "./continuation-checkin";
+import {
+  HistoryError,
+  historyCaptureSchema,
+  historyReadSchema,
+  historyScopeSchema
+} from "@ai-book-studio/core/library/history";
 
 const folderInput = z.string().min(1).max(4096);
 const contentInput = z.string().max(20_000_000);
@@ -178,6 +184,10 @@ function fail(error: unknown): Result<never> {
     return { ok: false, error: { code: "invalid", message: error.message } };
   }
   if (error instanceof LibraryError) {
+    return { ok: false, error: { code: error.code, message: error.message } };
+  }
+  if (error instanceof HistoryError) {
+    // Typed history refusals keep their own code. The history file is not rewritten.
     return { ok: false, error: { code: error.code, message: error.message } };
   }
   if (error instanceof ArchiveError) {
@@ -283,6 +293,38 @@ export function registerIpc(
       },
       getCoordinatorIdentity()
     );
+  });
+
+  /* -------------------------------------------------------------------- history */
+
+  handle(IPC.history.capture, async (payload) => {
+    // Ids, the label, and the saved token are refused before the library is opened.
+    const input = historyCaptureSchema.parse(payload);
+    if (
+      studio.drafts.holds(input.bookId, input.chapterId) ||
+      (await studio.recovery.holds(input.bookId, input.chapterId))
+    ) {
+      throw new HistoryError(
+        "saved-source-required",
+        "Save this chapter before capturing history. Unsaved text or a failed save is still held."
+      );
+    }
+    return studio.requireLibrary().captureChapterHistory(input);
+  });
+
+  handle(IPC.history.list, async (payload) => {
+    const scope = historyScopeSchema.parse(payload);
+    return studio.requireLibrary().listChapterHistory(scope);
+  });
+
+  handle(IPC.history.read, async (payload) => {
+    const input = historyReadSchema.parse(payload);
+    return studio.requireLibrary().readChapterHistory(input);
+  });
+
+  handle(IPC.history.compare, async (payload) => {
+    const input = historyReadSchema.parse(payload);
+    return studio.requireLibrary().compareChapterHistory(input);
   });
 
   /* ---------------------------------------------------------------------- app */

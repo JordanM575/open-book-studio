@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Desktop chapter history
+
+- Desktop IPC and the preload bridge expose capture, list, open, and compare for one chapter's saved history. A record is named by its stored file name. Capture is refused while that chapter's unsaved text or a kept failed save is still held, and it does not flush or save. List, open, and compare do not change chapter or history bytes. Restore, undo, reconcile, and delete stay off this surface. No task box is closed.
+
 ### Invalidated task projection
 
 - `projectInvalidatedTasks` builds the next task revisions for one direction's impact keys. An incomplete impact or a shared key matches, and a task that depends on a match matches too. A dependency that does not match is left out. The result is a frozen copy in input order: revision plus one, a sha256 base of the caller-supplied digest at the old revision, the supplied direction reference, `retryAllowed: true`, and the caller-supplied timestamp. A cached `status` is dropped. `currentAttempt`, `needsDirection`, `generation`, `createdAt`, and `definition` are copied. It does not hash, write, mark an attempt historical, clear a live attempt, bump generation, compare the new direction with the task's current direction, step the run, schedule, or resume cadence, and the host does not call it. No task box is closed.

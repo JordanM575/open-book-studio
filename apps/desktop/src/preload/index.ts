@@ -96,6 +96,12 @@ const api: StudioApi = {
   continuation: {
     checkin: (input) => invoke(IPC.continuation.checkin, input)
   },
+  history: {
+    capture: (input) => invoke(IPC.history.capture, input),
+    list: (scope) => invoke(IPC.history.list, scope),
+    read: (input) => invoke(IPC.history.read, input),
+    compare: (input) => invoke(IPC.history.compare, input)
+  },
   chapters: {
     create: (bookId, input) => invoke(IPC.chapters.create, { bookId, ...input }),
     save: (input: SaveChapterInput) => invoke(IPC.chapters.save, input),

@@ -101,6 +101,11 @@ export class RecoveryStore {
     return (await this.all()).filter((entry) => entry.bookId === bookId).map(summarize);
   }
 
+  /** Whether a failed flush for this chapter is already kept. The text stays in the store. */
+  async holds(bookId: string, chapterId: string): Promise<boolean> {
+    return (await this.all()).some((entry) => entry.bookId === bookId && entry.chapterId === chapterId);
+  }
+
   /** One kept copy, or null when it was restored or discarded already. */
   async read(id: string): Promise<KeptWords | null> {
     const checked = recoveryIdSchema.parse(id);
