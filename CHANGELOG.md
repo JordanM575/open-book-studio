@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Proposed plan
+
+- `createProposedPlan` builds a frozen Edit proposal from a caller-supplied id, a short purpose, and one or more ordered steps. Every new step is pending. `refreshProposedPlanGuidance` returns a new revision with that guidance and leaves the previous proposal unchanged. Blank guidance is omitted. Guidance over 2,000 characters is refused and not truncated. Guidance over 2,000 characters is refused before a blank check, including whitespace. A Discuss proposal, or a proposal that is running, paused, started, waiting, or terminal, is refused. `planStartIntent` names a new turn for the current proposal id and revision and carries no approval. The supplied writer is not called. This does not write the manuscript, start a turn, mount a Plan first control, or close a task box.
+
 ### Independent continuation and stop
 
 - In-memory `reduceRun` tests prove a dispatched attempt whose impact does not share the changed direction keys stays that same live attempt: not historical, same generation, still `dispatch-intent`, and its task direction unchanged. A later `output-kept` then `completed` finishes that one attempt. Tasks whose impact matches, and a task whose impact is incomplete, take the new direction. The incomplete-impact task is projected `ready`, not `blocked`. A later `stopped` on that same attempt closes it; later `output-kept` and `completed` are refused, the task is `failed`, and another prepare is `task-not-ready`. Run-level pause, cancel, and revoke are unchanged. No reducer change. No task box is closed.
