@@ -120,7 +120,9 @@ authorized; no task requires a live provider, credential, paid service, real man
   only. A blank value is omitted. More than 2,000 characters is refused without truncation or a
   write. The refresh returns a new frozen revision and does not change the previous proposal,
   mode, model, tool permissions, or approvals. A running, paused, started, or terminal plan is
-  refused. No Plan first control is mounted and this task stays open.
+  refused. The Plan first control is mounted for an Edit turn. Refreshing its guidance shows a new
+  revision and does not apply while a turn is running. Durable plan persistence and start execution
+  remain open, and this task stays open.
 
 ## Phase 4 — Visible plan lifecycle
 
@@ -130,7 +132,9 @@ authorized; no task requires a live provider, credential, paid service, real man
   Partial: the same pure contract builds an Edit proposal from a caller-supplied purpose and one
   or more ordered steps, each pending. Discuss is refused. Preparing a start names a new turn,
   the proposal id, and the current revision, and carries no approval. It does not call a writer,
-  start a turn, or persist the plan. The Plan first control is not mounted and this task stays open.
+  start a turn, or persist the plan. The Plan first control is mounted for an Edit turn and shows
+  that proposal. Start plan only displays the intent. Durable plan persistence and start execution
+  remain open, and this task stays open.
 - [ ] T014 Add Start plan and confirmed per-step progress using D-178's accepted new-turn continuation
   semantics. The model/runtime must report only observed outcomes; tests cover completed, skipped
   and not-completed steps using scripted events.

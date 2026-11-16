@@ -3,6 +3,7 @@ import type { FormEvent, ReactElement } from "react";
 import { Cpu, GitBranch, History, Monitor, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { AgentEvent, AgentTurnInput } from "@ai-book-studio/core/agent";
 import { agentModeSchema, type AgentMode } from "@ai-book-studio/core/agent/messages";
+import type { ManuscriptWriter } from "@ai-book-studio/core/agent/proposed-plan";
 import type { ThreadSummary } from "@ai-book-studio/core/agent/threads";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
 import { Button } from "@ai-book-studio/ui/button";
@@ -47,6 +48,7 @@ import { Tool, ToolContent, ToolHeader, ToolLine, ToolOutput, Tools } from "@ai-
 import { cn, must } from "../lib/utils";
 import type { HandsFreeAdmission, HandsFreePort, HandsFreeTurn } from "../lib/hands-free";
 import { HandsFreeBar } from "./HandsFreeBar";
+import { PlanFirstControl } from "./PlanFirstControl";
 import {
   approvalLabel,
   keptNote,
@@ -112,6 +114,13 @@ const APPROVAL_STATUS: Record<Approval["status"], string> = {
 
 /** Prompts the empty conversation offers. Picking one fills the field; it never sends by itself. */
 const SUGGESTIONS = ["Draft the next scene", "Tighten this paragraph", "Check what happened earlier"];
+
+/** Passed into Plan first so a proposal can be built. The control never calls it. */
+const planWriter: ManuscriptWriter = {
+  write(request: unknown): never {
+    throw new Error(`Plan first does not write (${typeof request}).`);
+  }
+};
 
 const TOOL_DOT: Record<ReturnType<typeof toolStatus>, string> = {
   running: "bg-[var(--warning)]",
@@ -1142,6 +1151,16 @@ export function ChatPanel({
           </details>
           {guidanceTooLong ? <p role="alert">Shorten guidance to 2,000 characters before sending. Your text is kept.</p> : null}
         </div>
+        {mode === "edit" ? (
+          <div className="mb-2">
+            <PlanFirstControl
+              mode={mode}
+              running={running}
+              writer={planWriter}
+              modelLabel={turnModel ? `This turn: ${modelDisplayName(turnModel.modelId)}` : "Model: book default"}
+            />
+          </div>
+        ) : null}
         {mode === "discuss" ? (
           <HandsFreeBar
             bookId={bookId}
