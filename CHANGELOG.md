@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Recent work pointers
+
+- An in-memory recent-work list keeps one pointer per book after a successful explicit open, newest first. A later open of the same book replaces the older pointer. Listing, refresh, import, onboarding, review, and a background read do not record an open, and replaying an intent that already succeeded does not record it again. The same scope token keeps its pointers; a different token starts an empty list and leaves the previous list unchanged. A pointer stores only a book id, the caller-supplied display time, and that scope token. The recent-pointer budget is 2,500,000 UTF-8 bytes and may drop the oldest pointers until a new pointer fits. A pointer that cannot fit alone is refused. A missing or unusable writer is a refusal and is never called. Dismissal removes one pointer and does not change a book. No library screen, settings writer, or task box is closed.
+
 ### Independent continuation and stop
 
 - In-memory `reduceRun` tests prove a dispatched attempt whose impact does not share the changed direction keys stays that same live attempt: not historical, same generation, still `dispatch-intent`, and its task direction unchanged. A later `output-kept` then `completed` finishes that one attempt. Tasks whose impact matches, and a task whose impact is incomplete, take the new direction. The incomplete-impact task is projected `ready`, not `blocked`. A later `stopped` on that same attempt closes it; later `output-kept` and `completed` are refused, the task is `failed`, and another prepare is `task-not-ready`. Run-level pause, cancel, and revoke are unchanged. No reducer change. No task box is closed.

@@ -88,6 +88,8 @@ composition, complete enumeration, API/IPC and workspace exposure still remain.
   book opens. De-duplicate by stable identity, order newest-first, make unavailable references
   dismissible, and keep the book usable when recent-data writes fail. Test reopen, missing identity,
   trash/restore and failed-write cases with synthetic libraries.
+  Partial evidence only: an in-memory recent-pointer contract for explicit opens, one-use intents,
+  scope tokens, dismissal, and oldest-pointer eviction under the recent-pointer budget. The box stays open.
 - [ ] T007 After T001 and T004, add one optional total-word goal per book and show saved words and
   remaining words in the library/workspace. Use the existing counter; show any draft estimate
   separately. Test below/met/exceeded goals plus dirty, pending, failed, conflicting and incomplete
