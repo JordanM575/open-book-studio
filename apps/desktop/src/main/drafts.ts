@@ -67,6 +67,11 @@ export class DraftBuffer {
     return ids;
   }
 
+  /** Whether this chapter's newest unsaved text is still held. Chapter ids alone are not enough. */
+  holds(bookId: string, chapterId: string): boolean {
+    return this.drafts.has(this.key(bookId, chapterId));
+  }
+
   /**
    * Save one chapter's draft through the normal checked path. Returns the save outcome so the
    * drift dialog can report a conflict instead of assuming the write landed. The draft clears

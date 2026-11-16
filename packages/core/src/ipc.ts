@@ -36,6 +36,14 @@ import { reviewRecordChannel, type ReviewRecordApi } from "./library/review-reco
 import type {
   ContinuationCheckinCadenceRequest, ContinuationCheckinInput
 } from "./review/campaign-continuation-checkin";
+import type {
+  HistoryCaptureInput,
+  HistoryComparison,
+  HistoryListing,
+  HistoryReadInput,
+  HistoryScope,
+  StoredHistoryRecord
+} from "./library/history";
 export { createPlanningApi, planningChannels, planningHandler, planningValue } from "./library/planning-api";
 
 export type { VoicePreferences } from "./providers/voice-preferences";
@@ -160,6 +168,16 @@ export const IPC = {
   continuation: {
     /** Read-only counted check-in inputs for one checked campaign (039 T018 seam 6b). */
     checkin: "continuation:checkin"
+  },
+  history: {
+    /** Capture one confirmed saved chapter snapshot. */
+    capture: "history:capture",
+    /** List one chapter's saved history. */
+    list: "history:list",
+    /** Open one history record by its stored file name. */
+    read: "history:read",
+    /** Compare one snapshot with the current saved chapter. */
+    compare: "history:compare"
   },
   chapters: {
     create: "chapters:create",
@@ -595,6 +613,21 @@ export interface StudioApi {
      * cross-book, future, replan, too-large, missing) are typed failures.
      */
     checkin(input: ReadContinuationCheckinInput): Promise<Result<ContinuationCheckinInput>>;
+  };
+  /**
+   * Saved chapter history. Absent where the host does not expose it.
+   * Capture, list, open, and compare only: restore, undo, reconcile, and delete stay off this surface.
+   * A record is named by the stored history file name, never by a host path.
+   */
+  history?: {
+    /** Capture the confirmed saved chapter. The host refuses while unsaved text or a failed save is held. */
+    capture(input: HistoryCaptureInput): Promise<Result<StoredHistoryRecord>>;
+    /** List one chapter's history. Unreadable files are reported and left as they are. */
+    list(scope: HistoryScope): Promise<Result<HistoryListing>>;
+    /** Open one stored history record. */
+    read(input: HistoryReadInput): Promise<Result<StoredHistoryRecord>>;
+    /** Compare one snapshot with the current saved chapter, not with an editor draft. */
+    compare(input: HistoryReadInput): Promise<Result<HistoryComparison>>;
   };
   chapters: {
     create(bookId: string, input: { title?: string }): Promise<Result<Chapter>>;
