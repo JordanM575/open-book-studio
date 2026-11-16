@@ -131,6 +131,10 @@ using a microphone. New work does not close 038 T022 or the remaining manual/dev
   T018–T024 and 038 T022 remain unchecked.
 - [ ] T018 Preserve selected manuscript text and intended verse breaks by default; explicit replacement
   uses checked editor mutation/undo and exact-source confirmation.
+  Partial evidence: default dictation inserts at the selection start and keeps the selected characters.
+  Replace selection is an explicit one-shot control that removes only that range when the editor
+  revision and selection still match. Intended line breaks stay. The insert still uses the existing
+  compare-and-set path and one isolated undo. This note does not close the task.
 - [ ] T019 Integrate qualified interruption/playback arbitration with real settlement; no premature Stopped
   or lost save/accounting warnings, including Result failures and never-settling effects.
 - [ ] T020 Add source-bound paragraph reading/following, speed, selectable qualified local voices and

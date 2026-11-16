@@ -2,7 +2,7 @@ import { Annotation, EditorState, StateEffect, StateField, type Transaction } fr
 import { Decoration, type DecorationSet, EditorView, keymap, placeholder as placeholderExtension } from "@codemirror/view";
 import { insertNewline, standardKeymap } from "@codemirror/commands";
 import { normalizePasteText } from "@ai-book-studio/core/paste";
-import { insertTranscript } from "../../lib/voice-text";
+import { insertTranscript, replaceTranscript } from "../../lib/voice-text";
 import { buildOverlapIndex, inlineSpanKey, overlapAt, type InlineSpan, type OverlapIndex } from "../../../../core/src/review/inline/overlap";
 import { isExactCurrent, sameInlineSource, type EditOrigin, type InlineEditorOptions, type InlineSnapshot, type InlineSource, type ReviewCommand, type ReviewResult, type TextSelection, type ValidatedInlineLayer } from "./contracts";
 
@@ -280,9 +280,21 @@ export class InlineEditor {
     return this.applyReplace(current.body.slice(0, from) + inserted + current.body.slice(to), current.revision, "paste", { anchor: caret, head: caret }, true);
   }
 
+  /** Insert at the selection start and keep the selected characters. Never removes them. */
   insertDictation(text: string, expectedRevision: number): boolean {
+    return this.applyDictation(text, expectedRevision, false);
+  }
+
+  /** Remove only the selected range. An empty selection inserts. Refused during a hold. */
+  replaceDictation(text: string, expectedRevision: number): boolean {
+    return this.applyDictation(text, expectedRevision, true);
+  }
+
+  private applyDictation(text: string, expectedRevision: number, replace: boolean): boolean {
     const current = this.getSnapshot();
-    const insertion = insertTranscript(current.body, text, Math.min(current.selection.anchor, current.selection.head), Math.max(current.selection.anchor, current.selection.head));
+    const start = Math.min(current.selection.anchor, current.selection.head);
+    const end = Math.max(current.selection.anchor, current.selection.head);
+    const insertion = (replace ? replaceTranscript : insertTranscript)(current.body, text, start, end);
     return insertion !== null && this.replaceText(insertion.text, expectedRevision, "dictation", { anchor: insertion.caret, head: insertion.caret });
   }
 

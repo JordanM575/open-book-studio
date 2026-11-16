@@ -4,6 +4,7 @@ import { mountDom, unmountDom } from "./support/dom";
 import type { InlineEditor as Editor } from "../../../packages/app/src/components/inline-editor/editor";
 import type { InlineChange, InlineEditorOptions, InlineInspection, InlineSource, ValidatedInlineLayer } from "../../../packages/app/src/components/inline-editor/contracts";
 import type { InlineSpan } from "../../../packages/core/src/review/inline/overlap";
+import { clearEditorHistory, pushHistory, undoHistory } from "../../../packages/app/src/lib/editor-history";
 
 let testing: Awaited<ReturnType<typeof mountDom>>;
 let InlineEditor: typeof import("../../../packages/app/src/components/inline-editor/editor").InlineEditor;
@@ -196,12 +197,70 @@ describe("isolated exact-current editor", () => {
     expect(f.changes.at(-1)?.isolated).toBe(true);
     f.editor.setSelection({ anchor: 0, head: 0 });
     expect(f.editor.insertDictation("  spoken\nwords ", f.editor.getSnapshot().revision)).toBe(true);
-    expect(f.editor.getSnapshot().body).toStartWith('spoken words "Verse"');
+    expect(f.editor.getSnapshot().body).toStartWith('spoken\nwords "Verse"');
+    expect(f.changes.at(-1)).toMatchObject({ origin: "dictation", isolated: true, recordHistory: true });
     const content = f.parent.querySelector(".cm-content");
     if (!content) throw new Error("Missing editor");
     for (const inputType of ["historyUndo", "historyRedo"]) testing.fireEvent(content, new InputEvent("beforeinput", { inputType, bubbles: true, cancelable: true }));
     testing.fireEvent.keyDown(content, { key: "s", ctrlKey: true });
     expect(f.commands).toEqual(["undo", "redo", "save"]);
+  });
+
+  test("default dictation keeps a selection and a line break; replace is one isolated undo", () => {
+    const chapterId = "dictation-selection";
+    clearEditorHistory(chapterId);
+    const f = fixture();
+    const remember = (): void => {
+      const change = f.changes.at(-1);
+      if (change?.recordHistory) pushHistory(chapterId, change.previous, 5_000, change.isolated);
+    };
+
+    expect(f.editor.replaceText("One old two", f.editor.getSnapshot().revision)).toBe(true);
+    f.editor.setSelection({ anchor: 4, head: 7 });
+    expect(f.editor.getSnapshot().selectedText).toBe("old");
+    expect(f.editor.insertDictation("new", f.editor.getSnapshot().revision)).toBe(true);
+    expect(f.editor.getSnapshot().body).toBe("One new old two");
+    expect(f.editor.getSnapshot().selection).toEqual({ anchor: 8, head: 8 });
+    expect(f.changes.at(-1)).toMatchObject({ origin: "dictation", isolated: true, recordHistory: true, previous: "One old two" });
+
+    expect(f.editor.replaceText("One old two", f.editor.getSnapshot().revision)).toBe(true);
+    f.editor.setSelection({ anchor: 4, head: 7 });
+    expect(f.editor.replaceDictation("new", f.editor.getSnapshot().revision)).toBe(true);
+    expect(f.editor.getSnapshot().body).toBe("One new two");
+    expect(f.editor.getSnapshot().selection).toEqual({ anchor: 7, head: 7 });
+    expect(f.changes.at(-1)).toMatchObject({ origin: "dictation", isolated: true, recordHistory: true, previous: "One old two" });
+    remember();
+    const restored = undoHistory(chapterId, f.editor.getSnapshot().body);
+    expect(restored).toBe("One old two");
+    expect(f.editor.replaceText(restored ?? "", f.editor.getSnapshot().revision, "undo")).toBe(true);
+    expect(f.editor.getSnapshot().body).toBe("One old two");
+    expect(f.changes.at(-1)?.recordHistory).toBe(false);
+
+    f.editor.setSelection({ anchor: 0, head: 0 });
+    expect(f.editor.insertDictation("  line\nbreak ", f.editor.getSnapshot().revision)).toBe(true);
+    expect(f.editor.getSnapshot().body).toBe("line\nbreak One old two");
+    const quiet = f.editor.getSnapshot();
+    expect(f.editor.insertDictation("   ", quiet.revision)).toBe(false);
+    expect(f.editor.getSnapshot().body).toBe(quiet.body);
+    f.editor.setSelection({ anchor: 0, head: 0 });
+    expect(f.editor.replaceDictation("\n", quiet.revision)).toBe(true);
+    expect(f.editor.getSnapshot().body).toBe("\nline\nbreak One old two");
+
+    const release = f.editor.hold();
+    const held = f.editor.getSnapshot().body;
+    expect(f.editor.insertDictation("nope", f.editor.getSnapshot().revision)).toBe(false);
+    expect(f.editor.replaceDictation("nope", f.editor.getSnapshot().revision)).toBe(false);
+    expect(f.editor.getSnapshot().body).toBe(held);
+    release();
+
+    const stale = f.editor.getSnapshot().revision;
+    expect(f.editor.insertDictation("later", stale)).toBe(true);
+    expect(f.editor.replaceDictation("later", stale)).toBe(false);
+    const visit = f.editor.getSnapshot();
+    f.setSource({ viewGeneration: "visit-2" });
+    expect(f.editor.insertDictation("other", visit.revision)).toBe(false);
+    expect(f.editor.replaceDictation("other", visit.revision)).toBe(false);
+    clearEditorHistory(chapterId);
   });
 
   test("user paste during hold inserts normalized text like typing; controlled changes stay refused", async () => {
@@ -213,6 +272,7 @@ describe("isolated exact-current editor", () => {
     expect(f.editor.getSnapshot().held).toBe(true);
     expect(f.editor.replaceText("controlled", f.editor.getSnapshot().revision)).toBe(false);
     expect(f.editor.insertDictation("dictated", f.editor.getSnapshot().revision)).toBe(false);
+    expect(f.editor.replaceDictation("dictated", f.editor.getSnapshot().revision)).toBe(false);
     expect(await f.editor.showEvidence({})).toBe("stale");
     expect(f.editor.getSnapshot().body).toBe(body);
     expect(f.changes).toHaveLength(0);
@@ -244,6 +304,7 @@ describe("isolated exact-current editor", () => {
     testing.fireEvent.compositionStart(content);
     expect(f.editor.getSnapshot().composing).toBe(true);
     expect(f.editor.insertDictation("refused", f.editor.getSnapshot().revision)).toBe(false);
+    expect(f.editor.replaceDictation("refused", f.editor.getSnapshot().revision)).toBe(false);
     expect(f.editor.replaceText("refused", f.editor.getSnapshot().revision)).toBe(false);
     expect(f.parent.querySelectorAll(".inline-review-mark")).toHaveLength(0);
     testing.fireEvent.compositionEnd(content, { data: "" });

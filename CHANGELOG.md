@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Dictation insert
+
+- Default dictation inserts at the selection start and keeps the selected text. Replace selection is a separate one-shot control. A transcript keeps its line breaks; a transcript with none still joins surrounding prose with a single space. Both paths use the existing editor compare-and-set and one isolated undo. No task box is closed.
+
 ### Host permission descriptor
 
 - A host-local permission descriptor can be validated. A copied descriptor is not execution permission. The pure codec does not store the descriptor, resume a host, or close a task.
