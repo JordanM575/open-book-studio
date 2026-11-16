@@ -198,8 +198,10 @@ describe("createProposedPlan", () => {
       expect(Object.isFrozen(result)).toBe(true);
       expect(JSON.stringify(result)).not.toContain("aaa");
       const spaces = " ".repeat(PLAN_GUIDANCE_LIMIT + 1);
-      const omitted = proposal(writer, { guidance: spaces });
-      expect("guidance" in omitted).toBe(false);
+      const spacesResult = createProposedPlan(draft({ guidance: spaces }), writer);
+      expect(spacesResult).toEqual({ ok: false, code: "guidance-too-long" });
+      expect("value" in spacesResult).toBe(false);
+      expect(JSON.stringify(spacesResult)).not.toContain(spaces);
     });
   });
 
@@ -256,9 +258,12 @@ describe("refreshProposedPlanGuidance", () => {
       expect(result).toEqual({ ok: false, code: "guidance-too-long" });
       expect(JSON.stringify(result)).not.toContain("bbb");
       expect(JSON.stringify(created)).toBe(before);
-      const blank = take(refreshProposedPlanGuidance(created, "\t".repeat(PLAN_GUIDANCE_LIMIT + 1), writer));
-      expect(blank.revision).toBe(2);
-      expect("guidance" in blank).toBe(false);
+      const tabs = "\t".repeat(PLAN_GUIDANCE_LIMIT + 1);
+      const tabsResult = refreshProposedPlanGuidance(created, tabs, writer);
+      expect(tabsResult).toEqual({ ok: false, code: "guidance-too-long" });
+      expect(JSON.stringify(tabsResult)).not.toContain(tabs);
+      expect(JSON.stringify(created)).toBe(before);
+      expect(created.revision).toBe(1);
     });
   });
 

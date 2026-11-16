@@ -9,7 +9,7 @@ Update the `Unreleased` section before every commit.
 ## [Unreleased]
 ### Proposed plan
 
-- `createProposedPlan` builds a frozen Edit proposal from a caller-supplied id, a short purpose, and one or more ordered steps. Every new step is pending. `refreshProposedPlanGuidance` returns a new revision with that guidance and leaves the previous proposal unchanged. Blank guidance is omitted. Guidance over 2,000 characters is refused and not truncated. A Discuss proposal, or a proposal that is running, paused, started, waiting, or terminal, is refused. `planStartIntent` names a new turn for the current proposal id and revision and carries no approval. The supplied writer is not called. This does not write the manuscript, start a turn, mount a Plan first control, or close a task box.
+- `createProposedPlan` builds a frozen Edit proposal from a caller-supplied id, a short purpose, and one or more ordered steps. Every new step is pending. `refreshProposedPlanGuidance` returns a new revision with that guidance and leaves the previous proposal unchanged. Blank guidance is omitted. Guidance over 2,000 characters is refused and not truncated. Guidance over 2,000 characters is refused before a blank check, including whitespace. A Discuss proposal, or a proposal that is running, paused, started, waiting, or terminal, is refused. `planStartIntent` names a new turn for the current proposal id and revision and carries no approval. The supplied writer is not called. This does not write the manuscript, start a turn, mount a Plan first control, or close a task box.
 
 ### Independent continuation and stop
 

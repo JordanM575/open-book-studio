@@ -4,11 +4,12 @@
  * The caller supplies the id, the purpose, and the ordered steps. Every new
  * step is pending. Purpose text is kept as supplied; this contract states no
  * purpose character maximum, so none is applied. Guidance uses the same
- * 2,000-character bound as agentGuidanceTextSchema. Blank guidance is omitted
- * before that bound is checked. Guidance over the bound is refused and is not
- * truncated. A refresh returns a new frozen revision and does not change the
- * previous proposal. A start intent names a new turn for that id and revision
- * and carries no approval. It does not start the turn.
+ * 2,000-character bound as agentGuidanceTextSchema. A string longer than that
+ * bound is refused before a blank check, including whitespace, and is not
+ * truncated. A blank string within the bound is omitted. A refresh returns a
+ * new frozen revision and does not change the previous proposal. A start
+ * intent names a new turn for that id and revision and carries no approval.
+ * It does not start the turn.
  *
  * The supplied writer is required and is never called. This module does not
  * write, read a clock, or mint a token.
@@ -193,8 +194,8 @@ function readRevision(value: unknown): number | null {
 function readGuidance(value: unknown): GuidanceRead {
   if (value === undefined || value === null) return { kind: "omit" };
   if (typeof value !== "string") return { kind: "refuse", code: "invalid-proposal" };
-  if (blank(value)) return { kind: "omit" };
   if (value.length > PLAN_GUIDANCE_LIMIT) return { kind: "refuse", code: "guidance-too-long" };
+  if (blank(value)) return { kind: "omit" };
   return { kind: "keep", text: value };
 }
 
