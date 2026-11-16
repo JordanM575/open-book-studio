@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Voice cancel
+
+- The desktop host keeps a registry of cancellable speech-to-text and text-to-speech request ids. Cancelling before a request is sent releases that slot and records it as unsent. Cancelling after it was sent aborts only the local request, keeps the slot until the local outcome is recorded, and leaves an unknown charge unknown. A second cancel and an unknown id change nothing. A late success or failure is recorded as a cancellation and does not release a newer request. The browser build refuses this cancel. This does not show that a remote provider observed the cancel. No task box is closed.
+
 ### Recent work pointers
 
 - An in-memory recent-work list keeps one pointer per book after a successful explicit open, newest first. A later open of the same book replaces the older pointer. Listing, refresh, import, onboarding, review, and a background read do not record an open, and replaying an intent that already succeeded does not record it again. The same scope token keeps its pointers; a different token starts an empty list and leaves the previous list unchanged. A pointer stores only a book id, the caller-supplied display time, and that scope token. The recent-pointer budget is 2,500,000 UTF-8 bytes and may drop the oldest pointers until a new pointer fits. A pointer that cannot fit alone is refused. A missing or unusable writer is a refusal and is never called. Dismissal removes one pointer and does not change a book. No library screen, settings writer, or task box is closed.

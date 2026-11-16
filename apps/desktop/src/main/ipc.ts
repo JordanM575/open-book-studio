@@ -74,6 +74,7 @@ import type { ProviderService } from "./providers";
 import type { AgentRuntime } from "./agent/runtime";
 import type { VoiceService } from "./voice";
 import type { SpeechService } from "./speech";
+import type { VoiceCancelRegistry } from "./voice-cancel-registry";
 import { ttsCapability, ttsModels } from "@ai-book-studio/core/providers/tts";
 import { speechModels } from "@ai-book-studio/core/providers/speech";
 import { isValidStoredVoicePreferences, voicePreferencesSchema } from "@ai-book-studio/core/providers/voice-preferences";
@@ -101,6 +102,12 @@ const connectionId = connectionIdSchema;
 const speakInput = z.object({
   text: z.string().min(1).max(200_000),
   speed: z.number().min(0.25).max(4).optional()
+}).strict();
+
+/** A host-minted voice id. No coercion: a string or a float is not an operation. */
+const voiceCancelInput = z.object({
+  operationId: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+  reason: z.string().min(1).max(2048).optional()
 }).strict();
 
 const ambientRequestSchema = z.object({ bookId: idSchema, chapterId: idSchema });
@@ -234,7 +241,12 @@ export function registerIpc(
    * when one is active. This build registers none, so the default refuses
    * truthfully rather than inventing an owner.
    */
-  getCoordinatorIdentity: () => CoordinatorIdentity | null = () => null
+  getCoordinatorIdentity: () => CoordinatorIdentity | null = () => null,
+  /**
+   * Local cancel registry for host-minted speech-to-text and text-to-speech ids.
+   * Null answers every id with an honest no-op and does not invent a provider receipt.
+   */
+  voiceCancelRegistry: VoiceCancelRegistry | null = null
 ): void {
   /** What the plugin folder currently provides, for the settings panel. */
   const pluginStatus = async (): Promise<PluginStatus> => {
@@ -1297,6 +1309,21 @@ export function registerIpc(
       model: result.model,
       voice: result.voice
     } satisfies SpokenReply;
+  });
+
+  handle(IPC.voice.cancel, (payload) => {
+    const input = voiceCancelInput.parse(payload);
+    if (!voiceCancelRegistry) {
+      return {
+        operationId: input.operationId,
+        accepted: false,
+        abortedLocally: false,
+        released: false
+      };
+    }
+    return input.reason === undefined
+      ? voiceCancelRegistry.cancel(input.operationId)
+      : voiceCancelRegistry.cancel(input.operationId, input.reason);
   });
 
   /* -------------------------------------------------------------------- images */

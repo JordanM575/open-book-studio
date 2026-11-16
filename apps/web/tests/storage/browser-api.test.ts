@@ -284,7 +284,8 @@ describe("what the browser build cannot do yet says so plainly", () => {
       await studio.images.attach("book_any", "img_any", "ch_any"),
       await studio.images.remove("book_any", "img_any"),
       await studio.voice.transcribe({} as never),
-      await studio.voice.speak({} as never)
+      await studio.voice.speak({} as never),
+      await studio.voice.cancel({ operationId: 1 })
     ]) {
       expect(refusal(result)).toContain("desktop app");
     }

@@ -90,13 +90,17 @@ using a microphone. New work does not close 038 T022 or the remaining manual/dev
   `permitsAudio`/`activeAudioGrant`; 37 synthetic host tests pass. Actual OS grants/microphone,
   mounted hands-free capture, owned-track stop and T022–T024 remain unclaimed.
 - [ ] T016 Add host-owned cancellable STT/TTS request IDs, per-chunk route checks and honest unknown-charge state.
-  Partial: pure `voice-session/transport.ts` owns monotonic operation/chunk IDs, one-slot
-  backpressure, exact session/route/permission rechecks immediately before each dispatch,
-  best-effort abort with owned-slot retention, duplicate/late-receipt rejection and
-  success/refusal/failure/cancellation plus unsent/reported/unknown charge. A typed edge maps
-  provider cost and service failures, and `VoiceService`/`SpeechService` accept an optional host
-  abort signal (TTS rechecks before every chunk). No mounted host registry, IPC/preload cancel
-  surface, proof of provider-side cancellation, live call or device evidence exists yet.
+  Partial: monotonic operation and chunk ids, one-slot backpressure, an exact session, route and
+  permission recheck immediately before each dispatch, and honest success, refusal, failure,
+  cancellation, unsent, reported and unknown charge remain in the pure ledger. The desktop host now
+  keeps a main-process registry of those ids. Cancelling before a request is sent releases the slot
+  and records it as unsent. Cancelling after it was sent aborts only the local request, keeps the
+  slot until the local outcome is recorded, and leaves an unknown charge unknown. A second cancel
+  and an unknown id change nothing. A late success or failure is recorded as a cancellation and
+  does not release a newer request. Desktop IPC and the preload bridge expose that local cancel.
+  The browser build refuses it. Existing dictation and speaking calls are not routed through the
+  registry. Nothing here shows that a remote provider observed the cancel, and there is no live
+  call or device evidence. This task stays open.
 - [ ] T017 Mount session/transcript/correct/confirm/stop controls with actual Discuss/book/chapter/thread binding.
   Partial: the Discuss panel mounts an explicit hands-free bar and a host-neutral controller
   (`packages/app/src/lib/hands-free.ts`, `components/HandsFreeBar.tsx`,
