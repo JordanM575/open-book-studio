@@ -143,6 +143,9 @@ using a microphone. New work does not close 038 T022 or the remaining manual/dev
   or lost save/accounting warnings, including Result failures and never-settling effects.
 - [ ] T020 Add source-bound paragraph reading/following, speed, selectable qualified local voices and
   positively local dictation capability with explicit cloud choice where local is unavailable.
+  Partial evidence: the pure cursor covers frozen paragraph order, source id/revision mismatch, and
+  the speed bound only. Local voices, device choice, positively local dictation, and cloud opt-in
+  remain open. This note does not close the task.
 - [ ] T021 Bind check-in/approval/revision commands to 037 question/epoch and exact named action identities.
 - [ ] T022 Pass synthetic host/UI race, backpressure, echo/noise, permission, lifecycle and accessibility matrix.
 - [ ] T023 Separately qualify actual microphone/near-end/echo/latency/local-engine behavior on each claimed host.
