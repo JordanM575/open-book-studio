@@ -76,6 +76,8 @@ composition, complete enumeration, API/IPC and workspace exposure still remain.
   atomic write path; refuse corrupt, unsupported-future or stale-base writes without replacing old
   bytes. Add in-memory and temporary-library tests for round-trip, idempotence, conflict, failure,
   path safety and schema refusal. Do not add a database-only source of truth.
+  Partial evidence only: collection and annotation services, a library-root collection queue, and
+  synthetic tests. The box stays open.
 
 ## Phase 3 — Author-facing surfaces
 
