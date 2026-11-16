@@ -277,12 +277,21 @@ export function WorkspaceView({
     historyRevision.current = { viewId: historyRevision.current.viewId, value: historyRevision.current.value + 1 };
   }, []);
   const historyClient: ChapterHistoryClient | null = window.studio.history ?? null;
-  const historyApi = historyClient
-    ? createChapterHistoryApi(historyClient, {
+  // One adapter for this client and visit. A new object on an ordinary re-render would replace
+  // api.list, and the open dialog would list again and clear the record it is showing.
+  const historyAdapter = useRef<{ client: ChapterHistoryClient; viewId: string; api: BoundChapterHistoryApi } | null>(null);
+  if (!historyClient) historyAdapter.current = null;
+  else if (historyAdapter.current?.client !== historyClient || historyAdapter.current.viewId !== historyViewId) {
+    historyAdapter.current = {
+      client: historyClient,
+      viewId: historyViewId,
+      api: createChapterHistoryApi(historyClient, {
         viewId: historyViewId,
         current: () => historyLive.current.viewId === historyViewId && historyLive.current.key === historyVisitKey
       })
-    : null;
+    };
+  }
+  const historyApi = historyAdapter.current?.api ?? null;
   const committedVisit = useRef({ identity, chapterId: selected?.id ?? null, reloadKey });
   const approvedEvidenceSwitch = useRef<{ identity: string; reloadKey: number; selection: EditorSelection & { chapterId: string } } | null>(null);
   const isMac = window.studio.platform === "darwin";
@@ -817,7 +826,9 @@ export function WorkspaceView({
       setDetail((current) => (current ? { ...current, chapters: remaining } : current));
       if (selectedId === pendingDelete.id) setSelectedId(remaining[0]?.id ?? null);
       setPendingDelete(null);
-      setStatus(EMPTY_STATUS);
+      // Another chapter leaves this visit in place. A synthetic saved status would hide a dirty,
+      // saving, conflict, or failed editor. Ending the open visit may still clear the status.
+      if (selectedId === pendingDelete.id) setStatus(EMPTY_STATUS);
     } catch (error) {
       onNotice(error);
     } finally {

@@ -10,6 +10,7 @@ Update the `Unreleased` section before every commit.
 ### Desktop chapter history
 
 - The desktop writing screen can open saved chapter history from More when a chapter is selected and the host exposes history. The entry lists, opens, compares, and captures that chapter's saved history for the current visit. It does not restore, and it does not add a browser history runtime. No task box is closed.
+- An open chapter history visit keeps one adapter, so an ordinary re-render does not list again or clear the record on screen. Deleting a different chapter no longer replaces the open editor's save status with a saved state. No task box is closed.
 - Desktop IPC and the preload bridge expose capture, list, open, and compare for one chapter's saved history. A record is named by its stored file name. Capture is refused while that chapter's unsaved text or a kept failed save is still held, and it does not flush or save. List, open, and compare do not change chapter or history bytes. Restore, undo, reconcile, and delete stay off this surface. No task box is closed.
 
 ### Invalidated task projection

@@ -146,6 +146,59 @@ function openHistory(view: ReturnType<typeof renderWorkspace>): BoundChapterHist
   return api;
 }
 
+const CLEAN_HISTORY = "No unsaved editor draft is reported. Comparisons use only the confirmed saved text.";
+
+function conflictReply(): Result<SaveChapterResult> {
+  return {
+    ok: true,
+    data: {
+      status: "conflict",
+      conflict: {
+        bookId: BOOK,
+        chapterId: FIRST.id,
+        chapterTitle: "First",
+        savedAs: "conflicts/first.md",
+        reason: "newer-version",
+        diskVersion: 3,
+        localVersion: 2
+      }
+    }
+  };
+}
+
+/** The other chapter's rail control, then the confirm button. The open chapter stays selected. */
+function deleteOtherChapter(view: ReturnType<typeof renderWorkspace>): void {
+  const row = document.querySelector("[data-chapter-id='ch_hist0002']");
+  const control = row?.parentElement?.querySelector("[data-testid='delete-chapter']");
+  if (!(control instanceof HTMLElement)) throw new Error("The other chapter has no delete control.");
+  testing.fireEvent.click(control);
+  testing.fireEvent.click(view.getByRole("button", { name: "Delete chapter" }));
+}
+
+function pageText(): string {
+  return document.body?.textContent ?? "";
+}
+
+/**
+ * Poll a boolean. Do not pass a live node to `expect`: printing one stalls the runner
+ * before the delete's flush can finish, and a testing-library dump of the page does the same.
+ */
+async function until(ready: () => boolean, label: string): Promise<void> {
+  const started = Date.now();
+  while (!ready()) {
+    if (Date.now() - started > 1200) throw new Error(`${label} after ${Date.now() - started}ms`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+function otherChapterPresent(): boolean {
+  return document.querySelector("[data-chapter-id='ch_hist0002']") !== null;
+}
+
+function dialogTitles(): string[] {
+  return Array.from(document.querySelectorAll("[data-slot='dialog-title']"), (node) => node.textContent ?? "");
+}
+
 describe("desktop chapter history entry", () => {
   test("opens saved chapter history from More and lists the selected chapter", async () => {
     const history = historyClient();
@@ -178,6 +231,7 @@ describe("desktop chapter history entry", () => {
     await testing.waitFor(() => expect(viewId()).not.toBe(firstId));
     const secondId = viewId();
     const second = openHistory(view);
+    expect(second).not.toBe(first);
     expect(second.viewId).toBe(secondId);
 
     const target = { libraryId: LIBRARY, bookId: BOOK, chapterId: FIRST.id, viewId: firstId };
@@ -245,6 +299,7 @@ describe("desktop chapter history entry", () => {
     const listed = history.list.mock.calls.length;
     testing.fireEvent.click(view.getByRole("button", { name: "Close" }));
     const again = openHistory(view);
+    expect(again).toBe(first);
     expect(again.viewId).toBe(first.viewId);
     await again.list({ libraryId: LIBRARY, bookId: BOOK, chapterId: FIRST.id, viewId: again.viewId });
     expect(history.list.mock.calls.length).toBeGreaterThan(listed);
@@ -268,5 +323,145 @@ describe("desktop chapter history entry", () => {
     expect(view.queryByTestId("more-chapter-history")).toBeNull();
     expect(view.queryByRole("dialog", { name: "Chapter history" })).toBeNull();
     expect(view.getByTestId("more-story-bible")).toBeTruthy();
+  });
+
+  test("a parent re-render keeps the open history adapter and the opened record", async () => {
+    const history = historyClient();
+    studio(history);
+    const props = {
+      bookId: BOOK,
+      theme: { choice: "light" as const, set: () => {}, cycle: () => {} },
+      libraryRoot: LIBRARY,
+      libraryStorage: undefined,
+      onBack: () => {},
+      onNotice: () => {},
+      onSchemaRefusal: () => {}
+    };
+    const rendered = testing.render(React.createElement(WorkspaceView, props));
+    const view = testing.within(document.body);
+    await openBook(view);
+    const api = openHistory(view);
+    await testing.waitFor(() => expect(view.getAllByRole("button", { name: "Open record" }).length).toBeGreaterThan(0));
+    testing.fireEvent.click(view.getByRole("button", { name: "Open record" }));
+    await testing.waitFor(() => expect(view.getByText("Saved history text.")).toBeTruthy());
+    const listed = history.list.mock.calls.length;
+    const visit = viewId();
+    const revision = revisionOf();
+
+    rendered.rerender(React.createElement(WorkspaceView, props));
+    expect(history.list.mock.calls).toHaveLength(listed);
+    expect(view.getByText("Saved history text.")).toBeTruthy();
+    expect(workspace().historyApi).toBe(api);
+    expect(viewId()).toBe(visit);
+    expect(revisionOf()).toBe(revision);
+
+    testing.fireEvent.change(view.getByTestId("manuscript-text"), { target: { value: "Dirty line.\n" } });
+    expect(history.list.mock.calls).toHaveLength(listed);
+    expect(view.getByText("Saved history text.")).toBeTruthy();
+    expect(view.getByText("Your unsaved editor draft is excluded from history and comparisons.")).toBeTruthy();
+    expect(workspace().historyApi).toBe(api);
+    expect(viewId()).toBe(visit);
+    expect(revisionOf()).toBe(revision + 1);
+  });
+
+  test("deleting another chapter does not invent a clean saved history state", async () => {
+    const diskFull: Result<SaveChapterResult> = { ok: false, error: { code: "io", message: "The disk is full." } };
+    const conflicted = "A conflict is unresolved. Editor drafts and conflict copies are excluded from comparisons.";
+    const failed = "The last save failed. Unsaved editor text is excluded from comparisons.";
+
+    const saveDirty = mock(async (): Promise<Result<SaveChapterResult>> => diskFull);
+    const deleteChapter = mock(async () => ({ ok: true as const, data: null }));
+    studio(historyClient(), saveDirty);
+    (globalThis as unknown as { window: { studio: { chapters: { delete: typeof deleteChapter } } } }).window.studio.chapters.delete = deleteChapter;
+    const dirtyView = renderWorkspace();
+    await openBook(dirtyView);
+    testing.fireEvent.change(dirtyView.getByTestId("manuscript-text"), { target: { value: "Dirty line.\n" } });
+    openHistory(dirtyView);
+    expect(pageText().includes("Your unsaved editor draft is excluded from history and comparisons.")).toBe(true);
+    const dirtyVisit = viewId();
+    const dirtyRevision = revisionOf();
+    const dirtyStarted = Date.now();
+    deleteOtherChapter(dirtyView);
+    await until(() => !otherChapterPresent() && pageText().includes(failed), "dirty delete did not finish as a failed save");
+    expect(Date.now() - dirtyStarted).toBeLessThan(1200);
+    expect(saveDirty.mock.calls).toHaveLength(1);
+    expect(deleteChapter.mock.calls).toHaveLength(1);
+    expect(pageText().includes(CLEAN_HISTORY)).toBe(false);
+    expect(viewId()).toBe(dirtyVisit);
+    expect(revisionOf()).toBeGreaterThan(dirtyRevision);
+    expect(dialogTitles()).toContain("Chapter history");
+    testing.cleanup();
+
+    let releaseSave!: (value: Result<SaveChapterResult>) => void;
+    let reply: Result<SaveChapterResult> | Promise<Result<SaveChapterResult>> = saved("Dirty line.\n", 2);
+    const savePending = mock(async () => reply);
+    studio(historyClient(), savePending);
+    const pendingView = renderWorkspace();
+    await openBook(pendingView);
+    testing.fireEvent.change(pendingView.getByTestId("manuscript-text"), { target: { value: "Dirty line.\n" } });
+    reply = new Promise<Result<SaveChapterResult>>((resolve) => { releaseSave = resolve; });
+    testing.fireEvent.blur(pendingView.getByTestId("manuscript-text"));
+    await testing.waitFor(() => expect(savePending).toHaveBeenCalled());
+    openHistory(pendingView);
+    expect(pageText().includes("A save is pending. Its editor text is excluded from comparisons until confirmed saved.")).toBe(true);
+    const pendingVisit = viewId();
+    const pendingRevision = revisionOf();
+    releaseSave(conflictReply());
+    await until(() => pageText().includes(conflicted), "the pending save did not become a conflict");
+    expect(revisionOf()).toBeGreaterThan(pendingRevision);
+    const conflictedRevision = revisionOf();
+    deleteOtherChapter(pendingView);
+    await until(() => !otherChapterPresent(), "the other chapter stayed after the saving delete");
+    expect(pageText().includes(CLEAN_HISTORY)).toBe(false);
+    expect(pageText().includes(conflicted)).toBe(true);
+    expect(viewId()).toBe(pendingVisit);
+    expect(revisionOf()).toBe(conflictedRevision);
+    expect(dialogTitles()).toContain("Chapter history");
+    testing.cleanup();
+
+    const saveConflict = mock(async (): Promise<Result<SaveChapterResult>> => conflictReply());
+    studio(historyClient(), saveConflict);
+    const conflictView = renderWorkspace();
+    await openBook(conflictView);
+    testing.fireEvent.change(conflictView.getByTestId("manuscript-text"), { target: { value: "Conflicting line.\n" } });
+    testing.fireEvent.blur(conflictView.getByTestId("manuscript-text"));
+    await testing.waitFor(() => expect(saveConflict).toHaveBeenCalled());
+    openHistory(conflictView);
+    await until(() => pageText().includes(conflicted), "the conflict was not shown");
+    const conflictVisit = viewId();
+    const conflictRevision = revisionOf();
+    const conflictSaves = saveConflict.mock.calls.length;
+    deleteOtherChapter(conflictView);
+    await until(() => !otherChapterPresent(), "the other chapter stayed after the conflict delete");
+    expect(pageText().includes(CLEAN_HISTORY)).toBe(false);
+    expect(pageText().includes(conflicted)).toBe(true);
+    expect(viewId()).toBe(conflictVisit);
+    expect(revisionOf()).toBe(conflictRevision);
+    expect(saveConflict.mock.calls).toHaveLength(conflictSaves);
+    testing.fireEvent.change(conflictView.getByTestId("manuscript-text"), { target: { value: "Edited after the other chapter was deleted.\n" } });
+    expect(viewId()).toBe(conflictVisit);
+    expect(revisionOf()).toBeGreaterThan(conflictRevision);
+    expect(pageText().includes(CLEAN_HISTORY)).toBe(false);
+    expect(pageText().includes("Your unsaved editor draft is excluded from history and comparisons.")).toBe(true);
+    testing.cleanup();
+
+    const saveError = mock(async (): Promise<Result<SaveChapterResult>> => diskFull);
+    studio(historyClient(), saveError);
+    const errorView = renderWorkspace();
+    await openBook(errorView);
+    testing.fireEvent.change(errorView.getByTestId("manuscript-text"), { target: { value: "Failed line.\n" } });
+    testing.fireEvent.blur(errorView.getByTestId("manuscript-text"));
+    openHistory(errorView);
+    await until(() => pageText().includes(failed), "the failed save was not shown");
+    const errorVisit = viewId();
+    const errorRevision = revisionOf();
+    const errorSaves = saveError.mock.calls.length;
+    deleteOtherChapter(errorView);
+    await until(() => !otherChapterPresent() && pageText().includes(failed), "error delete did not keep the failed save");
+    expect(pageText().includes(CLEAN_HISTORY)).toBe(false);
+    expect(viewId()).toBe(errorVisit);
+    expect(revisionOf()).toBeGreaterThan(errorRevision);
+    expect(saveError.mock.calls.length).toBeGreaterThan(errorSaves);
+    expect(dialogTitles()).toContain("Chapter history");
   });
 });
