@@ -18,7 +18,8 @@ export const LIBRARY_FILES = {
   device: "device.json",
   fileIndex: "files.json",
   images: "images.json",
-  migrations: "migrations.json"
+  migrations: "migrations.json",
+  collections: "collections.json"
 } as const;
 
 export const studioPath = (): LibraryPath => toLibraryPath([LIBRARY_DIRS.studio]);
@@ -67,6 +68,11 @@ export const trashPath = (bookId?: string): LibraryPath =>
   bookId === undefined
     ? toLibraryPath([LIBRARY_DIRS.studio, LIBRARY_DIRS.trash])
     : toLibraryPath([LIBRARY_DIRS.studio, LIBRARY_DIRS.trash, bookId]);
+export const collectionsFilePath = (): LibraryPath => toLibraryPath([LIBRARY_FILES.collections]);
+/** Library-root conflict copies for records that do not belong to one book. */
+export const rootConflictsPath = (): LibraryPath => toLibraryPath([LIBRARY_DIRS.conflicts]);
+export const rootConflictPath = (fileName: string): LibraryPath =>
+  toLibraryPath([LIBRARY_DIRS.conflicts, fileName]);
 export const libraryIndexPath = (): LibraryPath => toLibraryPath([LIBRARY_FILES.index]);
 export const devicePath = (): LibraryPath => toLibraryPath([LIBRARY_DIRS.studio, LIBRARY_FILES.device]);
 export const migrationsPath = (): LibraryPath =>

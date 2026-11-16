@@ -107,6 +107,8 @@ import { WorkflowRecordError } from "../workflow/record-error";
 import type { Owner, Reference } from "../authoring/contracts";
 import type { EffectPhase } from "../authoring/lifecycle";
 import { GoalService, type GoalHost } from "../organization/goals";
+import { AnnotationService } from "../organization/annotations";
+import { CollectionService, type CollectionHost } from "../organization/collections";
 import {
   HistoryError,
   historyDirectory,
@@ -152,8 +154,12 @@ export type KeepConflictCopyResult = { status: "kept"; savedAs: string } | { sta
 
 export class LibraryService {
   private readonly writes = new Map<string, Promise<unknown>>();
+  /** Library-root records. A book id is never a key here, so a book schema cannot block them. */
+  private readonly rootWrites = new Map<string, Promise<unknown>>();
   readonly planning: PlanningService;
   readonly goals: GoalService;
+  readonly collections: CollectionService;
+  readonly annotations: AnnotationService;
   readonly planningRecovery: PlanningRecovery;
   /** Explicit saved review records (039 T014). Leaf APIs only; no IPC/UI mounting here. */
   readonly reviewRecords: ReviewRecordStore;
@@ -183,6 +189,13 @@ export class LibraryService {
     };
     this.planning = new PlanningService(host);
     this.goals = new GoalService(host);
+    this.annotations = new AnnotationService(host);
+    const collections: CollectionHost = {
+      storage: env.storage, runtime: env.runtime, deviceId: device.id,
+      withCollections: (work) => this.serializeRoot("collections", work),
+      commitFile: (path, bytes, expected) => this.commitBytes(path, bytes, expected)
+    };
+    this.collections = new CollectionService(collections);
     this.planningRecovery = new PlanningRecovery(host, env.storage);
     this.reviewRecords = new ReviewRecordStore({
       ...this.writeHost,
@@ -1692,6 +1705,14 @@ export class LibraryService {
    * Keeps one writer per book, so two calls cannot interleave a read and a write. Every write first
    * checks the book's schema, so a book another device upgraded is refused before anything is written.
    */
+  /** One writer for a library-root file. This does not check or wait on any book. */
+  private serializeRoot<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.rootWrites.get(key) ?? Promise.resolve();
+    const next = previous.then(work, work);
+    this.rootWrites.set(key, next.catch(() => {}));
+    return next;
+  }
+
   private serializeWrite<T>(bookId: string, work: () => Promise<T>): Promise<T> {
     const checked = async () => {
       await assertBookWritable(this.env.storage, bookId);

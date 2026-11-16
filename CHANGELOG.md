@@ -11,6 +11,24 @@ Update the `Unreleased` section before every commit.
 
 - In-memory `reduceRun` tests prove a dispatched attempt whose impact does not share the changed direction keys stays that same live attempt: not historical, same generation, still `dispatch-intent`, and its task direction unchanged. A later `output-kept` then `completed` finishes that one attempt. Tasks whose impact matches, and a task whose impact is incomplete, take the new direction. The incomplete-impact task is projected `ready`, not `blocked`. A later `stopped` on that same attempt closes it; later `output-kept` and `completed` are refused, the task is `failed`, and another prepare is `task-not-ready`. Run-level pause, cancel, and revoke are unchanged. No reducer change. No task box is closed.
 
+### Checked collection and annotation records
+
+- Library-root `collections.json` and per-book `annotations.json` now save through the existing checked commit. Collections keep stable book ids, archive in place, and refuse an active-name collision until an explicit rename-and-restore. Annotations keep an exact saved-body span; a note-only edit leaves a stale anchor, and neither write changes chapter bytes. No library screen, recent-work list, or task box is closed.
+- Adding a book that is already a member does not sort or rewrite a current collection. A real membership change still stores the sorted id list. Excerpts use the 20,000-unit prose limit, and membership has no id-count cap; serialized size stays within 2,500,000 bytes. No library screen, recent-work list, or task box is closed.
+
+### Dictation insert
+
+- Default dictation inserts at the selection start and keeps the selected text. Replace selection is a separate one-shot control. A transcript keeps its line breaks; a transcript with none still joins surrounding prose with a single space. Both paths use the existing editor compare-and-set and one isolated undo. No task box is closed.
+
+### Host permission descriptor
+
+- A host-local permission descriptor can be validated. A copied descriptor is not execution permission. The pure codec does not store the descriptor, resume a host, or close a task.
+- The authoring boundary now says that descriptor and its format section are present. The workflow codec still does not hash bytes. The host-permission codec hashes the exact input bytes only when a caller supplies an expected hash. It still does not store the descriptor, resume a host, or close a task.
+
+### Desktop chapter history
+
+- Desktop IPC and the preload bridge expose capture, list, open, and compare for one chapter's saved history. A record is named by its stored file name. Capture is refused while that chapter's unsaved text or a kept failed save is still held, and it does not flush or save. List, open, and compare do not change chapter or history bytes. Restore, undo, reconcile, and delete stay off this surface. No task box is closed.
+
 ### Invalidated task projection
 
 - `projectInvalidatedTasks` builds the next task revisions for one direction's impact keys. An incomplete impact or a shared key matches, and a task that depends on a match matches too. A dependency that does not match is left out. The result is a frozen copy in input order: revision plus one, a sha256 base of the caller-supplied digest at the old revision, the supplied direction reference, `retryAllowed: true`, and the caller-supplied timestamp. A cached `status` is dropped. `currentAttempt`, `needsDirection`, `generation`, `createdAt`, and `definition` are copied. It does not hash, write, mark an attempt historical, clear a live attempt, bump generation, compare the new direction with the task's current direction, step the run, schedule, or resume cadence, and the host does not call it. No task box is closed.

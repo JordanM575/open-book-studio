@@ -4,7 +4,7 @@ Internal, platform-independent leaves for 037 T021/T022/T025 and the T018 workfl
 selected by D-194–D-196/D-116 and ADR 0019. Import the local `index.ts`; no global package export is
 exposed. The in-memory contracts are **not a scheduler, execution grant or wholesale persisted
 `run.json`**. `wire.ts` reads and writes the schema-1 workflow records specified in `docs/FORMAT.md`;
-the remaining thread/host-permission schemas, writers and independent review stay separate.
+the host-permission descriptor has its own pure codec. Shared thread migration, writers and independent review stay separate.
 No dependency imports, provider, filesystem, credential, clock reader, timer, callback or host writer
 exists in the implementation. All IDs, digests, clocks, receipts and host facts are supplied explicitly.
 
@@ -27,6 +27,7 @@ exists in the implementation. All IDs, digests, clocks, receipts and host facts 
 | `wire.ts` | `projectAnsweredQuestion` | Pure next question revision after that check. The check runs first. Copies the question, sets revision plus one, a sha256 base of the caller-supplied previous digest at the open revision, state `answered`, and an answer of the checked texts, the proposed direction reference, and the caller-supplied timestamp. Does not hash, write, create a direction, schedule, or resume cadence. |
 | `wire.ts` | `projectInvalidatedTasks` | Pure next task revisions for one direction's impact. An incomplete impact or a shared key matches, and then so does a dependent. Copies each affected task, sets revision plus one, a sha256 base of the caller-supplied digest at the old revision, the supplied direction reference, `retryAllowed: true`, and the caller timestamp. Drops a cached `status`. Does not hash, write, mark an attempt historical, schedule, or resume cadence. |
 | `adoption-receipt.ts` | `AdoptionReceipt`, `validateAdoptionReceipt`, `countAdoptedChapters`, `ADOPTION_RECEIPT_LIMITS` | Versioned recorded adoption receipt (FR-017) and the pure adopted-chapter counter for T032 cadence. Binds one exact `artifact` candidate, `chapterId`, `resultVersion`/`resultHash`, `owner`, `grant`/`direction` references and caller-supplied `sequence`/`adoptedAt`; counts distinct chapters since an exclusive marker. No prose, clock or adoption decision. |
+| `host-permission.ts` | `decodeHostPermission`, `encodeHostPermission`, `readHostPermission` | Closed schema-1 host-permission descriptor. Validates owner, host, policy digest, generation, expiry, revocation and resume. A copied descriptor is not execution permission. No storage, clock, or host resume. |
 
 Factories and reducers defensively copy before returning recursively frozen snapshots. They never
 freeze or mutate caller objects, prior snapshots, commands or receipts. Inputs and supported unknown
@@ -305,17 +306,21 @@ accounting-reconciliation contract is required to attach later definitive billin
 
 T018 now supplies the schema-1 workflow records and this raw codec: field-level FORMAT definitions,
 exact reference/hash rules, command/receipt pagination, per-kind bounds and conflict/recovery rules.
-Shared thread migration and host-permission schemas, checked workflow writers, real streaming and
-independent review remain open. A snapshot here aggregates multiple records and command history; do
+The schema-1 host-permission descriptor and its pure codec are also present. Shared thread migration,
+checked workflow writers, host-permission storage, real streaming and independent review remain open.
+A snapshot here aggregates multiple records and command history; do
 **not** write it wholesale as `run.json` or infer that it fits the 2.5 MB run-file limit. New graph
 inputs enforce 2.5 MB/1,024 tasks and individual task/command/request values enforce 262,144 bytes.
-The codec validates hash shape but cannot compute a SHA-256, read a related file or verify currency;
-the host owns exact-byte hashing, storage and cross-file reconciliation.
+The workflow raw codec validates hash shape but cannot compute a SHA-256, read a related file or
+verify currency; the host owns that exact-byte hashing, storage and cross-file reconciliation.
+The host-permission codec hashes the exact input bytes when the caller supplies an expected hash.
+It does not store the descriptor, read a clock, or resume a host.
 
 T019/T020/T022–T025/T029/T032–T035 own checked conversation/storage, pinned host permission, durable
 reservation/effect receipts, lifecycle, real transport, quiescence and publication. No package global
-export, SDK/runtime, Library/API/IPC/preload/Workspace or ThreadStore is changed here; the FORMAT change
-is limited to the T018 workflow-record section.
+export, SDK/runtime, Library/API/IPC/preload/Workspace or ThreadStore is changed here. FORMAT includes
+the T018 workflow-record section and the schema-1 host-permission descriptor. The host-permission
+section does not authorize storage or a host resume.
 Host integration must prevent copied descriptors and worker text from entering privileged command/
 receipt/fact inputs, retain observations before projection errors, reconcile uncertain work explicitly,
 and never recreate a ledger on restart to erase charges. Source/exact-citation/context construction,
