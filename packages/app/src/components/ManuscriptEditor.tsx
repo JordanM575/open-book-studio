@@ -4,6 +4,7 @@ import type { ImageRecord } from "@ai-book-studio/core/images/schema";
 import { plainSaveReason } from "@ai-book-studio/core/library/errors";
 import { createSharedEvidencePort } from "@ai-book-studio/core/review/shared-verifier";
 import { type InlineSpan, inlineSpanKey } from "@ai-book-studio/core/review/inline/overlap";
+import { Button } from "@ai-book-studio/ui/button";
 import { pushHistory, redoHistory, undoHistory } from "../lib/editor-history";
 import { countWords, formatCount, formatWords, pluralize, savedTime } from "../lib/utils";
 import { VoiceButton } from "./VoiceButton";
@@ -16,6 +17,7 @@ import type {
   InlineInspection,
   InlineSnapshot,
   InlineSource,
+  TextSelection,
   ValidatedEvidencePort,
   ValidatedInlineLayer
 } from "./inline-editor/contracts";
@@ -136,6 +138,8 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const [title, setTitle] = useState(chapter.title);
   const [status, setStatus] = useState<SaveStatus>({ kind: "saved", at: Date.now() });
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [selectionEmpty, setSelectionEmpty] = useState(true);
+  const [replaceArmed, setReplaceArmed] = useState(false);
   const [editor, setEditor] = useState<InlineEditor | null>(null);
   const [layer, setLayer] = useState<ValidatedInlineLayer | null>(null);
   const [active, setActive] = useState<InlineSpan | null>(null);
@@ -148,6 +152,8 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorRef = useRef<InlineEditor | null>(null);
+  /** The armed replace is read at transcript time. useDictation keeps the onText it saw at start. */
+  const replaceArmRef = useRef<{ revision: number; anchor: number; head: number } | null>(null);
   const surface = useRef<HTMLDivElement | null>(null);
   const rowRefs = useRef(new Map<string, HTMLElement>());
   /** The words the last conflicted save kept as a copy, the base it was checked against, and its status. */
@@ -485,6 +491,11 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const handleReviewStatusRef = useRef(handleReviewStatus);
   handleReviewStatusRef.current = handleReviewStatus;
 
+  const onSelectionRef = useRef<(selection: TextSelection) => void>(() => {});
+  onSelectionRef.current = (selection) => {
+    setSelectionEmpty(selection.anchor === selection.head);
+  };
+
   const optionsRef = useRef<InlineEditorOptions | null>(null);
   if (!optionsRef.current) {
     optionsRef.current = {
@@ -495,6 +506,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       onCommand: (command) => runCommandRef.current(command),
       onInspect: (inspection) => handleInspectionRef.current(inspection),
       onReviewStatus: (next) => handleReviewStatusRef.current(next),
+      onSelection: (selection) => onSelectionRef.current(selection),
       onComposition: () => {},
       onBlur: () => void saveRef.current(latest.current),
       label: "Chapter text",
@@ -555,10 +567,35 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     };
   }, [editor, reviewRequest]);
 
+  const disarmReplace = (): void => {
+    replaceArmRef.current = null;
+    setReplaceArmed(false);
+  };
+
+  /** Arm the next transcript only, for the revision and selection offsets at this moment. */
+  const toggleReplaceSelection = (): void => {
+    if (replaceArmRef.current) {
+      disarmReplace();
+      return;
+    }
+    const current = editorRef.current;
+    if (!current) return;
+    const snapshot = current.getSnapshot();
+    if (snapshot.selection.anchor === snapshot.selection.head) return;
+    replaceArmRef.current = {
+      revision: snapshot.revision,
+      anchor: snapshot.selection.anchor,
+      head: snapshot.selection.head
+    };
+    setReplaceArmed(true);
+  };
+
   /**
-   * Insert a transcript where the author left the caret. Spacing is added only when the surrounding
-   * text needs it; the insert then takes the normal applyText -> draft -> save path. A busy editor
-   * (composition or hold) refuses and leaves the transcript with the host for retry.
+   * Insert a transcript where the author left the caret and keep any selected text. Spacing is added
+   * only when the surrounding prose needs it, and a line break in the transcript stays a line break.
+   * Replace selection, while still armed for this revision and these offsets, removes only that range.
+   * Either path takes the normal applyText -> draft -> save path. A busy editor refuses and leaves
+   * the transcript with the host for retry.
    */
   const insertTranscript = (text: string): void => {
     const current = editorRef.current;
@@ -567,7 +604,16 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       return;
     }
     const snapshot = current.getSnapshot();
-    if (!current.insertDictation(text, snapshot.revision)) {
+    const arm = replaceArmRef.current;
+    if (arm) {
+      disarmReplace();
+      const selection = snapshot.selection;
+      const matches = snapshot.revision === arm.revision && selection.anchor === arm.anchor && selection.head === arm.head;
+      if (!matches || !current.replaceDictation(text, snapshot.revision)) {
+        setVoiceError("The transcript could not be inserted while the editor is busy. Dictate again when it is ready.");
+        return;
+      }
+    } else if (!current.insertDictation(text, snapshot.revision)) {
       setVoiceError("The transcript could not be inserted while the editor is busy. Dictate again when it is ready.");
       return;
     }
@@ -625,7 +671,18 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
           <span>
             {formatCount(lines)} {pluralize(lines, "line")}
           </span>
-          <span className="ml-auto">
+          <span className="ml-auto inline-flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              aria-pressed={replaceArmed}
+              disabled={selectionEmpty}
+              data-testid="replace-selection"
+              onClick={toggleReplaceSelection}
+            >
+              Replace selection
+            </Button>
             <VoiceButton
               onText={insertTranscript}
               onError={(error) => setVoiceError(error.message)}
