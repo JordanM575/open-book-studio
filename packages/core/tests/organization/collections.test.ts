@@ -237,6 +237,55 @@ describe("checked library collections", () => {
     expect(await port.listDirectory(toLibraryPath([".studio", "sync"]))).toEqual(journalBefore);
     expect(await port.readFile(bookFilePath(book.id))).not.toBeNull();
   });
+
+  test("an add of ids already present keeps an unsorted membership, its revision and the file bytes", async () => {
+    const { port, library, book, twin } = await opened();
+    const created = await library.collections.save({ ...absent(), draft: { kind: "create", name: "Shelf" } });
+    if (created.status !== "saved" || !created.current.data) throw new Error("Expected a collection");
+    const record = created.current.data.collections[0];
+    if (!record) throw new Error("Expected a record");
+    const membership = [book.id, twin.id].sort().reverse();
+    expect(membership).not.toEqual([...membership].sort());
+    const unsorted = {
+      ...created.current.data,
+      collections: [{ ...record, bookIds: membership }]
+    };
+    await port.commitFile(collectionsFilePath(), encoder.encode(`${JSON.stringify(unsorted, null, 2)}\n`), { kind: "any" });
+    const current = await library.collections.read();
+    const before = await port.readFile(collectionsFilePath());
+    expect(current.data?.collections[0]?.bookIds).toEqual(membership);
+    const fileRevision = current.data?.revision;
+    const recordRevision = current.data?.collections[0]?.revision;
+    const again = await library.collections.save({
+      source: current.source, baselineJson: current.baselineJson,
+      draft: { kind: "add-members", id: record.id, bookIds: [...membership].reverse() }
+    });
+    expect(again.status).toBe("unchanged");
+    const after = await library.collections.read();
+    expect(after.data?.collections[0]?.bookIds).toEqual(membership);
+    expect(after.data?.revision).toBe(fileRevision);
+    expect(after.data?.collections[0]?.revision).toBe(recordRevision);
+    expect((await port.readFile(collectionsFilePath()))?.bytes).toEqual(before?.bytes);
+  });
+
+  test("a remove of 10,001 absent ids is not refused for count and writes nothing", async () => {
+    const { port, library } = await opened();
+    const created = await library.collections.save({ ...absent(), draft: { kind: "create", name: "Shelf" } });
+    if (created.status !== "saved" || !created.current.data) throw new Error("Expected a collection");
+    const id = created.current.data.collections[0]?.id;
+    if (!id) throw new Error("Expected an id");
+    const before = await port.readFile(collectionsFilePath());
+    const absentIds = Array.from({ length: 10_001 }, (_, index) => `book_a${index.toString(36).padStart(6, "0")}`);
+    const removed = await library.collections.save({
+      source: created.current.source, baselineJson: created.current.baselineJson,
+      draft: { kind: "remove-members", id, bookIds: absentIds }
+    });
+    expect(removed.status).toBe("unchanged");
+    const after = await library.collections.read();
+    expect(after.data?.revision).toBe(created.current.data.revision);
+    expect(after.data?.collections[0]?.bookIds).toEqual([]);
+    expect((await port.readFile(collectionsFilePath()))?.bytes).toEqual(before?.bytes);
+  });
 });
 
 void CollectionService;

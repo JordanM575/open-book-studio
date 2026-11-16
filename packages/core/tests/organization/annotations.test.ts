@@ -156,4 +156,51 @@ describe("checked saved-span annotations", () => {
     expect((await f.library.readChapter(f.book.id, chapter.id)).version).toBe(chapter.version);
     expect(await f.raw(bookFilePath(f.book.id))).toContain(`"schemaVersion": 1`);
   });
+
+  test("a saved excerpt may be 201 or 20,000 units, 20,001 is refused, and a note keeps the prose limit", async () => {
+    const f = await fixture();
+    const chapter = await f.library.createChapter(f.book.id, { title: "Saved", content: "x".repeat(20_001) });
+    const body = (await f.library.readChapter(f.book.id, chapter.id)).content;
+    const excerpt = (units: number) => body.slice(0, units);
+    expect(excerpt(201)).toBe(body.slice(0, 201));
+    expect(body.startsWith(excerpt(20_001))).toBe(true);
+    const read = await f.library.annotations.read(f.book.id);
+    await expect(f.library.annotations.save({
+      ...envelope(read),
+      draft: { kind: "create-bookmark", anchor: { chapterId: chapter.id, startOffset: 0, endOffset: 20_001, excerpt: excerpt(20_001) } }
+    })).rejects.toThrow(/exceeds the field limits/);
+    expect((await f.library.annotations.read(f.book.id)).data).toBeNull();
+
+    const short = await f.library.annotations.save({
+      ...envelope(read),
+      draft: { kind: "create-bookmark", anchor: { chapterId: chapter.id, startOffset: 0, endOffset: 201, excerpt: excerpt(201) } }
+    });
+    expect(short.status).toBe("saved");
+    if (short.status !== "saved" || !short.current.data) throw new Error("Expected a short excerpt");
+    const proseSpan = await f.library.annotations.save({
+      bookId: f.book.id, source: short.current.source, baselineJson: short.current.baselineJson,
+      draft: { kind: "create-bookmark", anchor: { chapterId: chapter.id, startOffset: 0, endOffset: 20_000, excerpt: excerpt(20_000) } }
+    });
+    expect(proseSpan.status).toBe("saved");
+    const noted = await f.library.annotations.save({
+      bookId: f.book.id,
+      source: proseSpan.status === "saved" ? proseSpan.current.source : short.current.source,
+      baselineJson: proseSpan.status === "saved" ? proseSpan.current.baselineJson : short.current.baselineJson,
+      draft: { kind: "create-note", note: "n".repeat(20_000), anchor: { chapterId: chapter.id, startOffset: 0, endOffset: 201, excerpt: excerpt(201) } }
+    });
+    expect(noted.status).toBe("saved");
+    if (noted.status !== "saved" || !noted.current.data) throw new Error("Expected a note");
+    const note = noted.current.data.annotations.find((record) => record.kind === "note");
+    if (!note || note.kind !== "note") throw new Error("Expected the note");
+    await expect(f.library.annotations.save({
+      bookId: f.book.id, source: noted.current.source, baselineJson: noted.current.baselineJson,
+      draft: { kind: "edit-note", id: note.id, note: "n".repeat(20_001) }
+    })).rejects.toThrow(/exceeds the field limits/);
+    const kept = await f.library.annotations.read(f.book.id);
+    expect(kept.data?.annotations.map((record) => record.anchor.excerpt).sort((left, right) => left.length - right.length)).toEqual([
+      excerpt(201), excerpt(201), excerpt(20_000)
+    ]);
+    expect(kept.data?.annotations.find((record) => record.kind === "note")).toMatchObject({ note: "n".repeat(20_000) });
+    expect((await f.port.readFile(chapterPath(f.book.id, chapter.path)))?.sha256).toBe(chapter.hash);
+  });
 });

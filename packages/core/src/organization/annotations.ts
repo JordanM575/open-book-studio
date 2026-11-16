@@ -5,7 +5,7 @@ import { chapterPath } from "../library/paths";
 import { readHistoryEnvelope } from "../library/history";
 import { normalizeBody } from "../markdown";
 import { isScalarBoundary } from "../review/contract";
-import { bookIdSchema, hashSchema, increment, prose, recordIdSchema, revisionSchema, shortText } from "../planning/schema";
+import { bookIdSchema, hashSchema, increment, prose, recordIdSchema, revisionSchema } from "../planning/schema";
 import {
   assertSidecarOwner, CheckedSidecar, envelopeFields, parseRequest, SidecarRefusalError,
   type SidecarAttempt, type SidecarHost, type SidecarRead, type SidecarSave
@@ -20,7 +20,7 @@ export const anchorRequestSchema = z.strictObject({
   chapterId: chapterIdSchema,
   startOffset: offsetSchema,
   endOffset: offsetSchema,
-  excerpt: shortText.refine((value) => value.length > 0, "An excerpt is required.")
+  excerpt: prose.refine((value) => value.length > 0, "An excerpt is required.")
 });
 export type AnchorRequest = z.infer<typeof anchorRequestSchema>;
 
@@ -32,7 +32,7 @@ export const savedSpanSchema = z.looseObject({
   chapterHash: hashSchema,
   startOffset: offsetSchema,
   endOffset: offsetSchema,
-  excerpt: shortText
+  excerpt: prose
 });
 export type SavedSpan = z.infer<typeof savedSpanSchema>;
 

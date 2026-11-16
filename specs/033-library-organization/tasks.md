@@ -77,7 +77,7 @@ composition, complete enumeration, API/IPC and workspace exposure still remain.
   bytes. Add in-memory and temporary-library tests for round-trip, idempotence, conflict, failure,
   path safety and schema refusal. Do not add a database-only source of truth.
   Partial evidence only: collection and annotation services, a library-root collection queue, and
-  synthetic tests. The box stays open.
+  synthetic tests for unsorted membership no-ops, prose-sized excerpts, and membership without an id-count cap. The box stays open.
 
 ## Phase 3 — Author-facing surfaces
 

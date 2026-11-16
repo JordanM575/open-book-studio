@@ -50,7 +50,7 @@ export type CollectionsFile = z.infer<typeof collectionsSchema>;
 const memberDraft = z.strictObject({
   kind: z.enum(["add-members", "remove-members"]),
   id: collectionIdSchema,
-  bookIds: z.array(bookIdSchema).max(10_000)
+  bookIds: z.array(bookIdSchema)
 });
 export const collectionSaveSchema = z.strictObject({
   source: sourceSchema,
@@ -105,6 +105,9 @@ export function applyCollectionDraft(
     if (record.archived) throw new LibraryError("invalid", "Restore this archived collection before changing its books. Nothing was written.");
     const present = new Set(record.bookIds);
     const incoming = [...new Set(draft.bookIds)];
+    if (draft.kind === "add-members" && incoming.every((id) => present.has(id))) {
+      return { data, changed: false };
+    }
     const next = draft.kind === "add-members"
       ? [...record.bookIds, ...incoming.filter((id) => !present.has(id))].sort()
       : record.bookIds.filter((id) => !incoming.includes(id));
