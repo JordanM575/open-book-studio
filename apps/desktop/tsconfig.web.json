@@ -74,6 +74,7 @@
     "tests/chapter-read-issues.test.tsx",
     "tests/chapter-rail.test.tsx",
     "tests/chapter-history-ui.test.tsx",
+    "tests/chapter-history-entry.test.tsx",
     "tests/chapter-reorder-conflict.test.tsx",
     "tests/story-bible-conflict-copy.test.tsx",
     "tests/format-save-order.test.tsx",
