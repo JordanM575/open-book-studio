@@ -70,7 +70,7 @@ export function parseRequest<T extends { bookId: string; draft: unknown }>(schem
   return result.data;
 }
 
-export function sidecarPath(bookId: string, kind: "planning" | "goals"): LibraryPath {
+export function sidecarPath(bookId: string, kind: "planning" | "goals" | "annotations"): LibraryPath {
   return toLibraryPath(["books", bookId, `${kind}.json`]);
 }
 
@@ -99,7 +99,7 @@ export async function assertSidecarOwner(host: SidecarHost, bookId: string): Pro
 
 /** Internal checked policy, composed by leaf services; the host owns all scheduling/publication. */
 export class CheckedSidecar<T extends SidecarDocument> {
-  constructor(readonly host: SidecarHost, readonly kind: "planning" | "goals", readonly schema: z.ZodType<T>) {}
+  constructor(readonly host: SidecarHost, readonly kind: "planning" | "goals" | "annotations", readonly schema: z.ZodType<T>) {}
 
   async readCurrent(bookId: string): Promise<SidecarRead<T>> {
     const path = sidecarPath(bookId, this.kind);

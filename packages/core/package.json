@@ -22,6 +22,14 @@
       "types": "./src/organization/goals.ts",
       "default": "./src/organization/goals.ts"
     },
+    "./organization/collections": {
+      "types": "./src/organization/collections.ts",
+      "default": "./src/organization/collections.ts"
+    },
+    "./organization/annotations": {
+      "types": "./src/organization/annotations.ts",
+      "default": "./src/organization/annotations.ts"
+    },
     "./schema": {
       "types": "./src/schema.ts",
       "default": "./src/schema.ts"

@@ -7,6 +7,11 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Checked collection and annotation records
+
+- Library-root `collections.json` and per-book `annotations.json` now save through the existing checked commit. Collections keep stable book ids, archive in place, and refuse an active-name collision until an explicit rename-and-restore. Annotations keep an exact saved-body span; a note-only edit leaves a stale anchor, and neither write changes chapter bytes. No library screen, recent-work list, or task box is closed.
+- Adding a book that is already a member does not sort or rewrite a current collection. A real membership change still stores the sorted id list. Excerpts use the 20,000-unit prose limit, and membership has no id-count cap; serialized size stays within 2,500,000 bytes. No library screen, recent-work list, or task box is closed.
+
 ### Dictation insert
 
 - Default dictation inserts at the selection start and keeps the selected text. Replace selection is a separate one-shot control. A transcript keeps its line breaks; a transcript with none still joins surrounding prose with a single space. Both paths use the existing editor compare-and-set and one isolated undo. No task box is closed.
