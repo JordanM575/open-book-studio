@@ -11,6 +11,11 @@ Update the `Unreleased` section before every commit.
 
 - Default dictation inserts at the selection start and keeps the selected text. Replace selection is a separate one-shot control. A transcript keeps its line breaks; a transcript with none still joins surrounding prose with a single space. Both paths use the existing editor compare-and-set and one isolated undo. No task box is closed.
 
+### Host permission descriptor
+
+- A host-local permission descriptor can be validated. A copied descriptor is not execution permission. The pure codec does not store the descriptor, resume a host, or close a task.
+- The authoring boundary now says that descriptor and its format section are present. The workflow codec still does not hash bytes. The host-permission codec hashes the exact input bytes only when a caller supplies an expected hash. It still does not store the descriptor, resume a host, or close a task.
+
 ### Desktop chapter history
 
 - Desktop IPC and the preload bridge expose capture, list, open, and compare for one chapter's saved history. A record is named by its stored file name. Capture is refused while that chapter's unsaved text or a kept failed save is still held, and it does not flush or save. List, open, and compare do not change chapter or history bytes. Restore, undo, reconcile, and delete stay off this surface. No task box is closed.
