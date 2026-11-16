@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Independent continuation and stop
+
+- In-memory `reduceRun` tests prove a dispatched attempt whose impact does not share the changed direction keys stays that same live attempt: not historical, same generation, still `dispatch-intent`, and its task direction unchanged. A later `output-kept` then `completed` finishes that one attempt. Tasks whose impact matches, and a task whose impact is incomplete, take the new direction. The incomplete-impact task is projected `ready`, not `blocked`. A later `stopped` on that same attempt closes it; later `output-kept` and `completed` are refused, the task is `failed`, and another prepare is `task-not-ready`. Run-level pause, cancel, and revoke are unchanged. No reducer change. No task box is closed.
+
 ### Checked collection and annotation records
 
 - Library-root `collections.json` and per-book `annotations.json` now save through the existing checked commit. Collections keep stable book ids, archive in place, and refuse an active-name collision until an explicit rename-and-restore. Annotations keep an exact saved-body span; a note-only edit leaves a stale anchor, and neither write changes chapter bytes. No library screen, recent-work list, or task box is closed.
