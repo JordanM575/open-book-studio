@@ -116,12 +116,21 @@ authorized; no task requires a live provider, credential, paid service, real man
   decision update replaces the event-only re-shoot hold; film work remains separately tracked.
 - [ ] T012 Add guidance to a proposed plan and require a refreshed visible proposal before **Start
   plan**. No tool may write during this refresh. Keep live steering disabled under D-179.
+  Partial: `packages/core/src/agent/proposed-plan.ts` refreshes guidance on a proposed Edit plan
+  only. A blank value is omitted. More than 2,000 characters is refused without truncation or a
+  write. The refresh returns a new frozen revision and does not change the previous proposal,
+  mode, model, tool permissions, or approvals. A running, paused, started, or terminal plan is
+  refused. No Plan first control is mounted and this task stays open.
 
 ## Phase 4 — Visible plan lifecycle
 
 - [ ] T013 Add the explicit Plan first control for Edit turns and show a bounded, readable plan with
   ordered steps. Persist the proposed state and prove with a synthetic fixture that no write occurs
   before **Start plan**.
+  Partial: the same pure contract builds an Edit proposal from a caller-supplied purpose and one
+  or more ordered steps, each pending. Discuss is refused. Preparing a start names a new turn,
+  the proposal id, and the current revision, and carries no approval. It does not call a writer,
+  start a turn, or persist the plan. The Plan first control is not mounted and this task stays open.
 - [ ] T014 Add Start plan and confirmed per-step progress using D-178's accepted new-turn continuation
   semantics. The model/runtime must report only observed outcomes; tests cover completed, skipped
   and not-completed steps using scripted events.
