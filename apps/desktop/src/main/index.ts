@@ -32,6 +32,7 @@ import { VoiceService } from "./voice";
 import { SpeechService } from "./speech";
 import { SettingsStore } from "./settings";
 import { AudioGrantRegistry, trustedRendererOrigin, VoicePermissionOwner } from "./voice-permissions";
+import { VoiceCancelRegistry } from "./voice-cancel-registry";
 import { claimsSingleInstanceLock, sendWhenLoaded } from "./instance";
 import { StudioWindows } from "./windows";
 import { Studio } from "./studio";
@@ -566,6 +567,8 @@ const started = app.whenReady().then(async () => {
     void sync.maybeCheckOnFocus().then(pushDrift);
   });
 
+  // Local cancel for host-minted voice ids. Dictation and speaking stay on their existing paths.
+  const voiceCancelRegistry = new VoiceCancelRegistry();
   registerIpc(
     studio,
     () => mainWindow,
@@ -578,7 +581,9 @@ const started = app.whenReady().then(async () => {
     speech,
     () => backend,
     bridgeControl,
-    (bookId) => agentRuntime.isWorking(bookId)
+    (bookId) => agentRuntime.isWorking(bookId),
+    () => null,
+    voiceCancelRegistry
   );
 
   /*

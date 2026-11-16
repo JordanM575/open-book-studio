@@ -84,6 +84,22 @@ export interface SpokenReply {
   voice?: string;
 }
 
+/**
+ * Local result of cancelling one host-minted voice operation.
+ *
+ * This is not a provider receipt. It does not report a charge, a refund, or whether a remote
+ * request stopped.
+ */
+export interface VoiceCancelReceipt {
+  operationId: number;
+  /** True only when this call changed a live operation that was not yet cancelled. */
+  accepted: boolean;
+  /** True when this call aborted a chunk the host had already dispatched locally. */
+  abortedLocally: boolean;
+  /** True when this call released the slot because nothing had been sent. */
+  released: boolean;
+}
+
 /** The bridge to the phone, as the app's settings panel drives it. */
 export interface BridgeControl {
   /** The running bridge's address, token and port, or null when it is off. */
@@ -248,7 +264,9 @@ export const IPC = {
     /** Connections that can speak, and the voices they offer. */
     speakers: "voice:speakers",
     /** Speak text and return the audio, so the renderer can play it. */
-    speak: "voice:speak"
+    speak: "voice:speak",
+    /** Best-effort local cancel of one host-minted operation. */
+    cancel: "voice:cancel"
   },
   images: {
     list: "images:list",
@@ -728,6 +746,16 @@ export interface StudioApi {
       text: string;
       speed?: number;
     }): Promise<Result<SpokenReply>>;
+    /**
+     * Ask the host to cancel one operation it minted.
+     *
+     * Unknown and already-cancelled ids are honest no-ops. This does not claim the provider
+     * observed the cancel.
+     */
+    cancel(input: {
+      operationId: number;
+      reason?: string;
+    }): Promise<Result<VoiceCancelReceipt>>;
   };
   images: {
     list(bookId: string): Promise<Result<ImageList>>;

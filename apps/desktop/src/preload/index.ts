@@ -149,7 +149,8 @@ const api: StudioApi = {
     connections: () => invoke(IPC.voice.connections),
     transcribe: (input) => invoke(IPC.voice.transcribe, input),
     speakers: () => invoke(IPC.voice.speakers),
-    speak: (input) => invoke(IPC.voice.speak, input)
+    speak: (input) => invoke(IPC.voice.speak, input),
+    cancel: (input) => invoke(IPC.voice.cancel, input)
   },
   images: {
     list: (bookId) => invoke(IPC.images.list, bookId),

@@ -13,9 +13,9 @@ provider or device qualification.
 ADR 0021 / D-200 is the accepted policy, rather than the earlier research recommendations.
 D-125 keeps audio in memory; D-192 pins explicit routes without fallback. The existing
 `VoiceService` checks selected STT connection/model and the existing `SpeechService` loops TTS
-chunks. T016 adds an optional abort signal to both, but neither supplies this module's session
-authority or a mounted cancellation registry; those remain host-integration work, not implicitly
-upgraded by these files.
+chunks. T016 adds an optional abort signal to both. Neither service is this module's session
+authority, and neither is the desktop cancel registry. These files do not upgrade the leaf to a
+provider or device proof.
 
 Use a synchronous immutable reducer plus **effect descriptions**, rather than embedding promises
 or transports: a never-settling effect cannot delay revocation. Keep one bounded outstanding slot
@@ -183,9 +183,12 @@ host to execute once, and it never calls a provider.
 `reported`/`unknown`, maps `ProviderError`/abort to refusal, failure or cancellation with bounded
 copy, and combines a host `AbortSignal` with the existing per-request deadline. `VoiceService` and
 `SpeechService` accept an optional `signal`; `SpeechService` rechecks it before every chunk and
-neither service retries or falls back. This is still not a mounted host: there is no IPC/preload
-cancellation surface, no session-owned abort registry, no proof an in-flight provider request
-stopped, and no live/provider/device evidence. T016 remains unchecked.
+neither service retries or falls back. The desktop host now keeps a main-process registry of
+cancellable speech-to-text and text-to-speech ids and exposes a best-effort local cancel through
+IPC and the preload bridge. Cancellation is local: the owned slot stays until the local outcome
+is recorded, an unknown charge stays unknown, and nothing here proves a provider observed the
+cancel. There is still no live provider call, microphone, or device evidence. T016 remains
+unchecked.
 
 ## PCM/VAD adapter and bounds
 

@@ -386,6 +386,13 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
             "invalid",
             "Speaking is available in the desktop app. The browser uses the device's own voice."
           )
+        ),
+      cancel: () =>
+        Promise.resolve(
+          failure(
+            "unsupported",
+            "Cancelling a voice request is available in the desktop app."
+          )
         )
     },
     images: {
