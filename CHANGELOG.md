@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Reading position
+
+- An in-memory cursor keeps a paragraph index for one caller-supplied source id and revision, moves only inside that frozen paragraph list, and accepts a speed from 0.25 through 4 without clamping. A different revision or a changed body is refused. It does not speak, choose a voice, or close a task box. No task box is closed.
+
 ### Voice cancel
 
 - The desktop host keeps a registry of cancellable speech-to-text and text-to-speech request ids. Cancelling before a request is sent releases that slot and records it as unsent. Cancelling after it was sent aborts only the local request, keeps the slot until the local outcome is recorded, and leaves an unknown charge unknown. A second cancel and an unknown id change nothing. A late success or failure is recorded as a cancellation and does not release a newer request. The browser build refuses this cancel. This does not show that a remote provider observed the cancel. No task box is closed.

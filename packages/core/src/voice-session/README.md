@@ -223,6 +223,12 @@ interruption requires an actual author Continue. Near-end/echo accuracy, full-du
 sample-rate conversion, stream gaps and actual microphone/permission behavior need separate host
 qualification. Synthetic events certify none of those.
 
+## Reading cursor
+
+`reading.ts` is an unmounted pure cursor for a paragraph index plus source revision and the 0.25–4
+speed bound. It does not speak, select a voice, or qualify a device or local engine. D-109 stays
+open. 017 T020 and 038 T022 stay unchecked.
+
 ## Focused verification
 
 ```sh
