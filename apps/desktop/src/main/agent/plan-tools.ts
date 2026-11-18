@@ -181,7 +181,12 @@ export class PlanProgress {
         return { ok: false, message: planStepEarlierOpenMessage(this.activeIndex + 1) };
       }
       const closed = await this.closeActiveStep("completed");
-      if (!closed.ok) return { ok: false, message: closed.message ?? PLAN_TOOL_REFUSALS.planBlocked };
+      if (!closed.ok) {
+        // The close failure blocks the plan. Attempt the one honest terminal fail before returning;
+        // otherwise the stored plan would stay running with an open step after the turn errors.
+        await this.failPlan();
+        return { ok: false, message: closed.message ?? PLAN_TOOL_REFUSALS.planBlocked };
+      }
     }
 
     const current = this.plan.steps[index]!;

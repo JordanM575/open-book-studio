@@ -174,6 +174,10 @@ interface CheckpointProgress {
   queue: Promise<unknown>;
 }
 
+/**
+ * Existing SDK loop cap. A plan longer than this fails honestly instead of completing in one turn;
+ * raising it or continuing a plan across turns is later lifecycle work, not a completion claim.
+ */
 const MAX_STEPS = 20;
 
 // Fixed, public-safe warnings. Multiple failed writes must not replace one another, and repeated

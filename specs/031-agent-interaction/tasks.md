@@ -160,7 +160,9 @@ authorized; no task requires a live provider, credential, paid service, real man
   and settled writes precede publishing and resuming, completion requires every step completed and
   the complete write applied, and a plan write failure ends as `plan-state` rather than completed.
   Pause, resume ownership, cancel and expiry remain T015-T017. The plan control, plan card and
-  composer wiring remain a follow-up slice, and this task stays open.
+  composer wiring remain a follow-up slice. The existing 20-step model loop cap remains; a longer
+  plan fails honestly rather than completing in one turn, and raising it or continuing across turns
+  stays with later lifecycle work. This task stays open.
 - [ ] T015 Add Pause and Resume according to T002. A requested pause is not shown as complete until
   the runtime confirms the boundary; no later tool may start while paused. Use a synthetic in-flight
   tool fixture to cover the chosen boundary.
