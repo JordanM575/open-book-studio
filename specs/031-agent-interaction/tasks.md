@@ -1,9 +1,9 @@
 # Tasks: agent interaction and guidance
 
 **Spec:** [spec.md](spec.md) · **Plan:** [plan.md](plan.md)
-**Status:** Draft / In progress — decision tasks T001–T003 reconciled to accepted D-177–D-179;
-T004 and T010 implemented. W03 implements T007–T009 and T011 plus the mode/guidance
-portion of T006; plan/lifecycle and integrated delivery verification remain open.
+**Status:** Delivered at the source/test level — T005, T006 and T013–T021 are recorded complete
+below; T012 remains open because no visible stored-plan guidance refresh is mounted. Live provider,
+real manuscript, device, packaged-build and release acceptance remain separate.
 
 Tasks are ordered. An unresolved decision blocks only the task that depends on it. All tests use
 temporary synthetic libraries, fixture chapters and scripted model responses unless separately
@@ -31,10 +31,11 @@ authorized; no task requires a live provider, credential, paid service, real man
   against five alternatives: pause completes on the terminal `stopped`
   event ("Stopping…" until then), continuation is always a new turn, approvals stay per
   turn, close stops non-background turns and restart expires plans. W04 implements the bounded
-  terminal-stop prerequisite; see [stop-boundary evidence](stop-boundary.md). Plan lifecycle remains open.
-  The consumer correction adds terminal ownership in Ambient, usage/conversation/approval warning
-  accumulation and completion/background/toolkit propagation. Its 271-test focused pass and
-  workspace typechecks do not close plan, host lifecycle or integrated delivery tasks.
+  terminal-stop prerequisite; see [stop-boundary evidence](stop-boundary.md). The plan lifecycle was
+  delivered by T013–T017. The consumer correction adds terminal ownership in Ambient,
+  usage/conversation/approval warning accumulation and completion/background/toolkit propagation.
+  Its 271-test focused pass and workspace typechecks did not close the plan, host lifecycle or
+  integrated delivery tasks at that point.
 - [x] T003 Decide whether new guidance can be added to a running or paused plan and whether that
   action revises the same plan or requires a new turn. Blocks only in-flight plan guidance; proposed
   plan guidance and pre-send controls can proceed.
@@ -63,28 +64,29 @@ authorized; no task requires a live provider, credential, paid service, real man
   production mode/guidance and retry identity, as recorded below. A same-text request with changed
   mode or guidance must not silently reuse a different earlier request; schema round trips alone
   do not prove runtime population.
-- [ ] T005 Add validated plan and step state to the thread contract, with explicit parent-turn
+- [x] T005 Add validated plan and step state to the thread contract, with explicit parent-turn
   binding and allowed transitions. Persist proposed, active and terminal state through the existing
   thread store. Malformed or incompatible plan state must be reported without deleting the thread.
   Test with synthetic thread files.
-  Partial: the thread contract now stores a bounded `plans` array with the nine stored statuses,
+  Implemented: the thread contract stores a bounded `plans` array with the nine stored statuses,
   four step states, an Edit proposal-turn parent binding, the pure lifecycle and step transition
   table, and terminal/no-removal store guards. A malformed plan is reported as corrupt and an
   unknown stored status or step state as unsupported; either way the file is left untouched.
   Runtime turn wiring, Start/Resume execution, the restart expiry sweep and the plan interface
-  remain open, so this task stays open.
-- [ ] T006 Add mode, plan and guidance fields to the main-process turn/event contract. Reject
+  landed through T006 and T014–T017. The focused plan suites and the synthetic journey pass.
+  Completed 2026-11-18; no new stored status or field was added.
+- [x] T006 Add mode, plan and guidance fields to the main-process turn/event contract. Reject
   invalid modes, oversized guidance and plans that exceed the selected bounds before a provider
   call or write can start. Test through the model factory seam without a network.
   W03: mode/guidance validation and request snapshots are implemented; actual user guidance
   and user/assistant mode persist, including failed, stopped and approval-waiting attempts.
-  Retry identity includes prompt, mode and guidance. Plan/event expansion remains open.
+  Retry identity includes prompt, mode and guidance. Plan/event expansion was delivered by T014–T016.
   T006 builder: the turn contract now accepts an identity-only plan reference, returns the
   confirmed mode and running plan snapshot, refuses invalid, foreign, stale, non-startable,
   non-resumable, over-bound and mismatched plan turns before the provider, and records one
   start/resume write with a single fail compensation for a later setup failure. Additive plan
-  notices are defined for T014–T018 but are not emitted here. Focused synthetic tests pass; the
-  box stays open until independent review and merge.
+  notices are defined for T014–T018 and are emitted by those later slices. Focused synthetic tests
+  pass; independent review and merge completed. Completed 2026-11-18.
 
 ## Phase 2 — Discuss and Edit permissions
 
@@ -133,24 +135,23 @@ authorized; no task requires a live provider, credential, paid service, real man
   write. The refresh returns a new frozen revision and does not change the previous proposal,
   mode, model, tool permissions, or approvals. A running, paused, started, or terminal plan is
   refused. The Plan first control is mounted for an Edit turn. Refreshing its guidance shows a new
-  revision and does not apply while a turn is running. Durable plan persistence and start execution
-  remain open, and this task stays open.
+  revision and does not apply while a turn is running. Durable persistence and start execution are
+  merged; the visible proposed-plan refresh control is still not mounted, so this task stays open.
 
 ## Phase 4 — Visible plan lifecycle
 
-- [ ] T013 Add the explicit Plan first control for Edit turns and show a bounded, readable plan with
+- [x] T013 Add the explicit Plan first control for Edit turns and show a bounded, readable plan with
   ordered steps. Persist the proposed state and prove with a synthetic fixture that no write occurs
   before **Start plan**.
-  Partial: the same pure contract builds an Edit proposal from a caller-supplied purpose and one
-  or more ordered steps, each pending. Discuss is refused. Preparing a start names a new turn,
-  the proposal id, and the current revision, and carries no approval. It does not call a writer,
-  start a turn, or persist the plan. The Plan first control is mounted for an Edit turn and shows
-  that proposal. Start plan only displays the intent. Durable plan persistence and start execution
-  remain open, and this task stays open.
-- [ ] T014 Add Start plan and confirmed per-step progress using D-178's accepted new-turn continuation
+  Completed 2026-11-18: the Plan first control sends a read-only Edit proposal; the runtime stores
+  the assistant message and the plan with every step pending, and the conversation shows a stored
+  plan card. Preparing a start names the plan id and current revision and carries no approval; Start
+  creates the new Edit turn only after the author clicks it. The synthetic journey proves no book
+  write occurs before Start and no Apply/Reject card appears.
+- [x] T014 Add Start plan and confirmed per-step progress using D-178's accepted new-turn continuation
   semantics. The model/runtime must report only observed outcomes; tests cover completed, skipped
   and not-completed steps using scripted events.
-  Partial: the main-process runtime and contract slice runs a stored plan as one new Edit turn.
+  Implemented: the main-process runtime and renderer run a stored plan as one new Edit turn.
   Start keeps the identity-only ref and its pre-flight, emits no plan notice, and acknowledges the
   confirmed `running` state only through the turn-start result. A read-only Edit proposal turn
   stores its assistant message, then adds the plan and emits one `proposed` notice; a missing or
@@ -159,40 +160,68 @@ authorized; no task requires a live provider, credential, paid service, real man
   successful observed tool result and zero failures, otherwise `not-completed`. Approval request
   and settled writes precede publishing and resuming, completion requires every step completed and
   the complete write applied, and a plan write failure ends as `plan-state` rather than completed.
-  Pause, resume ownership, cancel and expiry remain T015-T017. Renderer slice: Plan first sends one
+  Pause, resume ownership, cancel and expiry were delivered by T015–T017. Renderer slice: Plan first sends one
   read-only Edit proposal request and reviews the stored plan from the conversation; Start sends the
   identity-only ref with the fixed prompt and no guidance, the plan card shows confirmed step labels
   and status, a refused Start removes its optimistic local rows, and the proposal and step control
   tools stay out of the author-facing tool list. The composer request fields, plan card and plan
   region no longer depend on a local proposal. The existing 20-step model loop cap remains; a longer
   plan fails honestly rather than completing in one turn, and raising it or continuing across turns
-  stays with later lifecycle work. This task stays open.
-- [ ] T015 Add Pause and Resume according to T002. A requested pause is not shown as complete until
+  stays with later lifecycle work. Completed 2026-11-18: the runtime and renderer slices are merged
+  and independently accepted; the focused suites and the synthetic journey pass.
+- [x] T015 Add Pause and Resume according to T002. A requested pause is not shown as complete until
   the runtime confirms the boundary; no later tool may start while paused. Use a synthetic in-flight
   tool fixture to cover the chosen boundary.
-  W04 prerequisite: the existing Stop now closes dispatch synchronously, retains settling ownership
-  beyond five seconds, records late tool results and publishes one terminal outcome after persistence
-  attempts. This does not implement plan Pause/Resume or complete this task.
-- [ ] T016 Add terminal cancellation. Cancel stops later tool dispatch, does not roll back completed
+  Pause reuses the stop barrier: one request-pause write, in-flight settlement, one confirm-pause,
+  then the terminal stopped event. No step write occurs after the gate; an open step stays
+  in-progress. Resume is the existing identity-only turn with fresh approvals. The pause/boundary
+  suites and the renderer states pass. Completed 2026-11-18.
+- [x] T016 Add terminal cancellation. Cancel stops later tool dispatch, does not roll back completed
   writes, expires any pending approval under 002 and reports the actual checkpoint/undo state. Test
   cancellation before a write, between steps and while approval is pending.
-- [ ] T017 Add restart/reload expiry handling. A simulated new runtime must mark old non-terminal
+  A plan-scoped cancel channel handles live and no-turn paths, expires a pending approval, keeps
+  completed writes and reports the real change/undo facts. Cancel before a write, between steps,
+  in flight, while waiting and on proposed/paused plans is covered; a failed cancel never claims
+  cancelled. Completed 2026-11-18.
+- [x] T017 Add restart/reload expiry handling. A simulated new runtime must mark old non-terminal
   plans expired and refuse resume/replay; a renderer reload may reattach only to a plan-linked turn
   confirmed live by the same main process. Verify that partial work and checkpoint status remain
   visible.
-- [ ] T018 Cover provider failure, save conflict, checkpoint failure and plan-state persistence
+  A lazy thread-scoped sweep behind read and start expires unowned non-terminal plans, preserves
+  terminal plans and partial work, and reattaches only a confirmed live plan turn. No clock, boot
+  scan, auto-resume or replay; the runtime, renderer and IPC matrices pass. Completed 2026-11-18.
+- [x] T018 Cover provider failure, save conflict, checkpoint failure and plan-state persistence
   failure. The synthetic tests must show the affected step and preserve existing checked-writer and
   recovery behavior without claiming a successful save or undo.
+  The acceptance matrix covers provider failure after a write, a kept conflict copy, a checkpoint
+  failure with no undo, complete+fail, boundary-close and step-store conflict. The failed-turn
+  paragraph claims Undo only when the runtime confirmed it. Completed 2026-11-18.
 
 ## Phase 5 — Accessibility and acceptance
 
-- [ ] T019 Add component tests for keyboard-only mode selection, guidance controls, plan actions,
+- [x] T019 Add component tests for keyboard-only mode selection, guidance controls, plan actions,
   approval distinction and announced progress/status. Check visible focus and status text without
   relying on color.
-- [ ] T020 Complete the synthetic author journey: Discuss with no writes, a new Edit turn, a
+  A1–A18 cover the named card/status, one polite confirmed announcer, the focus matrix through
+  Start/Pause/Resume/Cancel and refusals, described limits, one plan card in ChatPanel, the
+  cross-unmount proposal announcement, reduced motion/transparency and the browser-only unsupported
+  host. No control depends on color alone. Completed 2026-11-18.
+- [x] T020 Complete the synthetic author journey: Discuss with no writes, a new Edit turn, a
   Plan-first proposal and explicit start, an approval pause, cancellation with partial work, and
   inspection of the stored outcome. Confirm no generic Apply/Reject edit card or duplicate model
   chooser appears.
-- [ ] T021 Run the relevant type checks and test suites, update the format documentation and
+  The hybrid ChatPanel-over-runtime journey passes: Discuss refuses its scripted write with
+  unchanged bytes, Edit writes and undoes, Ask for plan writes nothing before Start, Start runs the
+  observed steps, the destructive step waits at the 002 approval, Cancel keeps partial work and
+  expires the approval, and a reopened library shows the stored outcome. One model chooser, one
+  plan card, no Apply/Reject or plan approval control. Completed 2026-11-18.
+- [x] T021 Run the relevant type checks and test suites, update the format documentation and
   changelog when implementation is authorized, and review the final behavior against 002, 011,
-  017, 024 and 025. Keep this task unchecked until that future work is actually performed.
+  017, 024 and 025.
+  Completed 2026-11-18: `bun run typecheck` has a clean node project, a clean toolkit and only the
+  pre-existing `WorkspaceView.tsx:1816` web diagnostic; the full `bun test` run is 4,941 pass,
+  1 skip, and one pre-existing editor-sync timing failure with its unhandled error; the focused
+  plan suites are 202 pass. `bun run smoke` is blocked by that pre-existing typecheck and the host's missing SUID
+  sandbox, so no packaged or hidden-UI smoke claim is made. FORMAT and CHANGELOG were reviewed as
+  accurate; the 002/011/017/024/025 boundaries are recorded in the verification report. No live
+  provider, real manuscript, device, packaged-build or release acceptance is claimed.
