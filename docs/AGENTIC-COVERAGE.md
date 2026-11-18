@@ -1,14 +1,15 @@
 # Agentic coverage audit
 
-## Current reconciliation — November 9, 2026
+## Current reconciliation — November 18, 2026
 
 The October audit below is preserved as history. Its missing/unspecified rows and suggested spec
 numbers are not current instructions. Reconciliation uses merged PRs through #63, the `320defb` expanded
-requirements audit and exact candidate reports; it is not a new live-provider or release audit.
+requirements audit, exact candidate reports and the merged ordinary agent-interaction plan slices; it
+is not a new live-provider or release audit.
 
 | Area | Current evidence | Remaining owned work |
 | --- | --- | --- |
-| Discuss/Edit, request guidance and attribution | Reviewed PR #32 merged | Ordinary plans and corrected stop consumers, then separate 037 graph under ADR 0019 |
+| Discuss/Edit, request guidance and attribution | Reviewed PR #32 merged; ordinary plan proposal, guidance refresh, visible lifecycle, pause/resume, cancel, restart expiry and the synthetic journey are delivered at the source/test level | Separate 037 graph under ADR 0019; live provider, real manuscript, device and packaged-build acceptance remain |
 | Word/length, memory and search | Tools expose saved counts, memory CRUD and scoped chapter search; the old “no search” claim is obsolete | Complete constraint reporting/context evaluation, independently of tool presence; no implicit cross-book access |
 | Conversations | V1 files and compaction exist | D-113 now selects checked writes, explicit backed-up migration, recoverable deletion and replay exclusion; all-caller implementation remains |
 | History | PR #33 merged verified saved-only core; exact restore/UI correction accepted and merged in PR #34 | Real API/Workspace mount, restore confirmation/recovery controls and cleanup |
