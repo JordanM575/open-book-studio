@@ -91,6 +91,7 @@
     "tests/book-actions-conflict-copy.test.tsx",
     "tests/chat-composer.test.tsx",
     "tests/plan-first-control.test.tsx",
+    "tests/plan-accessibility.test.tsx",
     "tests/hands-free-controller.test.ts",
     "tests/hands-free-bar.test.tsx",
     "tests/connection-cards.test.tsx",
