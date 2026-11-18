@@ -126,7 +126,7 @@ function mockStudio() {
           ok([NEWER, FINISHED].map((id) => ({ id, title: threads[id]?.title ?? "", createdAt: NOW, updatedAt: NOW, messageCount: 2, preview: "" }))),
         read: (_bookId: string, id: string) => {
           read.push(id);
-          return ok(threads[id] ?? null);
+          return ok({ thread: threads[id] ?? null, planRuntime: null });
         }
       }
     },

@@ -526,14 +526,17 @@ describe("Discuss panel binding", () => {
             Promise.resolve({
               ok: true,
               data: {
-                schemaVersion: 1,
-                id: THREAD,
-                bookId: BOOK,
-                title: "A conversation",
-                createdAt: AT,
-                updatedAt: AT,
-                messages: [],
-                checkpointTurns: [],
+                thread: {
+                  schemaVersion: 1,
+                  id: THREAD,
+                  bookId: BOOK,
+                  title: "A conversation",
+                  createdAt: AT,
+                  updatedAt: AT,
+                  messages: [],
+                  checkpointTurns: [],
+                },
+                planRuntime: null,
               },
             })
           ),
@@ -922,8 +925,8 @@ describe("R6 real ChatPanel post-flush voice admission", () => {
         : { ok: true, data: { turnId: "synthetic", threadId: THREAD } });
       (window as unknown as { studio: unknown }).studio = { platform: "darwin", agent: {
         threads: { list: async () => ({ ok: true, data: [{ id: THREAD }] }),
-          read: async (_book: string, id: string) => ({ ok: true, data: { schemaVersion: 1, id, bookId: BOOK, title: "Synthetic",
-            createdAt: AT, updatedAt: AT, messages: [], checkpointTurns: [] } }) },
+          read: async (_book: string, id: string) => ({ ok: true, data: { thread: { schemaVersion: 1, id, bookId: BOOK, title: "Synthetic",
+            createdAt: AT, updatedAt: AT, messages: [], checkpointTurns: [] }, planRuntime: null } }) },
         start, onEvent: () => () => {}, stop: async () => ({ ok: true, data: null }),
       } };
       const props = { bookId: BOOK, chapterId: CHAPTER, handsFreePort: fake.port, onBeforeSend: before,
@@ -1058,10 +1061,10 @@ describe("real ChatPanel voice history eligibility", () => {
         ];
         (window as unknown as { studio: unknown }).studio = { platform: "darwin", agent: {
           threads: { list: async () => ({ ok: true, data: [{ id: THREAD }] }),
-            read: async () => ({ ok: true, data: { schemaVersion: 1, id: THREAD, bookId: BOOK, title: "Synthetic",
+            read: async () => ({ ok: true, data: { thread: { schemaVersion: 1, id: THREAD, bookId: BOOK, title: "Synthetic",
               createdAt: AT, updatedAt: AT, checkpointTurns: [], messages: legitimate.map((entry, index) => ({
                 id: `earlier_${index}`, role: entry.role, parts: [{ type: "text", text: entry.text }], createdAt: AT,
-              })) } }) },
+              })) }, planRuntime: null } }) },
           start, onEvent: (handler: (event: AgentEvent) => void) => { emit = handler; return () => { emit = undefined; }; },
           stop: async () => ({ ok: true, data: null }),
         } };

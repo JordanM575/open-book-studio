@@ -561,6 +561,38 @@ export type AgentPlanCancelResult =
   | { outcome: "cancelled"; plan: AgentPlan }
   | { outcome: "terminal"; plan: AgentPlan };
 
+/**
+ * The one plan-linked turn this main process still owns for a conversation.
+ *
+ * `stopping` means the turn has an open stop request; a reload shows `Stopping…` and offers no
+ * later action. This is a snapshot for reattaching controls, never authority for a new turn.
+ */
+export interface AgentPlanRuntime {
+  readonly planId: string;
+  readonly turnId: string;
+  readonly phase: "active" | "stopping";
+}
+
+/**
+ * What one thread read did about a stored plan whose runtime this process lost.
+ *
+ * `expired` and `terminal` are confirmed terminal facts. `failed` means the one checked write did
+ * not settle, so the plan keeps its last confirmed status and the author sees this sentence.
+ */
+export type AgentPlanExpiry =
+  | { readonly planId: string; readonly outcome: "expired" }
+  | { readonly planId: string; readonly outcome: "terminal" }
+  | { readonly planId: string; readonly outcome: "failed"; readonly message: string };
+
+/** The conversation read, its live plan turn (if any) and an expiry result (if one was attempted). */
+export interface AgentThreadRead {
+  readonly thread: AgentThread | null;
+  /** The one plan-linked turn this main process still owns for this thread, if any. */
+  readonly planRuntime: AgentPlanRuntime | null;
+  /** Present only when this read attempted the one expiry write. */
+  readonly expiry?: AgentPlanExpiry;
+}
+
 export interface StudioApi {
   /** Absent on unsupported hosts; controls refuse before opening a draft. */
   planning?: PlanningApi;
@@ -846,7 +878,7 @@ export interface StudioApi {
     setPluginFolder(folder: string | null): Promise<Result<PluginStatus>>;
     threads: {
       list(bookId: string): Promise<Result<ThreadSummary[]>>;
-      read(bookId: string, threadId: string): Promise<Result<AgentThread | null>>;
+      read(bookId: string, threadId: string): Promise<Result<AgentThreadRead>>;
       rename(bookId: string, threadId: string, title: string): Promise<Result<AgentThread>>;
       remove(bookId: string, threadId: string): Promise<Result<null>>;
       fork(bookId: string, threadId: string, turnId: string): Promise<Result<AgentThread>>;

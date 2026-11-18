@@ -1442,7 +1442,7 @@ export function registerIpc(
 
   handle(IPC.agent.threads.read, async (payload) => {
     const input = z.object({ bookId: idSchema, threadId: idSchema }).parse(payload);
-    return studio.requireLibrary().threads.read(input.bookId, input.threadId);
+    return agent.readThread(input.bookId, input.threadId);
   });
 
   handle(IPC.agent.threads.rename, async (payload) => {

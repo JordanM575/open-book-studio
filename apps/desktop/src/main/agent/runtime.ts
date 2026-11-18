@@ -39,7 +39,12 @@ import {
 import { compactHistory } from "@ai-book-studio/core/agent/history";
 import { contextBreakdown, type ContextBreakdown } from "@ai-book-studio/core/agent/context";
 import { agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
-import type { AgentPlanCancelResult } from "@ai-book-studio/core/ipc";
+import type {
+  AgentPlanCancelResult,
+  AgentPlanExpiry,
+  AgentPlanRuntime,
+  AgentThreadRead
+} from "@ai-book-studio/core/ipc";
 import { isPlanControlTool } from "@ai-book-studio/core/agent/plan-tools";
 import { ThreadStoreError, type ThreadStore } from "@ai-book-studio/core/agent/threads";
 import { findModel, unavailableReason } from "@ai-book-studio/core/providers/models";
@@ -107,6 +112,12 @@ interface ActiveTurn {
   stopIntent?: "pause" | "cancel" | undefined;
   /** Retained through tool, approval and outcome persistence settlement. */
   completion: Promise<void>;
+}
+
+/** The post-sweep thread and, only when this read attempted the one expiry write, its result. */
+interface SweptThread {
+  readonly thread: AgentThread;
+  readonly expiry?: AgentPlanExpiry;
 }
 
 export type AgentOutcomeKind = "done" | "error" | "stopped" | "approval";
@@ -193,6 +204,13 @@ const PERSISTENCE_WARNINGS = {
   planCancel: "The plan's cancellation could not be saved. The plan remains at its last confirmed state."
 } as const;
 
+// Fixed, public-safe expiry sentences. The read warning is also the fallback when a failed write
+// has no store sentence; the start refusal is used only before any provider or stream.
+const PLAN_EXPIRY_WARNING =
+  "This plan's runtime is no longer available, but the plan could not be marked expired. It remains at its last confirmed state. Nothing was replayed.";
+const PLAN_EXPIRY_START_REFUSAL =
+  "This plan's runtime is no longer available, but the plan could not be marked expired. Nothing was started. Restart the app before continuing.";
+
 function recordPersistenceError(state: TurnState, kind: keyof typeof PERSISTENCE_WARNINGS): void {
   const warning = PERSISTENCE_WARNINGS[kind];
   if (!state.persistenceError?.includes(warning)) {
@@ -211,6 +229,15 @@ export type AgentModelFactory = (credential: StoredCredential, modelId: string) 
 export class AgentRuntime {
   private readonly active = new Map<string, ActiveTurn>();
   private readonly listeners = new Set<(event: AgentEvent) => void>();
+  /**
+   * Plans this process proposed, started or resumed, keyed by book, thread and plan id. It is
+   * never persisted: a new process starts empty, so every old non-terminal plan is stale there.
+   */
+  private readonly ownedPlans = new Set<string>();
+  /** The one pending expiry write per stored plan, shared by concurrent thread reads. */
+  private readonly expiring = new Map<string, Promise<SweptThread>>();
+  /** One honest failure sentence per stored plan, so this process never retries that write. */
+  private readonly expiryFailures = new Map<string, string>();
 
   constructor(
     private readonly studio: Studio,
@@ -251,6 +278,145 @@ export class AgentRuntime {
    */
   isWorking(bookId: string): boolean {
     return [...this.active.values()].some((turn) => turn.bookId === bookId);
+  }
+
+  /**
+   * Read one conversation and lazily settle a stored plan whose runtime this process lost.
+   *
+   * The store read is the normal checked read. The only possible write is one `expire` for the
+   * single non-terminal plan, and only while this process has no live plan turn and never
+   * proposed, started or resumed that plan. A renderer reload shares this process, so it
+   * reattaches the confirmed live turn instead. There is no clock, boot scan, cross-thread sweep,
+   * synthetic event, replay, resume or deletion.
+   */
+  async readThread(bookId: string, threadId: string): Promise<AgentThreadRead> {
+    const thread = await this.studio.requireLibrary().threads.read(bookId, threadId);
+    if (!thread) return { thread: null, planRuntime: null };
+    const swept = await this.sweepStoredPlan(bookId, threadId, thread);
+    return {
+      thread: swept.thread,
+      planRuntime: this.planRuntimeFor(bookId, threadId),
+      ...(swept.expiry ? { expiry: swept.expiry } : {})
+    };
+  }
+
+  /**
+   * Expire the one non-terminal plan in this exact thread when nothing in this process owns it.
+   * A terminal plan, an owned plan and a plan with a matching live turn write nothing.
+   */
+  private async sweepStoredPlan(
+    bookId: string,
+    threadId: string,
+    thread: AgentThread
+  ): Promise<SweptThread> {
+    // A terminal plan can never be written again, so no failure memory for it can apply.
+    for (const plan of thread.plans) {
+      if (isTerminalPlan(plan)) this.expiryFailures.delete(planKey(bookId, threadId, plan.id));
+    }
+    const plan = thread.plans.find((entry) => !isTerminalPlan(entry));
+    if (!plan) return { thread };
+    const key = planKey(bookId, threadId, plan.id);
+    // A live turn, or a plan this process proposed, started or resumed, is not stale. Ownership
+    // is not liveness: an owned proposed or paused plan stays startable/resumable.
+    if (this.ownedPlans.has(key) || this.livePlanTurn(bookId, threadId, plan.id)) return { thread };
+    // One attempt per plan per process. A cached failure is reported again without another write.
+    const failure = this.expiryFailures.get(key);
+    if (failure !== undefined) {
+      return { thread, expiry: { planId: plan.id, outcome: "failed", message: failure } };
+    }
+    // Two windows opening the same conversation share one write and one result.
+    const pending = this.expiring.get(key);
+    if (pending) return pending;
+    const write = this.expireStoredPlan(bookId, threadId, thread, plan);
+    this.expiring.set(key, write);
+    try {
+      return await write;
+    } finally {
+      this.expiring.delete(key);
+    }
+  }
+
+  /** The one checked expire write, plus one read after a conflicted or uncertain outcome. */
+  private async expireStoredPlan(
+    bookId: string,
+    threadId: string,
+    thread: AgentThread,
+    plan: AgentPlan
+  ): Promise<SweptThread> {
+    const key = planKey(bookId, threadId, plan.id);
+    try {
+      const applied = await this.studio.requireLibrary().threads.applyPlanEvent(bookId, threadId, plan.id, {
+        type: "expire"
+      });
+      const stored = applied.thread.plans.find((entry) => entry.id === plan.id);
+      if (stored && isTerminalPlan(stored)) {
+        this.expiryFailures.delete(key);
+        return {
+          thread: applied.thread,
+          expiry: { planId: plan.id, outcome: applied.outcome === "applied" ? "expired" : "terminal" }
+        };
+      }
+      // The store confirmed no change for a plan the schema still calls non-terminal. That is not
+      // an Expired claim; keep the last confirmed state and say the write did not settle it.
+      this.expiryFailures.set(key, PLAN_EXPIRY_WARNING);
+      return { thread: applied.thread, expiry: { planId: plan.id, outcome: "failed", message: PLAN_EXPIRY_WARNING } };
+    } catch (error) {
+      // A conflict or uncertain outcome is re-read once (a read, never a retry). A terminal plan
+      // found there is the winner and needs no warning; an uncertain outcome is never applied.
+      if (error instanceof ThreadStoreError && (error.code === "conflict" || error.code === "uncertain")) {
+        const reread = await this.rereadThread(bookId, threadId);
+        const stored = reread?.plans.find((entry) => entry.id === plan.id);
+        if (reread && stored && isTerminalPlan(stored)) {
+          this.expiryFailures.delete(key);
+          return { thread: reread, expiry: { planId: plan.id, outcome: "terminal" } };
+        }
+      }
+      const message = expiryWarning(error);
+      this.expiryFailures.set(key, message);
+      return { thread, expiry: { planId: plan.id, outcome: "failed", message } };
+    }
+  }
+
+  private async rereadThread(bookId: string, threadId: string): Promise<AgentThread | null> {
+    try {
+      return await this.studio.requireLibrary().threads.read(bookId, threadId);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The start-path trigger: read the named thread and settle its stale plan before the proposal
+   * check, the plan resolution or any provider read. A failed expiry refuses the start honestly.
+   */
+  private async sweepBeforeStart(bookId: string, threadId: string, typedReadRefusal: boolean): Promise<void> {
+    let thread: AgentThread | null;
+    try {
+      thread = await this.studio.requireLibrary().threads.read(bookId, threadId);
+    } catch (error) {
+      if (typedReadRefusal) throw planReadRefusal(error);
+      throw error;
+    }
+    if (!thread) return;
+    const swept = await this.sweepStoredPlan(bookId, threadId, thread);
+    if (swept.expiry?.outcome === "failed") {
+      throw new AgentTurnRefusedError("plan-state", PLAN_EXPIRY_START_REFUSAL);
+    }
+  }
+
+  /** The one plan-linked turn this process still holds for the thread, for a reload to reattach. */
+  private planRuntimeFor(bookId: string, threadId: string): AgentPlanRuntime | null {
+    for (const [turnId, turn] of this.active) {
+      if (turn.bookId === bookId && turn.threadId === threadId && turn.planId &&
+        turn.state.phase !== "settled") {
+        return {
+          planId: turn.planId,
+          turnId,
+          phase: turn.state.phase === "stopping" ? "stopping" : "active"
+        };
+      }
+    }
+    return null;
   }
 
   /** Request stop for every running turn in a book; terminal events acknowledge settlement. */
@@ -485,6 +651,18 @@ export class AgentRuntime {
       throw new ProviderError("invalid-request", "The book's agent guidance is invalid. Shorten tone to 500 characters and choose Brief, Standard or Detailed before sending.");
     }
 
+    // A stored plan belongs to the runtime that proposed or continued it. Settle this thread's
+    // stale plan before the proposal check, the plan resolution and any provider credential,
+    // model or stream. The read-only trigger is the same sweep; this one defends a Start/Resume
+    // sent without a fresh thread read, and any other caller starting a turn in the thread.
+    if (input.threadId) {
+      await this.sweepBeforeStart(
+        input.bookId,
+        input.threadId,
+        planRef !== undefined || input.planProposal === true
+      );
+    }
+
     // A proposal never joins or replaces a live plan. Refuse before the provider read and before
     // the model is constructed, so no assistant message is written.
     if (input.planProposal === true && input.threadId) {
@@ -577,6 +755,10 @@ export class AgentRuntime {
     // `applied`; `unchanged` is a duplicate or concurrent move, never success.
     let planWrite: { thread: AgentThread; outcome: "applied" | "unchanged" } | null = null;
     if (planRef && storedPlan) {
+      // Ownership is recorded immediately before the checked write, so a concurrent thread read
+      // never expires a plan this process is about to make live. The sweep above ran first; a
+      // key added earlier would let a stale plan skip its own expiry.
+      this.ownedPlans.add(planKey(input.bookId, input.threadId!, storedPlan.id));
       planWrite = await applyPlanTurn(
         library.threads,
         input.bookId,
@@ -784,6 +966,10 @@ export class AgentRuntime {
     const draft = state.proposal?.proposal;
     if (!draft) return PROPOSAL_MISSING_MESSAGE;
     const planId = newId("plan");
+    // This process just created the plan, so the immediately following thread read must not
+    // treat its `proposed` status as a lost runtime. Delete the key only when addPlan fails.
+    const ownedKey = planKey(input.bookId, threadId, planId);
+    this.ownedPlans.add(ownedKey);
     try {
       const thread = await this.studio.requireLibrary().threads.addPlan(input.bookId, threadId, {
         id: planId,
@@ -803,6 +989,7 @@ export class AgentRuntime {
       });
       return null;
     } catch (error) {
+      this.ownedPlans.delete(ownedKey);
       if (error instanceof ThreadStoreError && error.message.trim()) return error.message.trim();
       return PROPOSAL_STORE_MESSAGE;
     }
@@ -863,7 +1050,18 @@ export class AgentRuntime {
     const raced = this.livePlanTurn(bookId, threadId, planId);
     if (raced) return this.cancelLiveTurn(raced);
 
-    const applied = await library.threads.applyPlanEvent(bookId, threadId, planId, { type: "cancel" });
+    let applied: { thread: AgentThread; outcome: "applied" | "unchanged" };
+    try {
+      applied = await library.threads.applyPlanEvent(bookId, threadId, planId, { type: "cancel" });
+    } catch (error) {
+      // A thread read can expire this stale plan between our read and this write. Re-read once (a
+      // read, never a retry of the cancel): a stored terminal plan is the winner and is returned.
+      if (error instanceof ThreadStoreError && error.code === "plan-state") {
+        const stored = await this.storedTerminalPlan(bookId, threadId, planId);
+        if (stored) return { outcome: "terminal", plan: stored };
+      }
+      throw error;
+    }
     const stored = applied.thread.plans.find((entry) => entry.id === planId);
     if (!stored || stored.status !== "cancelled") {
       throw new ProviderError(
@@ -872,6 +1070,13 @@ export class AgentRuntime {
       );
     }
     return { outcome: "cancelled", plan: stored };
+  }
+
+  /** The stored plan only when it is terminal, for a bounded race classification. */
+  private async storedTerminalPlan(bookId: string, threadId: string, planId: string): Promise<AgentPlan | null> {
+    const thread = await this.rereadThread(bookId, threadId);
+    const plan = thread?.plans.find((entry) => entry.id === planId);
+    return plan && isTerminalPlan(plan) ? plan : null;
   }
 
   /** The one active turn whose plan identity matches, before any read or write. */
@@ -1480,6 +1685,20 @@ function isTerminalPlan(plan: AgentPlan): boolean {
     plan.status === "cancelled" ||
     plan.status === "failed" ||
     plan.status === "expired";
+}
+
+/**
+ * Plan ids are unique only inside one conversation, so ownership and failure memory use the full
+ * book/thread/plan tuple. A same-id plan in another thread is neither protected nor expired here.
+ */
+function planKey(bookId: string, threadId: string, planId: string): string {
+  return JSON.stringify([bookId, threadId, planId]);
+}
+
+/** The store's own author-safe sentence when it has one, otherwise the fixed read warning. */
+function expiryWarning(error: unknown): string {
+  if (error instanceof ThreadStoreError && error.message.trim()) return error.message.trim();
+  return PLAN_EXPIRY_WARNING;
 }
 
 /** Read the named conversation only; a plan id is never looked up in another thread or book. */

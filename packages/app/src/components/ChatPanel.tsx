@@ -2,7 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { FormEvent, ReactElement } from "react";
 import { Cpu, GitBranch, History, Monitor, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { AgentEvent, AgentPlanTurnRef, AgentTurnInput } from "@ai-book-studio/core/agent";
-import { agentModeSchema, type AgentMode, type AgentPlan } from "@ai-book-studio/core/agent/messages";
+import { agentModeSchema, type AgentMode, type AgentPlan, type AgentThread } from "@ai-book-studio/core/agent/messages";
+import type { AgentPlanExpiry, AgentPlanRuntime } from "@ai-book-studio/core/ipc";
 import type { ThreadSummary } from "@ai-book-studio/core/agent/threads";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
 import { Button } from "@ai-book-studio/ui/button";
@@ -205,6 +206,10 @@ export function ChatPanel({
   const [plans, setPlans] = useState<AgentPlan[]>([]);
   const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | "cancel" | null>(null);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
+  /** The one expiry warning a thread read reported; a live `plan-error` stays in planNotice. */
+  const [expiryNotice, setExpiryNotice] = useState<string | null>(null);
+  /** A plan this process could not mark expired, so Start and Resume stay off. */
+  const [stalePlanId, setStalePlanId] = useState<string | null>(null);
   /** The plan of the live, acknowledged plan turn this window started. */
   const [livePlanId, setLivePlanId] = useState<string | null>(null);
   /** The plan whose stop was requested and whose terminal event has not arrived. */
@@ -249,6 +254,7 @@ export function ChatPanel({
   const loadToken = useRef(0);
   const planReadToken = useRef(0);
   const plansRef = useRef<AgentPlan[]>([]);
+  const stalePlanRef = useRef<string | null>(null);
   const noticeRef = useRef(onNotice);
   const threadIdRef = useRef<string | null>(threadId);
   const voiceView = useRef({ epoch: 0, mounted: false, bookId, chapterId, threadId, openThreadId });
@@ -306,6 +312,66 @@ export function ChatPanel({
     cancelAttemptRef.current = null;
     cancelConfirmedRef.current = null;
     cancelFailureRef.current = null;
+    stalePlanRef.current = null;
+    setStalePlanId(null);
+    setExpiryNotice(null);
+  }, []);
+
+  /**
+   * Apply the live plan turn and expiry facts a thread read reported.
+   *
+   * A live plan turn the main process confirms is reattached: its refs and controls are restored
+   * without starting any request. A failed expiry keeps the stored status and shows the honest
+   * sentence; it never fabricates an Expired plan. `reattach: false` reads only the expiry result.
+   */
+  const applyReadPlanState = useCallback((
+    thread: AgentThread | null,
+    planRuntime: AgentPlanRuntime | null,
+    expiry: AgentPlanExpiry | undefined,
+    options: { reattach?: boolean } = {}
+  ): void => {
+    if (planRuntime) {
+      if (options.reattach !== false) {
+        turnRef.current = planRuntime.turnId;
+        livePlanRef.current = planRuntime.planId;
+        setLivePlanId(planRuntime.planId);
+        setRunning(true);
+        setWaiting(false);
+        if (planRuntime.phase === "stopping") {
+          stoppingRef.current = planRuntime.turnId;
+          stoppingPlanRef.current = planRuntime.planId;
+          setStoppingPlanId(planRuntime.planId);
+        }
+      }
+      // A live confirmation wins over a stale warning for that plan.
+      stalePlanRef.current = null;
+      setStalePlanId(null);
+      setExpiryNotice(null);
+      return;
+    }
+    if (expiry?.outcome === "failed") {
+      stalePlanRef.current = expiry.planId;
+      setStalePlanId(expiry.planId);
+      setExpiryNotice(expiry.message);
+      return;
+    }
+    if (expiry) {
+      stalePlanRef.current = null;
+      setStalePlanId(null);
+      setExpiryNotice(null);
+      return;
+    }
+    // No write was attempted. A tracked plan that is now terminal (or gone) is resolved; a
+    // still-non-terminal plan with no live turn stays unresolved and keeps its warning.
+    const tracked = stalePlanRef.current;
+    if (tracked === null) return;
+    const stored = thread?.plans.find((plan) => plan.id === tracked);
+    if (!stored || stored.status === "completed" || stored.status === "cancelled" ||
+      stored.status === "failed" || stored.status === "expired") {
+      stalePlanRef.current = null;
+      setStalePlanId(null);
+      setExpiryNotice(null);
+    }
   }, []);
 
   /** Re-read the conversation after a confirmed plan notice or a terminal turn. */
@@ -314,13 +380,15 @@ export function ChatPanel({
     if (!id) return;
     const token = ++planReadToken.current;
     try {
-      const thread = await must(window.studio.agent.threads.read(bookId, id));
+      const result = await must(window.studio.agent.threads.read(bookId, id));
       if (token !== planReadToken.current) return;
+      const thread = result.thread;
       if (thread) applyPlans(thread.plans ?? []);
+      applyReadPlanState(thread, result.planRuntime, result.expiry);
     } catch (error) {
       if (token === planReadToken.current) noticeRef.current(error);
     }
-  }, [applyPlans, bookId]);
+  }, [applyPlans, applyReadPlanState, bookId]);
 
   // Load the requested conversation, or else the newest stored one for this book. A send cancels
   // this read so it cannot overwrite a turn the author already started.
@@ -341,7 +409,8 @@ export function ChatPanel({
       try {
         const id = openThreadId ?? (await must(window.studio.agent.threads.list(bookId)))[0]?.id;
         if (!id || token !== loadToken.current) return;
-        const thread = await must(window.studio.agent.threads.read(bookId, id));
+        const result = await must(window.studio.agent.threads.read(bookId, id));
+        const thread = result.thread;
         if (!thread || token !== loadToken.current) return;
         const checkpointTurn = thread.checkpointTurns.at(-1);
         setThreadId(thread.id);
@@ -349,6 +418,7 @@ export function ChatPanel({
         setCheckpointTurns(thread.checkpointTurns);
         setMessages(thread.messages.map((message) => toChatMessage(message, checkpointTurn)));
         applyPlans(thread.plans ?? []);
+        applyReadPlanState(thread, result.planRuntime, result.expiry);
       } catch (error) {
         if (token === loadToken.current) noticeRef.current(error);
       }
@@ -356,7 +426,7 @@ export function ChatPanel({
     return () => {
       loadToken.current += 1;
     };
-  }, [applyPlans, bookId, clearPlanTurnView, openThreadId, setPlanActionState]);
+  }, [applyPlans, applyReadPlanState, bookId, clearPlanTurnView, openThreadId, setPlanActionState]);
 
   const startNew = (): void => {
     if (running) return;
@@ -395,18 +465,22 @@ export function ChatPanel({
   const loadThread = async (id: string): Promise<void> => {
     if (running) return;
     try {
-      const thread = await must(window.studio.agent.threads.read(bookId, id));
+      const result = await must(window.studio.agent.threads.read(bookId, id));
+      const thread = result.thread;
       if (!thread) return;
       const checkpointTurn = thread.checkpointTurns.at(-1);
       planReadToken.current += 1;
+      // Clear the previous plan view before applying the new read, so it cannot wipe the new
+      // thread's reattach or expiry state.
+      clearPlanTurnView();
+      setPlanActionState(null);
+      setPlanNotice(null);
       setThreadId(thread.id);
       threadIdRef.current = thread.id;
       setCheckpointTurns(thread.checkpointTurns);
       setMessages(thread.messages.map((message) => toChatMessage(message, checkpointTurn)));
       applyPlans(thread.plans ?? []);
-      clearPlanTurnView();
-      setPlanActionState(null);
-      setPlanNotice(null);
+      applyReadPlanState(thread, result.planRuntime, result.expiry);
       setHistoryOpen(false);
     } catch (error) {
       onNotice(error);
@@ -739,6 +813,11 @@ export function ChatPanel({
           // A terminal plan wins over the stopping and cancelling labels and can never be Paused.
           pauseConfirmedRef.current = null;
           setPauseSummary(null);
+          if (stalePlanRef.current === event.planId) {
+            stalePlanRef.current = null;
+            setStalePlanId(null);
+            setExpiryNotice(null);
+          }
         }
         if (event.change === "cancel") {
           // Only this confirmed notice may show Cancelled. The terminal stopped event still owns
@@ -1291,8 +1370,14 @@ export function ChatPanel({
         // Nothing was undone. Say why on this turn, and read the conversation's undo turns again: an
         // undo from the strip, the CLI or the phone has already taken its turn out of the file.
         patchMessage(messageId, (message) => ({ ...message, note: answer.error.message }));
-        const thread = threadId ? await must(window.studio.agent.threads.read(bookId, threadId)) : null;
-        if (thread) setCheckpointTurns(thread.checkpointTurns);
+        const result = threadId ? await must(window.studio.agent.threads.read(bookId, threadId)) : null;
+        const thread = result?.thread ?? null;
+        if (thread) {
+          setCheckpointTurns(thread.checkpointTurns);
+          applyPlans(thread.plans ?? []);
+        }
+        // This read can sweep too; keep its honest expiry fact without restarting a live view.
+        if (result) applyReadPlanState(thread, result.planRuntime, result.expiry, { reattach: false });
         return;
       }
       const result = answer.data;
@@ -1341,7 +1426,8 @@ export function ChatPanel({
         cancelling={currentPlan.id === cancellingPlanId || planAction === "cancel"}
         cancelSummary={cancelSummary?.planId === currentPlan.id ? cancelSummary : null}
         modelLabel={modelLabel}
-        notice={planNotice}
+        notice={planNotice ?? expiryNotice}
+        stale={currentPlan.id === stalePlanId}
         onStart={startPlan}
         onPause={() => void stop()}
         onResume={resumePlan}
@@ -1761,7 +1847,8 @@ export function ChatPanel({
               running={running}
               proposing={planAction === "propose"}
               plan={currentPlan}
-              notice={planNotice}
+              notice={planNotice ?? expiryNotice}
+              stale={currentPlan !== null && currentPlan.id === stalePlanId}
               modelLabel={modelLabel}
               onPropose={proposePlan}
               onStart={startPlan}

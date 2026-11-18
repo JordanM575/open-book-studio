@@ -10,6 +10,7 @@ import {
   type AgentThread
 } from "@ai-book-studio/core/agent/messages";
 import type { AgentEvent } from "@ai-book-studio/core/agent";
+import type { AgentPlanExpiry, AgentPlanRuntime } from "@ai-book-studio/core/ipc";
 
 let testing!: typeof import("@testing-library/react/pure");
 let PlanFirstControl!: typeof import("@ai-book-studio/app/components/PlanFirstControl").PlanFirstControl;
@@ -132,6 +133,7 @@ function renderPlan(options: {
   proposing?: boolean;
   plan?: AgentPlan | null;
   notice?: string | null;
+  stale?: boolean;
   live?: boolean;
   stopping?: boolean;
   resuming?: boolean;
@@ -161,6 +163,7 @@ function renderPlan(options: {
     onResume,
     onCancel,
     live: options.live ?? false,
+    stale: options.stale ?? false,
     stopping: options.stopping ?? false,
     resuming: options.resuming ?? false,
     ...(options.notice !== undefined ? { notice: options.notice } : {}),
@@ -209,10 +212,14 @@ function fillPlan(
 
 function renderChat(options: {
   thread?: AgentThread;
+  planRuntime?: AgentPlanRuntime | null;
+  expiry?: AgentPlanExpiry;
   start?: ReturnType<typeof mock>;
   cancelPlan?: ReturnType<typeof mock>;
 } = {}) {
   let stored = options.thread ?? planThread(null);
+  const planRuntime = options.planRuntime ?? null;
+  let reads = 0;
   let emit: ((event: AgentEvent) => void) | null = null;
   const start = options.start ?? mock(async (_request: CapturedTurn) => ({
     ok: true,
@@ -220,7 +227,18 @@ function renderChat(options: {
   }));
   const stop = mock(async (_turnId: string) => ({ ok: true, data: null }));
   const cancelPlan = options.cancelPlan ?? mock(async (_input: unknown) => ({ ok: true, data: null }));
-  const read = mock(async () => ({ ok: true, data: stored }));
+  const read = mock(async () => {
+    // The live turn and the one expiry attempt belong to the first read. A later read of a
+    // settled turn reports neither, exactly as the main process does after the turn ends.
+    const first = reads === 0;
+    reads += 1;
+    const turn = first ? planRuntime : null;
+    const expiry = first ? options.expiry : undefined;
+    return {
+      ok: true,
+      data: { thread: stored, planRuntime: turn, ...(expiry ? { expiry } : {}) }
+    };
+  });
   const listed = [
     {
       id: THREAD,
@@ -1270,5 +1288,216 @@ describe("plan pause and resume controls", () => {
     expect(testing.within(region).queryByTestId("plan-pause")).toBeNull();
     expect(testing.within(region).queryByTestId("plan-start")).toBeNull();
     expect(testing.within(region).getByTestId("plan-cancel")).toBeDefined();
+  });
+});
+
+describe("plan expiry and reattach", () => {
+  const EXPIRY_WARNING =
+    "This plan's runtime is no longer available, but the plan could not be marked expired. It remains at its last confirmed state. Nothing was replayed.";
+
+  test("an expired plan keeps its step states and offers no plan action", () => {
+    const view = renderPlan({
+      plan: makePlan({
+        status: "expired",
+        steps: [
+          { text: "Read the current opening", state: "completed" },
+          { text: "Revise the door scene", state: "not-completed" }
+        ]
+      }),
+      // A stale live/running view can never win over the stored terminal status.
+      live: true,
+      running: true,
+      stopping: true
+    });
+    const card = cardOf(view);
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Expired");
+    expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent)).toEqual([
+      "Completed",
+      "Not completed"
+    ]);
+    for (const testId of ["plan-start", "plan-pause", "plan-resume", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+    expect(card.getByTestId("plan-expired-note").textContent)
+      .toBe("This plan cannot be started, resumed or replayed. Completed steps stay; no further step will run.");
+    expect(view.onStart).not.toHaveBeenCalled();
+  });
+
+  test("opening a conversation with an expired plan shows no controls and starts nothing", async () => {
+    const plan = makePlan({
+      status: "expired",
+      steps: [
+        { text: "Read the current opening", state: "completed" },
+        { text: "Revise the door scene", state: "not-completed" }
+      ]
+    });
+    const thread = { ...planThread(plan), checkpointTurns: [PROPOSAL_TURN] };
+    const chat = renderChat({ thread });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Expired");
+    expect(card.queryByTestId("plan-start")).toBeNull();
+    expect(card.queryByTestId("plan-pause")).toBeNull();
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(card.queryByTestId("plan-cancel")).toBeNull();
+    expect(card.getByTestId("plan-expired-note")).toBeDefined();
+    expect(chat.start).not.toHaveBeenCalled();
+    // The partial turn still owns the newest checkpoint, so its existing Undo remains.
+    expect(view.getByTestId("agent-undo-turn")).toBeDefined();
+  });
+
+  test("a live plan turn from planRuntime reattaches Pause and Cancel without starting anything", async () => {
+    const plan = makePlan({ status: "running" });
+    const chat = renderChat({
+      thread: planThread(plan),
+      planRuntime: { planId: PLAN_ID, turnId: START_TURN, phase: "active" }
+    });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-status").textContent).toBe("Running");
+      expect(card.getByTestId("plan-pause")).toBeDefined();
+    });
+    expect(card.getByTestId("plan-cancel")).toBeDefined();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(chat.start).not.toHaveBeenCalled();
+
+    // The reattached turn's terminal event clears the live view and reads the stored plan.
+    chat.setStored(planThread(makePlan({
+      status: "completed",
+      steps: [{ text: "Read the current opening", state: "completed" }]
+    })));
+    await testing.act(async () => {
+      chat.fire({
+        type: "done",
+        turnId: START_TURN,
+        text: "Finished.",
+        model: { provider: "openrouter", modelId: "test-model", connectionLabel: "Test connection", name: "Test Model" },
+        inputTokens: 10,
+        outputTokens: 2,
+        costUsd: null,
+        costBasis: "unknown",
+        contextLength: 1000,
+        context: {
+          estimated: true as const,
+          sections: [{ id: "chapters", label: "Chapters", characters: 10, estimatedTokens: 3 }],
+          conversationTokens: 0,
+          totalTokens: 3
+        },
+        changed: 0,
+        undoAvailable: false
+      });
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Completed");
+    });
+    expect(testing.within(view.getByTestId("plan-region")).queryByTestId("plan-pause")).toBeNull();
+  });
+
+  test("a stopping reattach shows Stopping… and keeps Pause disabled", async () => {
+    const chat = renderChat({
+      thread: planThread(makePlan({ status: "running" })),
+      planRuntime: { planId: PLAN_ID, turnId: START_TURN, phase: "stopping" }
+    });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-status").textContent).toBe("Stopping…");
+    });
+    expect(card.getByTestId("plan-pause")).toHaveProperty("disabled", true);
+    expect(chat.start).not.toHaveBeenCalled();
+  });
+
+  test("a stored running plan with no planRuntime offers no action and starts nothing", async () => {
+    const chat = renderChat({ thread: planThread(makePlan({ status: "running" })) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Running");
+    for (const testId of ["plan-start", "plan-pause", "plan-resume", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+    expect(chat.start).not.toHaveBeenCalled();
+  });
+
+  test("a failed expiry shows the warning, suppresses Start and Resume, and keeps direct Cancel", async () => {
+    const plan = makePlan({ status: "paused" });
+    const cancelled = makePlan({
+      status: "cancelled",
+      steps: [
+        { text: "Read the current opening", state: "not-completed" },
+        { text: "Revise the door scene", state: "not-completed" }
+      ]
+    });
+    const cancelPlan = mock(async (_input: unknown) => ({
+      ok: true,
+      data: { outcome: "cancelled" as const, plan: cancelled }
+    }));
+    const chat = renderChat({
+      thread: planThread(plan),
+      expiry: { planId: PLAN_ID, outcome: "failed", message: EXPIRY_WARNING },
+      cancelPlan
+    });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-notice").textContent).toBe(EXPIRY_WARNING);
+    });
+    // The stored status is honest: no local Expired and no failed-write claim.
+    expect(card.getByTestId("plan-status").textContent).toBe("Paused");
+    expect(card.queryByTestId("plan-expired-note")).toBeNull();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(card.getByTestId("plan-cancel")).toBeDefined();
+    expect(chat.start).not.toHaveBeenCalled();
+
+    chat.setStored(planThread(cancelled));
+    await testing.act(async () => {
+      testing.fireEvent.click(card.getByTestId("plan-cancel"));
+    });
+    await testing.act(async () => {
+      testing.fireEvent.click(testing.within(region).getByTestId("plan-cancel-confirm"));
+    });
+    await testing.waitFor(() => expect(cancelPlan).toHaveBeenCalledTimes(1));
+    expect(cancelPlan).toHaveBeenCalledWith({ bookId: BOOK, threadId: THREAD, planId: PLAN_ID });
+    expect(chat.start).not.toHaveBeenCalled();
+  });
+
+  test("the composer names the expiry instead of telling the author to start a stale plan", () => {
+    const view = renderPlan({
+      plan: makePlan({ status: "paused" }),
+      notice: EXPIRY_WARNING,
+      stale: true
+    });
+    const card = cardOf(view);
+
+    expect(testing.within(document.body).getByTestId("plan-open").textContent).toBe(EXPIRY_WARNING);
+    expect(card.getByTestId("plan-notice").textContent).toBe(EXPIRY_WARNING);
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+    expect(card.getByTestId("plan-cancel")).toBeDefined();
+  });
+
+  test("a proposed plan owned by this process offers Start but never starts by itself", async () => {
+    const chat = renderChat({ thread: planThread(makePlan({ status: "proposed" })) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Proposed");
+    expect(card.getByTestId("plan-start")).toBeDefined();
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(chat.start).not.toHaveBeenCalled();
   });
 });
