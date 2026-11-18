@@ -139,14 +139,24 @@ describe("Discuss runtime boundary", () => {
     await expect(bridge.run({ bookId, mode: "discuss", name: "read_chapter", args: { chapterId } })).rejects.toThrow("turned off");
   });
 
-  test("rejects invalid mode and guidance before provider or thread access", async () => {
+  test("rejects invalid mode, guidance and plan boundaries before provider or thread access", async () => {
     const { runtime } = runtimeFor(modelFor());
-    for (const input of [
-      { bookId, prompt: "Read", mode: "invalid" },
-      { bookId, prompt: "Read" },
-      { bookId, prompt: "Read", mode: "edit", guidance: "x".repeat(2001) },
-      { bookId, prompt: "Read", mode: "edit", guidance: "" }
-    ]) await expect(runtime.start(input as AgentTurnInput)).rejects.toMatchObject({ code: "invalid-request" });
+    const plan = { id: "plan-1", revision: 1, action: "start" as const };
+    const cases: Array<[unknown, string]> = [
+      [{ bookId, prompt: "Read", mode: "invalid" }, "invalid-mode"],
+      [{ bookId, prompt: "Read" }, "invalid-mode"],
+      [{ bookId, prompt: "Read", mode: "edit", guidance: "x".repeat(2001) }, "invalid-guidance"],
+      [{ bookId, prompt: "Read", mode: "edit", guidance: "" }, "invalid-guidance"],
+      [{ bookId, prompt: "Read", mode: "edit", guidance: "   " }, "invalid-guidance"],
+      [{ bookId, prompt: "Read", mode: "discuss", plan }, "plan-in-discuss"],
+      [{ bookId, prompt: "Read", mode: "edit", plan }, "plan-without-thread"]
+    ];
+    for (const [input, refusal] of cases) {
+      await expect(runtime.start(input as AgentTurnInput)).rejects.toMatchObject({
+        code: "invalid-request",
+        refusal
+      });
+    }
     expect(providerReads).toBe(0);
     expect(await library.threads.list(bookId)).toEqual([]);
   });

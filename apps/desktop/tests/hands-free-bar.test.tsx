@@ -277,7 +277,7 @@ describe("mounted hands-free controls", () => {
     const fake = makePort();
     let release!: () => void;
     fake.port.startAgent = () => new Promise((resolve) => {
-      release = () => resolve({ ok: true, data: { turnId: "synthetic", threadId: THREAD } });
+      release = () => resolve({ ok: true, data: { turnId: "synthetic", threadId: THREAD, mode: "discuss" } });
     });
     const onSendTurn = mock(async (turn: HandsFreeTurn, admission: HandsFreeAdmission) => {
       const result = await admission.dispatch({ bookId: turn.bookId, chapterId: turn.chapterId,

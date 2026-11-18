@@ -41,6 +41,41 @@ export const AGENT_PLAN_LIMITS = Object.freeze({
   turnId: 80
 });
 
+/** The stored-plan shape the bounds check needs; a full stored plan is assignable to it. */
+export interface AgentPlanBoundsTarget {
+  readonly id: string;
+  readonly purpose: string;
+  readonly revision: number;
+  readonly steps: readonly { readonly text: string }[];
+  readonly guidance?: string | undefined;
+}
+
+function beyond(value: string, limit: number): boolean {
+  return value.length < 1 || value.length > limit || value.trim().length === 0;
+}
+
+/**
+ * Pure defense-in-depth bounds check for a stored plan.
+ *
+ * The thread schema normally refuses an over-bound document at read as `corrupt`, which the
+ * runtime reports as `plan-invalid`. This check exists so a plan object that reached the runtime
+ * through a test seam or a future caller cannot start a plan write or a provider request outside
+ * the selected bounds. It reads no clock and writes nothing.
+ */
+export function agentPlanBoundsRefusal(plan: AgentPlanBoundsTarget): "plan-bounds" | null {
+  if (beyond(plan.id, AGENT_PLAN_LIMITS.id)) return "plan-bounds";
+  if (beyond(plan.purpose, AGENT_PLAN_LIMITS.purpose)) return "plan-bounds";
+  if (!Number.isSafeInteger(plan.revision) || plan.revision < 1) return "plan-bounds";
+  if (plan.steps.length < 1 || plan.steps.length > AGENT_PLAN_LIMITS.steps) return "plan-bounds";
+  for (const step of plan.steps) {
+    if (beyond(step.text, AGENT_PLAN_LIMITS.stepText)) return "plan-bounds";
+  }
+  if (plan.guidance !== undefined && beyond(plan.guidance, AGENT_PLAN_LIMITS.guidance)) {
+    return "plan-bounds";
+  }
+  return null;
+}
+
 /** The structural part a transition needs; a full stored plan is assignable to it. */
 export interface AgentPlanState {
   readonly status: AgentPlanStatus;
