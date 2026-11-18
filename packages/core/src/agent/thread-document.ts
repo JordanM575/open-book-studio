@@ -1,5 +1,11 @@
 import { rewrite, sameValue } from "../library/book-merge";
-import { AGENT_PART_TYPES, agentThreadSchema, type AgentThread } from "./messages";
+import {
+  AGENT_PART_TYPES,
+  AGENT_PLAN_STATUSES,
+  AGENT_PLAN_STEP_STATES,
+  agentThreadSchema,
+  type AgentThread
+} from "./messages";
 
 /**
  * Raw conversation documents.
@@ -46,6 +52,8 @@ export interface BuiltThreadDocument {
 
 const KNOWN_PART_TYPES = new Set<string>(AGENT_PART_TYPES);
 const KNOWN_ROLES = new Set(["user", "assistant"]);
+const KNOWN_PLAN_STATUSES = new Set<string>(AGENT_PLAN_STATUSES);
+const KNOWN_PLAN_STEP_STATES = new Set<string>(AGENT_PLAN_STEP_STATES);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -81,27 +89,51 @@ function parseThreadDocument(raw: unknown): AgentThread {
 
 /**
  * A v1 document may carry unknown plain fields everywhere, and the merge keeps them. An unknown
- * member of a closed semantic union (a message role or part type) is different: this build cannot
- * honestly rewrite it, so the document is read-only and reported rather than relabelled as corrupt.
+ * member of a closed semantic union (a message role, a part type, a plan status or a plan step
+ * state) is different: this build cannot honestly rewrite it, so the document is read-only and
+ * reported rather than relabelled as corrupt. A malformed plan is still plain `corrupt`.
  */
 function assertSupportedSemantics(raw: Record<string, unknown>): void {
   const messages = raw.messages;
-  if (!Array.isArray(messages)) return;
-  for (const message of messages) {
-    if (!isRecord(message)) continue;
-    if (typeof message.role === "string" && !KNOWN_ROLES.has(message.role)) {
-      fail(
-        "unsupported",
-        "That conversation has a message role this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
-      );
-    }
-    if (!Array.isArray(message.parts)) continue;
-    for (const part of message.parts) {
-      if (!isRecord(part) || typeof part.type !== "string") continue;
-      if (!KNOWN_PART_TYPES.has(part.type)) {
+  if (Array.isArray(messages)) {
+    for (const message of messages) {
+      if (!isRecord(message)) continue;
+      if (typeof message.role === "string" && !KNOWN_ROLES.has(message.role)) {
         fail(
           "unsupported",
-          "That conversation has a part this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
+          "That conversation has a message role this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
+        );
+      }
+      if (!Array.isArray(message.parts)) continue;
+      for (const part of message.parts) {
+        if (!isRecord(part) || typeof part.type !== "string") continue;
+        if (!KNOWN_PART_TYPES.has(part.type)) {
+          fail(
+            "unsupported",
+            "That conversation has a part this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
+          );
+        }
+      }
+    }
+  }
+
+  const plans = raw.plans;
+  if (!Array.isArray(plans)) return;
+  for (const plan of plans) {
+    if (!isRecord(plan)) continue;
+    if (typeof plan.status === "string" && !KNOWN_PLAN_STATUSES.has(plan.status)) {
+      fail(
+        "unsupported",
+        "That conversation has a plan state this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
+      );
+    }
+    if (!Array.isArray(plan.steps)) continue;
+    for (const step of plan.steps) {
+      if (!isRecord(step) || typeof step.state !== "string") continue;
+      if (!KNOWN_PLAN_STEP_STATES.has(step.state)) {
+        fail(
+          "unsupported",
+          "That conversation has a plan step state this version of Open Book Studio does not understand. Update the app to open it. The file was left untouched."
         );
       }
     }

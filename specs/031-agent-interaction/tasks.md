@@ -67,6 +67,12 @@ authorized; no task requires a live provider, credential, paid service, real man
   binding and allowed transitions. Persist proposed, active and terminal state through the existing
   thread store. Malformed or incompatible plan state must be reported without deleting the thread.
   Test with synthetic thread files.
+  Partial: the thread contract now stores a bounded `plans` array with the nine stored statuses,
+  four step states, an Edit proposal-turn parent binding, the pure lifecycle and step transition
+  table, and terminal/no-removal store guards. A malformed plan is reported as corrupt and an
+  unknown stored status or step state as unsupported; either way the file is left untouched.
+  Runtime turn wiring, Start/Resume execution, the restart expiry sweep and the plan interface
+  remain open, so this task stays open.
 - [ ] T006 Add mode, plan and guidance fields to the main-process turn/event contract. Reject
   invalid modes, oversized guidance and plans that exceed the selected bounds before a provider
   call or write can start. Test through the model factory seam without a network.

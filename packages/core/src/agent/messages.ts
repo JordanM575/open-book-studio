@@ -2,6 +2,12 @@ import { z } from "zod";
 import { COST_BASES } from "../providers/usage";
 import { providerIdSchema } from "../providers/types";
 import { contextBreakdownSchema } from "./context";
+import {
+  AGENT_PLAN_LIMITS,
+  AGENT_PLAN_STATUSES,
+  AGENT_PLAN_STEP_STATES,
+  type AgentPlanStatus
+} from "./plan-state";
 
 /**
  * The studio's own message format. It is deliberately not an AI SDK type: the runtime converts to
@@ -209,6 +215,82 @@ export const agentMessageSchema = z
   })
   .loose();
 
+export const agentPlanStepSchema = z
+  .object({
+    text: z
+      .string()
+      .min(1)
+      .max(AGENT_PLAN_LIMITS.stepText)
+      .refine((value) => value.trim().length > 0, "empty plan step"),
+    state: z.enum(AGENT_PLAN_STEP_STATES)
+  })
+  .loose();
+
+/**
+ * One durable Edit plan. It outlives the assistant turn that proposed it, so it lives on the
+ * thread beside `messages` instead of inside a message part. `parent` names that proposal turn;
+ * `startedAt` appears once the plan starts and `terminalAt` exactly when the status is terminal.
+ */
+export const agentPlanSchema = z
+  .object({
+    id: z
+      .string()
+      .min(1)
+      .max(AGENT_PLAN_LIMITS.id)
+      .refine((value) => value.trim().length > 0, "empty plan id"),
+    mode: z.literal("edit"),
+    status: z.enum(AGENT_PLAN_STATUSES),
+    purpose: z
+      .string()
+      .min(1)
+      .max(AGENT_PLAN_LIMITS.purpose)
+      .refine((value) => value.trim().length > 0, "empty plan purpose"),
+    steps: z.array(agentPlanStepSchema).min(1).max(AGENT_PLAN_LIMITS.steps),
+    /** Proposal revision. Starts at 1; only a proposed-plan guidance refresh increments it. */
+    revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+    /** Absent means no guidance; a blank value is omitted by the caller, never stored. */
+    guidance: z
+      .string()
+      .min(1)
+      .max(AGENT_PLAN_LIMITS.guidance)
+      .refine((value) => value.trim().length > 0, "empty plan guidance")
+      .optional(),
+    parent: z
+      .object({
+        messageId: agentMessageIdSchema,
+        turnId: z.string().min(1).max(AGENT_PLAN_LIMITS.turnId)
+      })
+      .loose(),
+    createdAt: isoDate,
+    updatedAt: isoDate,
+    /** Present once the plan has started; kept across pause and resume. */
+    startedAt: isoDate.optional(),
+    /** Present exactly when `status` is terminal. */
+    terminalAt: isoDate.optional()
+  })
+  .loose();
+
+const TERMINAL_PLAN_STATUSES = new Set<AgentPlanStatus>([
+  "completed",
+  "cancelled",
+  "failed",
+  "expired"
+]);
+const STARTED_PLAN_STATUSES = new Set<AgentPlanStatus>([
+  "running",
+  "waiting-for-approval",
+  "pause-requested",
+  "paused",
+  "completed",
+  "failed"
+]);
+
+function timestampValue(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export const agentThreadSchema = z
   .object({
     schemaVersion: z.literal(1).default(1),
@@ -218,6 +300,8 @@ export const agentThreadSchema = z
     createdAt: isoDate,
     updatedAt: isoDate,
     messages: z.array(agentMessageSchema).max(2_000).default([]),
+    /** Bounded plan history, oldest first. At most one plan is non-terminal. */
+    plans: z.array(agentPlanSchema).max(AGENT_PLAN_LIMITS.plansPerThread).default([]),
     /** Turn ids whose checkpoints belong to this conversation, newest last. */
     checkpointTurns: z.array(z.string().min(1).max(200)).max(200).default([])
   })
@@ -234,6 +318,102 @@ export const agentThreadSchema = z
       }
       seen.add(message.id);
     }
+
+    const issue = (path: (string | number)[], message: string): void => {
+      context.addIssue({ code: "custom", message, path });
+    };
+    const planIds = new Set<string>();
+    let openPlan = false;
+
+    for (const [index, plan] of thread.plans.entries()) {
+      const planPath = (field: string): (string | number)[] => ["plans", index, field];
+      const parentPath = (field: "messageId" | "turnId"): (string | number)[] => [
+        "plans",
+        index,
+        "parent",
+        field
+      ];
+      const parent = thread.messages.find((message) => message.id === plan.parent.messageId);
+      if (!parent) {
+        issue(
+          parentPath("messageId"),
+          "The assistant turn that proposed this plan is not in the conversation."
+        );
+      } else {
+        if (parent.role !== "assistant") {
+          issue(parentPath("messageId"), "A plan must be proposed by an assistant turn.");
+        }
+        if (!parent.turnId || parent.turnId !== plan.parent.turnId) {
+          issue(parentPath("turnId"), "The plan's parent turn does not match the stored turn.");
+        }
+        if (parent.mode !== "edit") {
+          issue(parentPath("messageId"), "A plan can only be proposed by an Edit turn.");
+        }
+      }
+
+      if (planIds.has(plan.id)) {
+        issue(planPath("id"), "Plan ids must be unique inside a conversation.");
+      }
+      planIds.add(plan.id);
+
+      const terminal = TERMINAL_PLAN_STATUSES.has(plan.status);
+      if (!terminal) {
+        if (openPlan) {
+          issue(planPath("status"), "Only one plan can be unfinished in a conversation.");
+        }
+        openPlan = true;
+      }
+
+      const created = timestampValue(plan.createdAt)!;
+      const updated = timestampValue(plan.updatedAt)!;
+      const started = timestampValue(plan.startedAt);
+      const ended = timestampValue(plan.terminalAt);
+
+      if (terminal && plan.terminalAt === undefined) {
+        issue(planPath("terminalAt"), "A finished plan must record when it finished.");
+      }
+      if (!terminal && plan.terminalAt !== undefined) {
+        issue(planPath("terminalAt"), "An unfinished plan cannot record a finish time.");
+      }
+      if (plan.status === "proposed" && plan.startedAt !== undefined) {
+        issue(planPath("startedAt"), "A proposed plan has not started.");
+      }
+      if (STARTED_PLAN_STATUSES.has(plan.status) && plan.startedAt === undefined) {
+        issue(planPath("startedAt"), "A started plan must record when it started.");
+      }
+      if (started !== null) {
+        if (started < created) issue(planPath("startedAt"), "A plan cannot start before it was created.");
+        if (started > updated) issue(planPath("startedAt"), "A plan cannot start after its last update.");
+      }
+      if (ended !== null) {
+        if (ended < created) issue(planPath("terminalAt"), "A plan cannot finish before it was created.");
+        if (ended > updated) issue(planPath("terminalAt"), "A plan cannot finish after its last update.");
+        if (started !== null && ended < started) {
+          issue(planPath("terminalAt"), "A plan cannot finish before it started.");
+        }
+      }
+
+      let inProgress = 0;
+      for (const [stepIndex, step] of plan.steps.entries()) {
+        const stepPath: (string | number)[] = ["plans", index, "steps", stepIndex, "state"];
+        if (terminal && (step.state === "pending" || step.state === "in-progress")) {
+          issue(stepPath, "A finished plan cannot leave a step open.");
+        }
+        if (step.state === "in-progress") {
+          inProgress += 1;
+          if (inProgress > 1) issue(stepPath, "Only one step can be in progress.");
+        }
+        const earlierOpen = plan.steps
+          .slice(0, stepIndex)
+          .some((entry) => entry.state === "pending" || entry.state === "in-progress");
+        if (step.state !== "pending" && earlierOpen) {
+          issue(stepPath, "Steps must finish in order.");
+        }
+      }
+      if (plan.status === "completed" && !plan.steps.some((step) => step.state === "completed")) {
+        issue(planPath("status"), "A completed plan needs at least one completed step.");
+      }
+    }
   });
 
 export type AgentTextPart = z.infer<typeof agentTextPartSchema>;
@@ -248,7 +428,23 @@ export type AgentPart = z.infer<typeof agentPartSchema>;
 export type AgentModel = z.infer<typeof agentModelSchema>;
 export type AgentUsage = z.infer<typeof agentUsageSchema>;
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
+export type AgentPlanStep = z.infer<typeof agentPlanStepSchema>;
+export type AgentPlan = z.infer<typeof agentPlanSchema>;
 export type AgentThread = z.infer<typeof agentThreadSchema>;
+
+export {
+  AGENT_PLAN_LIMITS,
+  AGENT_PLAN_STATUSES,
+  AGENT_PLAN_STEP_STATES,
+  applyAgentPlanEvent,
+  refreshAgentPlanProposal,
+  type AgentPlanEvent,
+  type AgentPlanEventResult,
+  type AgentPlanRefusal,
+  type AgentPlanState,
+  type AgentPlanStatus,
+  type AgentPlanStepState
+} from "./plan-state";
 
 /** The visible prose of one message, without reasoning or tool payloads. */
 export function messageText(message: AgentMessage): string {

@@ -46,6 +46,7 @@ function thread(id: string, prompt: string, reply: string): AgentThread {
       { id: `msg_${id.slice(7)}u`, role: "user", parts: [{ type: "text", text: prompt }], createdAt: NOW },
       { id: `msg_${id.slice(7)}a`, role: "assistant", parts: [{ type: "text", text: reply }], turnId: `turn_${id.slice(7)}`, createdAt: NOW }
     ],
+    plans: [],
     checkpointTurns: []
   } as AgentThread;
 }

@@ -1,4 +1,5 @@
 import { LibraryPortError } from "../library/errors";
+import { sameValue } from "../library/book-merge";
 import {
   libraryPathFromArchivePath,
   libraryPathToArchivePath,
@@ -21,8 +22,17 @@ import {
   lastMessageText,
   type AgentApprovalStatus,
   type AgentMessage,
+  type AgentPlan,
   type AgentThread
 } from "./messages";
+import {
+  AGENT_PLAN_LIMITS,
+  applyAgentPlanEvent,
+  refreshAgentPlanProposal,
+  type AgentPlanEvent,
+  type AgentPlanRefusal,
+  type AgentPlanStatus
+} from "./plan-state";
 import {
   buildThreadDocument,
   readThreadDocument,
@@ -37,6 +47,7 @@ export type ThreadStoreErrorCode =
   | "exists"
   | "missing-base"
   | "corrupt"
+  | "plan-state"
   | "conflict"
   | "uncertain"
   | "newer"
@@ -66,6 +77,64 @@ export interface ThreadSummary {
 }
 
 export type ThreadTrashResult = { status: "trashed"; trashedAt: string } | { status: "missing" };
+
+/** The caller-supplied part of a new proposal. The store owns status, revision and timestamps. */
+export interface NewAgentPlan {
+  id: string;
+  purpose: string;
+  steps: readonly string[];
+  parent: { messageId: string; turnId: string };
+  guidance?: string;
+}
+
+const TERMINAL_PLAN_STATUSES: ReadonlySet<AgentPlanStatus> = new Set<AgentPlanStatus>([
+  "completed",
+  "cancelled",
+  "failed",
+  "expired"
+]);
+
+const PLAN_REFUSAL_MESSAGES: Record<AgentPlanRefusal, string> = {
+  "terminal-plan": "That plan has finished and cannot change. Nothing was written.",
+  "wrong-status": "That plan is not in a state that allows this change. Nothing was written.",
+  "stale-revision": "The plan changed since this update was prepared. Nothing was written.",
+  "step-out-of-range": "That plan step does not exist. Nothing was written.",
+  "step-order": "Plan steps must finish in order. Nothing was written.",
+  "step-already-in-progress": "Another plan step is already in progress. Nothing was written.",
+  "step-backward": "A finished plan step cannot change. Nothing was written.",
+  "no-completed-step": "A completed plan needs at least one completed step. Nothing was written.",
+  "invalid-revision": "That plan revision is not valid. Nothing was written.",
+  "invalid-guidance": "That plan guidance is blank or too long. Nothing was written."
+};
+
+/** Validate a plan-bearing thread at the store boundary so a bad change is `plan-state`, not a raw error. */
+function assertPlanDocument(thread: AgentThread): AgentThread {
+  const parsed = agentThreadSchema.safeParse(thread);
+  if (!parsed.success) {
+    const path = parsed.error.issues[0]?.path.join(".") ?? "plans";
+    throw new ThreadStoreError(
+      "plan-state",
+      `That plan could not be stored (${path}). The file was left untouched.`
+    );
+  }
+  return parsed.data;
+}
+
+/** Terminal plans are retained and cannot change; a save may never remove one. */
+function assertPlanHistory(current: AgentThread, next: AgentThread): void {
+  for (const plan of current.plans) {
+    const kept = next.plans.find((entry) => entry.id === plan.id);
+    if (!kept) {
+      throw new ThreadStoreError(
+        "plan-state",
+        "A plan cannot be removed from a conversation. Nothing was written."
+      );
+    }
+    if (TERMINAL_PLAN_STATUSES.has(plan.status) && !sameValue(plan, kept)) {
+      throw new ThreadStoreError("plan-state", "A finished plan cannot change. Nothing was written.");
+    }
+  }
+}
 
 export interface ThreadStoreOptions {
   /** Test/forward-compatible override; never raises above the D-113 ceiling. */
@@ -109,6 +178,7 @@ export class ThreadStore {
       createdAt: now,
       updatedAt: now,
       messages,
+      plans: [],
       checkpointTurns: []
     };
     return this.withBook(bookId, () => this.writeDocument(thread, "create"));
@@ -199,6 +269,121 @@ export class ThreadStore {
           : [...thread.messages, message];
       return { ...thread, messages };
     });
+  }
+
+  /**
+   * Append a proposal. The assistant proposal message must already be stored: a plan never exists
+   * before its parent turn. One non-terminal plan at a time; terminal plans are retained.
+   */
+  async addPlan(bookId: string, threadId: string, input: NewAgentPlan): Promise<AgentThread> {
+    return this.mutate(bookId, threadId, (thread) => {
+      if (thread.plans.some((plan) => !TERMINAL_PLAN_STATUSES.has(plan.status))) {
+        throw new ThreadStoreError(
+          "plan-state",
+          "Finish or cancel the current plan before proposing another."
+        );
+      }
+      if (thread.plans.some((plan) => plan.id === input.id)) {
+        throw new ThreadStoreError(
+          "plan-state",
+          "A plan with that id is already in this conversation. Nothing was written."
+        );
+      }
+      if (thread.plans.length >= AGENT_PLAN_LIMITS.plansPerThread) {
+        throw new ThreadStoreError(
+          "plan-state",
+          `This conversation already has ${AGENT_PLAN_LIMITS.plansPerThread} plans. Nothing was written.`
+        );
+      }
+      const now = this.runtime.now();
+      const guidance =
+        typeof input.guidance === "string" && input.guidance.trim().length > 0
+          ? input.guidance
+          : undefined;
+      const plan: AgentPlan = {
+        id: input.id,
+        mode: "edit",
+        status: "proposed",
+        purpose: input.purpose,
+        steps: input.steps.map((text) => ({ text, state: "pending" as const })),
+        revision: 1,
+        ...(guidance !== undefined ? { guidance } : {}),
+        parent: { messageId: input.parent.messageId, turnId: input.parent.turnId },
+        createdAt: now,
+        updatedAt: now
+      };
+      return assertPlanDocument({ ...thread, plans: [...thread.plans, plan] });
+    });
+  }
+
+  /**
+   * Apply one lifecycle event. A refusal is `plan-state` and writes nothing; an unchanged event
+   * keeps the stored bytes and timestamp. The caller creates a turn only on `applied`.
+   */
+  async applyPlanEvent(
+    bookId: string,
+    threadId: string,
+    planId: string,
+    event: AgentPlanEvent
+  ): Promise<{ thread: AgentThread; outcome: "applied" | "unchanged" }> {
+    let outcome: "applied" | "unchanged" = "unchanged";
+    const thread = await this.mutate(
+      bookId,
+      threadId,
+      (current) => {
+        const index = current.plans.findIndex((plan) => plan.id === planId);
+        if (index < 0) {
+          throw new ThreadStoreError(
+            "plan-state",
+            "That plan is not in this conversation. Nothing was written."
+          );
+        }
+        const result = applyAgentPlanEvent(current.plans[index]!, event, this.runtime.now());
+        if (result.outcome === "refused") {
+          throw new ThreadStoreError("plan-state", PLAN_REFUSAL_MESSAGES[result.reason]);
+        }
+        if (result.outcome === "unchanged") return null;
+        const plans = current.plans.map((plan, position) =>
+          position === index ? result.plan : plan
+        );
+        outcome = "applied";
+        return assertPlanDocument({ ...current, plans });
+      },
+      { allowNoChange: true }
+    );
+    return { thread, outcome };
+  }
+
+  /** T012's guidance refresh: a proposed plan's next revision, with the previous array kept. */
+  async refreshPlanProposal(
+    bookId: string,
+    threadId: string,
+    planId: string,
+    input: { revision: number; guidance?: string }
+  ): Promise<AgentThread> {
+    return this.mutate(
+      bookId,
+      threadId,
+      (current) => {
+        const index = current.plans.findIndex((plan) => plan.id === planId);
+        if (index < 0) {
+          throw new ThreadStoreError(
+            "plan-state",
+            "That plan is not in this conversation. Nothing was written."
+          );
+        }
+        const result = refreshAgentPlanProposal(current.plans[index]!, input, this.runtime.now());
+        if (result.outcome === "refused") {
+          throw new ThreadStoreError("plan-state", PLAN_REFUSAL_MESSAGES[result.reason]);
+        }
+        if (result.outcome === "unchanged") return null;
+        const plans = current.plans.map((plan, position) =>
+          position === index ? result.plan : plan
+        );
+        return assertPlanDocument({ ...current, plans });
+      },
+      { allowNoChange: true }
+    );
   }
 
   /** Record the author's answer on a stored approval. Returns null when the part is not there. */
@@ -393,6 +578,10 @@ export class ThreadStore {
       }
       if (baseHash && baseHash !== current.sha256) return this.keepConflict(parsed, "external-edit");
     }
+
+    // Completed, cancelled, failed and expired plans are history: a whole-document save may add a
+    // plan or change a live one, but never drop a plan or rewrite a terminal one.
+    if (mode === "save" && current) assertPlanHistory(current.thread, parsed);
 
     // A book another device upgraded to a newer schema gets no new conversation file either.
     await assertBookWritable(this.storage, parsed.bookId);
