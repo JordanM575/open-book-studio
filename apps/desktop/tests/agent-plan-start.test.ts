@@ -401,7 +401,7 @@ describe("start acknowledgement and step progress", () => {
     expect(plan?.status).toBe("failed");
     expect(events.some((event) => event.type === "plan" && event.change === "complete")).toBe(false);
   });
-  test("an author stop writes no plan transition and leaves the plan running", async () => {
+  test("an author stop pauses the live plan with one request and one confirm", async () => {
     const threadId = await seedPlan(["Read the opening"]);
     const model = modelFor([
       toolStream([step(1)]),
@@ -420,11 +420,11 @@ describe("start acknowledgement and step progress", () => {
     await runtime.stop(started.turnId);
     expect((await terminal).type).toBe("stopped");
     const plan = await planOf(threadId);
-    expect(plan?.status).toBe("running");
-    expect(states(plan!)).toEqual(["pending"]);
-    expect(events.some((event) =>
-      event.type === "plan" || event.type === "plan-step" || event.type === "plan-error"
-    )).toBe(false);
+    expect(plan?.status).toBe("paused");
+    expect(states(plan!)).not.toContain("completed");
+    expect(events.filter((event) => event.type === "plan").map((event) =>
+      event.type === "plan" ? event.change : null)).toEqual(["request-pause", "confirm-pause"]);
+    expect(events.some((event) => event.type === "plan-error")).toBe(false);
   });
 });
 
@@ -606,7 +606,13 @@ describe("plan approvals", () => {
       expect(events.some((event) => event.type === "plan-error" && event.change === "approval-settled"))
         .toBe(true);
       expect((await library.readChapter(bookId, chapterId)).content).not.toContain("Replaced opening");
-      expect((await planOf(threadId))?.status).toBe("waiting-for-approval");
+      // T015: the existing internal stop is one stop path and writes the pause request. The failed
+      // plan write set the controller's state error, so confirmation is blocked and the plan stays
+      // at its last confirmed pause-requested status, never Paused.
+      expect((await planOf(threadId))?.status).toBe("pause-requested");
+      const stoppedEvent = events.find((event) => event.type === "stopped");
+      expect(stoppedEvent?.type === "stopped" ? stoppedEvent.persistenceError : undefined)
+        .toContain("The plan's pause could not be saved. The plan remains at its last confirmed state.");
     } finally {
       store.applyPlanEvent = original;
       off();

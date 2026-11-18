@@ -2,7 +2,13 @@ import { useId, useRef, useState } from "react";
 import type { AgentMode, AgentPlan } from "@ai-book-studio/core/agent/messages";
 import { AGENT_PLAN_LIMITS } from "@ai-book-studio/core/agent/messages";
 import { Button } from "@ai-book-studio/ui/button";
-import { PlanProgress, type PlanActionOutcome, type PlanStartRef } from "./PlanProgress";
+import {
+  PlanProgress,
+  type PlanActionOutcome,
+  type PlanPauseSummary,
+  type PlanResumeRef,
+  type PlanStartRef
+} from "./PlanProgress";
 
 /**
  * Plan first asks the agent for one reviewed proposal and shows the stored result.
@@ -35,6 +41,16 @@ interface Props {
   readonly modelLabel: string;
   readonly onPropose: (request: PlanProposalRequest) => PlanActionOutcome | Promise<PlanActionOutcome>;
   readonly onStart: (ref: PlanStartRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  /** A live plan turn held by this window, so the plan card may offer Pause. */
+  readonly live?: boolean;
+  /** A stop was requested and its terminal event has not arrived. */
+  readonly stopping?: boolean;
+  /** The Resume send is in flight, before the running acknowledgement. */
+  readonly resuming?: boolean;
+  /** The stopped event's facts for a pause this window confirmed. */
+  readonly pauseSummary?: PlanPauseSummary | null;
+  readonly onPause?: () => void;
+  readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
 }
 
 interface DraftStep {
@@ -61,7 +77,13 @@ export function PlanFirstControl({
   notice,
   modelLabel,
   onPropose,
-  onStart
+  onStart,
+  live = false,
+  stopping = false,
+  resuming = false,
+  pauseSummary = null,
+  onPause,
+  onResume
 }: Props) {
   const headingId = useId();
   const requestId = useId();
@@ -234,9 +256,15 @@ export function PlanFirstControl({
               <PlanProgress
                 plan={plan}
                 running={running}
+                live={live}
+                stopping={stopping}
+                resuming={resuming}
+                pauseSummary={pauseSummary}
                 modelLabel={modelLabel}
                 notice={notice}
                 onStart={onStart}
+                {...(onPause ? { onPause } : {})}
+                {...(onResume ? { onResume } : {})}
               />
             </div>
           ) : null}

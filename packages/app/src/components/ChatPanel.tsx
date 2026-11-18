@@ -48,7 +48,12 @@ import { cn, must } from "../lib/utils";
 import type { HandsFreeAdmission, HandsFreePort, HandsFreeTurn } from "../lib/hands-free";
 import { HandsFreeBar } from "./HandsFreeBar";
 import { PlanFirstControl, type PlanProposalRequest } from "./PlanFirstControl";
-import { PlanProgress, type PlanActionOutcome, type PlanStartRef } from "./PlanProgress";
+import {
+  PlanProgress,
+  type PlanActionOutcome,
+  type PlanResumeRef,
+  type PlanStartRef
+} from "./PlanProgress";
 import {
   approvalLabel,
   keptNote,
@@ -197,8 +202,18 @@ export function ChatPanel({
    * draft or an optimistic message.
    */
   const [plans, setPlans] = useState<AgentPlan[]>([]);
-  const [planAction, setPlanAction] = useState<"propose" | "start" | null>(null);
+  const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | null>(null);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
+  /** The plan of the live, acknowledged plan turn this window started. */
+  const [livePlanId, setLivePlanId] = useState<string | null>(null);
+  /** The plan whose stop was requested and whose terminal event has not arrived. */
+  const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null);
+  /** The stopped event's change and undo facts for a pause this window confirmed. */
+  const [pauseSummary, setPauseSummary] = useState<{
+    planId: string;
+    changed: number;
+    undoAvailable?: boolean;
+  } | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -207,6 +222,12 @@ export function ChatPanel({
   const [deleteTarget, setDeleteTarget] = useState<ThreadSummary | null>(null);
   const turnRef = useRef<string | null>(null);
   const stoppingRef = useRef<string | null>(null);
+  const livePlanRef = useRef<string | null>(null);
+  const stoppingPlanRef = useRef<string | null>(null);
+  /** Set by a confirm-pause notice; only the terminal stopped event may show Paused. */
+  const pauseConfirmedRef = useRef<{ planId: string; turnId: string } | null>(null);
+  /** Guards duplicate plan actions in the same tick, before React state renders. */
+  const planActionRef = useRef<"propose" | "start" | "resume" | null>(null);
   const assistantRef = useRef<string | null>(null);
   const retryRequestsRef = useRef(new Map<string, AgentTurnInput>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -251,6 +272,22 @@ export function ChatPanel({
     setPlans(next);
   }, []);
 
+  /** Keep the synchronous guard and the visible action state together. */
+  const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | null) => {
+    planActionRef.current = next;
+    setPlanAction(next);
+  }, []);
+
+  /** A new conversation or thread switch holds no live, stopping or pause view. */
+  const clearPlanTurnView = useCallback(() => {
+    livePlanRef.current = null;
+    setLivePlanId(null);
+    stoppingPlanRef.current = null;
+    setStoppingPlanId(null);
+    pauseConfirmedRef.current = null;
+    setPauseSummary(null);
+  }, []);
+
   /** Re-read the conversation after a confirmed plan notice or a terminal turn. */
   const refreshStoredPlans = useCallback(async (): Promise<void> => {
     const id = threadIdRef.current;
@@ -275,7 +312,8 @@ export function ChatPanel({
     setCheckpointTurns([]);
     setPlans([]);
     plansRef.current = [];
-    setPlanAction(null);
+    clearPlanTurnView();
+    setPlanActionState(null);
     setPlanNotice(null);
     setMode("discuss");
     setGuidance("");
@@ -298,7 +336,7 @@ export function ChatPanel({
     return () => {
       loadToken.current += 1;
     };
-  }, [applyPlans, bookId, openThreadId]);
+  }, [applyPlans, bookId, clearPlanTurnView, openThreadId, setPlanActionState]);
 
   const startNew = (): void => {
     if (running) return;
@@ -309,7 +347,8 @@ export function ChatPanel({
     setMessages([]);
     setCheckpointTurns([]);
     applyPlans([]);
-    setPlanAction(null);
+    clearPlanTurnView();
+    setPlanActionState(null);
     setPlanNotice(null);
     setInput("");
     setMode("discuss");
@@ -345,7 +384,8 @@ export function ChatPanel({
       setCheckpointTurns(thread.checkpointTurns);
       setMessages(thread.messages.map((message) => toChatMessage(message, checkpointTurn)));
       applyPlans(thread.plans ?? []);
-      setPlanAction(null);
+      clearPlanTurnView();
+      setPlanActionState(null);
       setPlanNotice(null);
       setHistoryOpen(false);
     } catch (error) {
@@ -387,7 +427,8 @@ export function ChatPanel({
         setMessages([]);
         setCheckpointTurns([]);
         applyPlans([]);
-        setPlanAction(null);
+        clearPlanTurnView();
+        setPlanActionState(null);
         setPlanNotice(null);
       }
       setDeleteTarget(null);
@@ -407,7 +448,8 @@ export function ChatPanel({
       setCheckpointTurns(created.checkpointTurns);
       setMessages(created.messages.map((entry) => toChatMessage(entry, checkpointTurn)));
       applyPlans(created.plans ?? []);
-      setPlanAction(null);
+      clearPlanTurnView();
+      setPlanActionState(null);
       setPlanNotice(null);
       setHistoryOpen(false);
     } catch (error) {
@@ -526,11 +568,41 @@ export function ChatPanel({
       // A terminal turn is the moment to re-read stored plans: a plan write that failed reports
       // through `plan-error`, and the thread file still owns the last confirmed state.
       if (event.type === "done" || event.type === "stopped" || event.type === "error") {
-        setPlanAction(null);
+        const confirmation = pauseConfirmedRef.current;
+        // Paused is shown only after the terminal stopped event for the turn whose pause this
+        // window saw confirmed. A confirm-pause notice alone never reaches this branch.
+        const pausedHere = event.type === "stopped" && confirmation !== null &&
+          confirmation.turnId === event.turnId && confirmation.planId === livePlanRef.current;
+        if (pausedHere) {
+          const planId = confirmation.planId;
+          setPlans((current) => {
+            const next = current.map((plan) =>
+              plan.id === planId ? { ...plan, status: "paused" as const } : plan
+            );
+            plansRef.current = next;
+            return next;
+          });
+          setPauseSummary({
+            planId,
+            changed: event.changed ?? 0,
+            ...(event.undoAvailable !== undefined ? { undoAvailable: event.undoAvailable } : {})
+          });
+        } else {
+          setPauseSummary(null);
+        }
+        pauseConfirmedRef.current = null;
+        stoppingRef.current = null;
+        stoppingPlanRef.current = null;
+        setStoppingPlanId(null);
+        livePlanRef.current = null;
+        setLivePlanId(null);
+        setPlanActionState(null);
         void refreshStoredPlans();
       }
       if (event.type === "stopping") {
         stoppingRef.current = event.turnId;
+        stoppingPlanRef.current = livePlanRef.current;
+        setStoppingPlanId(livePlanRef.current);
         patchAssistant(event.turnId, (message) => ({ ...message, note: "Stopping… Waiting for in-flight work to settle." }));
       } else if (event.type === "text") {
         patchAssistant(event.turnId, (message) => ({ ...message, text: message.text + event.delta }));
@@ -581,7 +653,14 @@ export function ChatPanel({
         }));
         setWaiting(false);
       } else if (event.type === "plan") {
-        setPlanAction(null);
+        // A confirmed pause is stored, but the author-visible boundary is the terminal stopped
+        // event. Record it without changing the local status or re-reading the stored plan,
+        // which already says paused and would make the card show Paused too early.
+        if (event.change === "confirm-pause") {
+          pauseConfirmedRef.current = { planId: event.planId, turnId: event.turnId };
+          return;
+        }
+        setPlanActionState(null);
         setPlanNotice(null);
         // Status and revision here are a confirmed store write. Purpose and steps still come
         // from the thread read below, so a terminal change can close later steps honestly.
@@ -600,12 +679,18 @@ export function ChatPanel({
           setMode("discuss");
           setGuidance("");
           setBackground(false);
+          setPauseSummary(null);
+        }
+        if (event.change === "complete" || event.change === "fail" || event.change === "cancel") {
+          // A terminal plan wins over the stopping label and can never be shown Paused.
+          pauseConfirmedRef.current = null;
+          setPauseSummary(null);
         }
         // Purpose, steps, status and revision are the stored thread's; a notice only says a
         // confirmed write happened.
         void refreshStoredPlans();
       } else if (event.type === "plan-step") {
-        setPlanAction(null);
+        setPlanActionState(null);
         setPlanNotice(null);
         setPlans((current) => {
           const next = current.map((plan) =>
@@ -625,6 +710,7 @@ export function ChatPanel({
         });
       } else if (event.type === "plan-error") {
         // No state changed. Keep the last confirmed plan and show the fixed sentence.
+        if (event.change === "confirm-pause") pauseConfirmedRef.current = null;
         setPlanNotice(event.message);
       } else if (event.type === "done") {
         patchAssistant(event.turnId, (message) => ({
@@ -696,7 +782,7 @@ export function ChatPanel({
       }
     });
     return unsubscribe;
-  }, [onChanged, onConflictCopy, patchAssistant, refreshStoredPlans]);
+  }, [onChanged, onConflictCopy, patchAssistant, refreshStoredPlans, setPlanActionState]);
 
   /**
    * The one checked turn-start path. A typed message and a confirmed hands-free turn both come
@@ -799,10 +885,10 @@ export function ChatPanel({
 
   /** Ask once for a read-only Edit proposal. The stored plan, not this request, is reviewed. */
   const proposePlan = async (request: PlanProposalRequest): Promise<PlanActionOutcome> => {
-    if (running) {
+    if (running || planActionRef.current !== null) {
       return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
     }
-    setPlanAction("propose");
+    setPlanActionState("propose");
     setPlanNotice(null);
     const outcome = await sendPrompt(planRequestPrompt(request), {
       mode: "edit",
@@ -814,7 +900,7 @@ export function ChatPanel({
       planProposal: true
     });
     if (!outcome.ok) {
-      setPlanAction(null);
+      setPlanActionState(null);
       return { ok: false, reason: outcome.reason };
     }
     // The proposal notice (or its terminal failure) clears this once the turn is over.
@@ -826,7 +912,7 @@ export function ChatPanel({
    * prompt carries no plan text and no guidance, and the stored plan owns both.
    */
   const startPlan = async (ref: PlanStartRef): Promise<PlanActionOutcome> => {
-    if (running) {
+    if (running || planActionRef.current !== null) {
       return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
     }
     const id = threadIdRef.current;
@@ -843,7 +929,7 @@ export function ChatPanel({
     if (stored.status !== "proposed") {
       return { ok: false, reason: "That plan cannot be started. Only a proposed plan can start." };
     }
-    setPlanAction("start");
+    setPlanActionState("start");
     setPlanNotice(null);
     const outcome = await sendPrompt("Start the reviewed plan.", {
       mode: "edit",
@@ -855,7 +941,7 @@ export function ChatPanel({
       plan: { id: ref.id, revision: ref.revision, action: "start" },
       discardOnFailure: true
     });
-    setPlanAction(null);
+    setPlanActionState(null);
     if (!outcome.ok) {
       return { ok: false, reason: outcome.reason };
     }
@@ -871,6 +957,65 @@ export function ChatPanel({
         plansRef.current = next;
         return next;
       });
+      livePlanRef.current = acknowledged.id;
+      setLivePlanId(acknowledged.id);
+      setPauseSummary(null);
+    }
+    return { ok: true };
+  };
+
+  /**
+   * Resume the paused plan as one explicit new Edit turn. The stored plan owns its purpose,
+   * steps and guidance; this turn carries no approval and no composer guidance.
+   */
+  const resumePlan = async (ref: PlanResumeRef): Promise<PlanActionOutcome> => {
+    if (running || planActionRef.current !== null) {
+      return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
+    }
+    const id = threadIdRef.current;
+    if (!id) {
+      return { ok: false, reason: "Open the plan's conversation before resuming it. Nothing was started." };
+    }
+    const stored = plansRef.current.find((plan) => plan.id === ref.id);
+    if (!stored) {
+      return { ok: false, reason: "That plan is not in this conversation. Nothing was started." };
+    }
+    if (stored.revision !== ref.revision) {
+      return { ok: false, reason: "The plan changed since you reviewed it. Review the current revision before resuming." };
+    }
+    if (stored.status !== "paused") {
+      return { ok: false, reason: "That plan cannot be resumed. Only a paused plan resumes." };
+    }
+    setPlanActionState("resume");
+    setPlanNotice(null);
+    const outcome = await sendPrompt("Resume the reviewed plan.", {
+      mode: "edit",
+      threadId: id,
+      guidance: undefined,
+      model: turnModel ?? undefined,
+      background,
+      resetComposer: false,
+      plan: { id: ref.id, revision: ref.revision, action: "resume" },
+      discardOnFailure: true
+    });
+    setPlanActionState(null);
+    if (!outcome.ok) {
+      return { ok: false, reason: outcome.reason };
+    }
+    if (outcome.plan) {
+      const acknowledged = outcome.plan;
+      setPlans((current) => {
+        const next = current.map((plan) =>
+          plan.id === acknowledged.id
+            ? { ...plan, revision: acknowledged.revision, status: acknowledged.status }
+            : plan
+        );
+        plansRef.current = next;
+        return next;
+      });
+      livePlanRef.current = acknowledged.id;
+      setLivePlanId(acknowledged.id);
+      setPauseSummary(null);
     }
     return { ok: true };
   };
@@ -932,8 +1077,11 @@ export function ChatPanel({
     const turnId = turnRef.current;
     if (!turnId) return;
     stoppingRef.current = turnId;
+    stoppingPlanRef.current = livePlanRef.current;
+    setStoppingPlanId(livePlanRef.current);
     patchAssistant(turnId, (message) => ({ ...message, note: "Stopping… Waiting for in-flight work to settle." }));
     try {
+      // The stop call returning is not the pause boundary. Only the terminal stopped event is.
       await must(window.studio.agent.stop(turnId));
     } catch (error) {
       onNotice(error);
@@ -993,9 +1141,15 @@ export function ChatPanel({
       <PlanProgress
         plan={currentPlan}
         running={running}
+        live={currentPlan.id === livePlanId && running}
+        stopping={currentPlan.id === stoppingPlanId}
+        resuming={planAction === "resume"}
+        pauseSummary={pauseSummary?.planId === currentPlan.id ? pauseSummary : null}
         modelLabel={modelLabel}
         notice={planNotice}
         onStart={startPlan}
+        onPause={() => void stop()}
+        onResume={resumePlan}
       />
     </div>
   ) : null;
@@ -1415,6 +1569,12 @@ export function ChatPanel({
               modelLabel={modelLabel}
               onPropose={proposePlan}
               onStart={startPlan}
+              live={currentPlan !== null && currentPlan.id === livePlanId && running}
+              stopping={currentPlan !== null && currentPlan.id === stoppingPlanId}
+              resuming={planAction === "resume"}
+              pauseSummary={pauseSummary?.planId === currentPlan?.id ? pauseSummary : null}
+              onPause={() => void stop()}
+              onResume={resumePlan}
             />
           </div>
         ) : null}
