@@ -31,7 +31,7 @@ export function chaptersDir(root: string, bookId: string): string {
   return safeJoin(root, "books", bookId, "chapters");
 }
 
-export function newId(prefix: "book" | "ch" | "char" | "mem" | "thread" | "cp" | "msg" | "turn"): string {
+export function newId(prefix: "book" | "ch" | "char" | "mem" | "thread" | "cp" | "msg" | "turn" | "plan"): string {
   return `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 }
 

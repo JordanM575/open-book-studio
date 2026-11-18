@@ -26,6 +26,12 @@ export interface AgentTurnInput {
    * guidance, model, tool list or approval travels inside this object.
    */
   plan?: AgentPlanTurnRef | undefined;
+  /**
+   * Select the read-only Edit proposal turn. It offers the read tools and `propose_plan` only:
+   * no book write, no checkpoint and no plan content. A plan is stored only when the proposal is
+   * valid and its assistant message was saved. Never combine it with `plan`.
+   */
+  planProposal?: boolean | undefined;
   /** Continue this conversation. Omit to start a new one. */
   threadId?: string | null | undefined;
   /**

@@ -39,6 +39,7 @@ import {
 import { compactHistory } from "@ai-book-studio/core/agent/history";
 import { contextBreakdown, type ContextBreakdown } from "@ai-book-studio/core/agent/context";
 import { agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
+import { isPlanControlTool } from "@ai-book-studio/core/agent/plan-tools";
 import { ThreadStoreError, type ThreadStore } from "@ai-book-studio/core/agent/threads";
 import { findModel, unavailableReason } from "@ai-book-studio/core/providers/models";
 import { isContributorModelId } from "@ai-book-studio/core/providers/compatibility";
@@ -66,6 +67,13 @@ import {
 } from "./checkpoints";
 import { DESTRUCTIVE_TOOL_NAMES, ProposedBases } from "./tools";
 import { buildToolSet } from "./tool-set";
+import {
+  PlanProgress,
+  PlanProposalDraft,
+  PlanWriteError,
+  planStepTool,
+  proposePlanTool
+} from "./plan-tools";
 import { buildPrompt } from "./prompt";
 import { readBookSkills } from "./skills";
 import { cachePrefixFor } from "./cache";
@@ -147,6 +155,10 @@ interface TurnState {
   running: Set<Promise<void>>;
   /** Executed calls get their receipt from the wrapper, never an early SDK abort result. */
   executions: Set<string>;
+  /** The live step controller on a Start or Resume turn. Absent on ordinary and proposal turns. */
+  plan?: PlanProgress | undefined;
+  /** The read-only proposal draft on a proposal turn. Absent on every other turn. */
+  proposal?: PlanProposalDraft | undefined;
 }
 
 /** How far the turn's one checkpoint file has caught up with the chapters the turn changed. */
@@ -162,6 +174,10 @@ interface CheckpointProgress {
   queue: Promise<unknown>;
 }
 
+/**
+ * Existing SDK loop cap. A plan longer than this fails honestly instead of completing in one turn;
+ * raising it or continuing a plan across turns is later lifecycle work, not a completion claim.
+ */
 const MAX_STEPS = 20;
 
 // Fixed, public-safe warnings. Multiple failed writes must not replace one another, and repeated
@@ -277,6 +293,10 @@ export class AgentRuntime {
     const result = output as { ok?: boolean; message?: string } | undefined;
     state.toolParts.push({ type: "tool-result", id, name, output, ...(result?.ok === false ? { isError: true } : {}) });
     this.publish({ type: "tool", turnId, id, name, status: "end", output, ...(result?.message ? { detail: result.message } : {}) });
+    // Plan progress is recorded before the model receives the result, so a failed tool cannot be
+    // followed by another ordinary call. The control tools are not observations.
+    await state.plan?.recordResult(name, output);
+    if (isPlanControlTool(name)) return;
     await this.recordToolCall(bookId, name, result?.ok !== false);
   }
 
@@ -420,6 +440,15 @@ export class AgentRuntime {
     if (!agentModeSchema.safeParse(input.mode).success) {
       throw agentTurnRefused("invalid-mode");
     }
+    if (input.planProposal !== undefined && typeof input.planProposal !== "boolean") {
+      throw agentTurnRefused("invalid-plan");
+    }
+    if (input.planProposal === true) {
+      // The proposal turn is a read-only Edit turn. It never carries a plan reference, because
+      // that would mix a new proposal with a continuation of a stored plan.
+      if (input.plan !== undefined) throw agentTurnRefused("invalid-plan");
+      if (input.mode !== "edit") throw agentTurnRefused("plan-in-discuss");
+    }
 
     let planRef: AgentPlanTurnRef | undefined;
     if (input.plan !== undefined) {
@@ -449,6 +478,26 @@ export class AgentRuntime {
     });
     if (!agentSettingsSchema.safeParse(book.settings?.agent).success) {
       throw new ProviderError("invalid-request", "The book's agent guidance is invalid. Shorten tone to 500 characters and choose Brief, Standard or Detailed before sending.");
+    }
+
+    // A proposal never joins or replaces a live plan. Refuse before the provider read and before
+    // the model is constructed, so no assistant message is written.
+    if (input.planProposal === true && input.threadId) {
+      let thread: AgentThread | null;
+      try {
+        thread = await library.threads.read(input.bookId, input.threadId);
+      } catch (error) {
+        throw planReadRefusal(error);
+      }
+      if (!thread) {
+        throw new ProviderError("not-found", "That conversation no longer exists. Start a new one.");
+      }
+      if (thread.plans.some((plan) => !isTerminalPlan(plan))) {
+        throw new AgentTurnRefusedError(
+          "plan-state",
+          "Finish or cancel the current plan before proposing another."
+        );
+      }
     }
 
     // Resolve the stored plan before any provider read, model construction or write. Every plan
@@ -539,6 +588,10 @@ export class AgentRuntime {
       const startedPlan = planWrite && storedPlan
         ? confirmedStartedPlan(planWrite.thread, storedPlan)
         : undefined;
+      const runningPlan = startedPlan && planWrite
+        ? planWrite.thread.plans.find((plan) => plan.id === startedPlan.id) ?? null
+        : null;
+      const proposalDraft = input.planProposal === true ? new PlanProposalDraft() : undefined;
       const prepared = await prepareThread(
         library.threads,
         {
@@ -559,7 +612,15 @@ export class AgentRuntime {
         input.bookId,
         book.settings?.agent?.skillsEnabled !== false
       );
-      const built = buildPrompt({ book, chapters, activeChapter, skills: skills?.text ?? null, mode: input.mode });
+      const built = buildPrompt({
+        book,
+        chapters,
+        activeChapter,
+        skills: skills?.text ?? null,
+        mode: input.mode,
+        ...(proposalDraft ? { planProposal: true } : {}),
+        ...(startedPlan ? { planTurn: true } : {})
+      });
       const compacted = compactHistory(prepared.thread).messages;
       const messages = modelMessagesFor(compacted, effectiveGuidance);
       const context = contextBreakdown(
@@ -567,6 +628,8 @@ export class AgentRuntime {
         messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n")
       );
       const messageId = newId("msg");
+      const turnId = newId("turn");
+      const controller = new AbortController();
       const state: TurnState = {
         phase: "active",
         text: "",
@@ -589,7 +652,19 @@ export class AgentRuntime {
         running: new Set(),
         executions: new Set()
       };
-      const turnId = newId("turn");
+      if (proposalDraft) state.proposal = proposalDraft;
+      if (startedPlan && runningPlan) {
+        state.plan = new PlanProgress({
+          store: library.threads,
+          bookId: input.bookId,
+          threadId: prepared.thread.id,
+          turnId,
+          plan: runningPlan,
+          publish: (notice) => this.publish(notice),
+          // An author stop never writes plan state; ordinary completion may still close steps.
+          canWrite: () => !controller.signal.aborted
+        });
+      }
       const cache = cachePrefixFor(
         credential.provider,
         book.settings?.cache?.prefixMode !== "off"
@@ -597,9 +672,16 @@ export class AgentRuntime {
       const tools = buildToolSet(library, input.bookId, {
         mode: input.mode,
         disabledTools: book.settings?.agent?.disabledTools ?? [],
-        pluginTools: input.mode === "edit" ? await this.pluginToolsFor() : [],
+        pluginTools: input.mode === "edit" && !proposalDraft ? await this.pluginToolsFor() : [],
         ...(cache.toolProviderOptions ? { toolProviderOptions: cache.toolProviderOptions } : {}),
         proposed: state.proposed,
+        ...(state.plan ? {
+          plan: {
+            stepTool: planStepTool(state.plan),
+            gate: () => state.plan?.gateRefusal() ?? null
+          }
+        } : {}),
+        ...(proposalDraft ? { planProposal: { proposeTool: proposePlanTool(proposalDraft) } } : {}),
         // Every change goes into the checkpoint as it is made, before the tool answers the model, so
         // a change after a pause or a resume is as undoable as one before it.
         onBeforeChange: async (change) => {
@@ -628,7 +710,6 @@ export class AgentRuntime {
         stopWhen: isStepCount(MAX_STEPS)
       });
 
-      const controller = new AbortController();
       this.assertNotStopping(input.bookId);
       const active: ActiveTurn = {
         controller,
@@ -681,6 +762,46 @@ export class AgentRuntime {
     }
   }
 
+  /**
+   * Store the proposal after its assistant message. Nothing is written before the message exists;
+   * a failed or refused addPlan leaves no plan and no proposed notice.
+   */
+  private async finishProposalTurn(
+    turnId: string,
+    input: AgentTurnInput,
+    threadId: string,
+    messageId: string,
+    state: TurnState,
+    messageStored: boolean
+  ): Promise<string | null> {
+    if (!messageStored) return PROPOSAL_PERSISTENCE_MESSAGE;
+    const draft = state.proposal?.proposal;
+    if (!draft) return PROPOSAL_MISSING_MESSAGE;
+    const planId = newId("plan");
+    try {
+      const thread = await this.studio.requireLibrary().threads.addPlan(input.bookId, threadId, {
+        id: planId,
+        purpose: draft.purpose,
+        steps: draft.steps,
+        parent: { messageId, turnId }
+      });
+      const plan = thread.plans.find((entry) => entry.id === planId);
+      if (!plan) return PROPOSAL_STORE_MESSAGE;
+      this.publish({
+        type: "plan",
+        turnId,
+        planId: plan.id,
+        revision: plan.revision,
+        status: "proposed",
+        change: "proposed"
+      });
+      return null;
+    } catch (error) {
+      if (error instanceof ThreadStoreError && error.message.trim()) return error.message.trim();
+      return PROPOSAL_STORE_MESSAGE;
+    }
+  }
+
   /** One start-path compensation; `unchanged` means the plan was already failed. */
   private async failPlanAfterSetupFailure(bookId: string, threadId: string, planId: string): Promise<boolean> {
     try {
@@ -730,13 +851,23 @@ export class AgentRuntime {
     }
     try {
       await this.setApprovalStatus(turn, approvalId, approved ? "approved" : "denied");
-      pending.resume(turn.controller.signal.aborted ? null : approved);
     } catch {
       recordPersistenceError(turn.state, "approval");
       void this.stop(turnId);
       pending.resume(null);
       throw new ProviderError("invalid-request", PERSISTENCE_WARNINGS.approval);
     }
+    // The plan's approval wait is settled only after the approval part was written, and only an
+    // applied plan write may resume the action. A failed plan write stops the turn without running
+    // the tool and leaves the plan at its last confirmed waiting state.
+    const planSettled = turn.state.plan ? await turn.state.plan.approvalSettled() : { ok: true as const };
+    if (!planSettled.ok) {
+      recordPersistenceError(turn.state, "approval");
+      void this.stop(turnId);
+      pending.resume(null);
+      throw new ProviderError("invalid-request", planSettled.message);
+    }
+    pending.resume(turn.controller.signal.aborted ? null : approved);
     return null;
   }
 
@@ -880,7 +1011,7 @@ export class AgentRuntime {
     const writeMessage = async (
       parts: AgentPart[],
       options: { usage?: AgentUsage; checkpoint?: boolean } = {}
-    ): Promise<void> => {
+    ): Promise<boolean> => {
       try {
         // Validation is part of best-effort persistence too. An invalid provider part must
         // never suppress the terminal event that releases the author-facing controls.
@@ -906,10 +1037,12 @@ export class AgentRuntime {
           // the exact base hash from a read, which this turn no longer holds.
           await threadStore.addCheckpointTurn(input.bookId, threadId, turnId);
         }
+        return true;
       } catch (error) {
         recordPersistenceError(state, "conversation");
         console.warn("[agent] Could not save the conversation:",
           error instanceof Error ? redact(error.message) : "The conversation write failed.");
+        return false;
       }
     };
 
@@ -935,6 +1068,10 @@ export class AgentRuntime {
           const output = { ok: false, message: input.mode === "discuss" && !modeAllowsTool(input.mode, part.toolName)
             ? DISCUSS_NEXT_STEP : toolErrorMessage(part.error) };
           await this.recordToolResult(turnId, input.bookId, state, part.toolCallId, part.toolName, output);
+        } else if (part.type === "tool-output-denied") {
+          // A denied destructive call executes nothing. It is an observed failure for the active
+          // step, never a success and never a plan write by the model.
+          await state.plan?.recordResult(part.toolName, { type: "execution-denied" });
         } else if (part.type === "tool-approval-request") {
           waiting = true;
           approval = {
@@ -973,6 +1110,12 @@ export class AgentRuntime {
         // The call's chapters as they are now, before the author sees the request. Once approved,
         // the call writes against them, so words saved while it waits are a conflict, never lost.
         await state.proposed.note(approval);
+        // The plan's wait is written before the approval is published. If it cannot be saved, no
+        // approval is offered and the action never starts.
+        if (state.plan) {
+          const requested = await state.plan.requestApproval();
+          if (!requested.ok) throw new PlanWriteError(requested.message, "request-approval");
+        }
         await saveCheckpoint();
         const responseMessages = await stream.responseMessages;
         state.approvals.push({
@@ -993,7 +1136,16 @@ export class AgentRuntime {
           const answer = new Promise<boolean | null>((resolve) => {
             active.pending = { approvalId: captured.approvalId, resume: resolve };
           });
-          this.publish({ type: "approval", turnId, approvalId: captured.approvalId, name: captured.name, input: captured.input });
+          this.publish({
+            type: "approval",
+            turnId,
+            approvalId: captured.approvalId,
+            name: captured.name,
+            input: captured.input,
+            ...(state.plan
+              ? { planId: state.plan.planId, planRevision: state.plan.revision }
+              : {})
+          });
           this.reportOutcome(turnId, "approval", state, { approvalName: captured.name });
           const approved = await answer;
           controller.signal.throwIfAborted();
@@ -1046,11 +1198,45 @@ export class AgentRuntime {
         costBasis,
         contextLength: state.contextLength
       };
-      await writeMessage([...assistantParts(state.reasoning, state.toolParts, state.text), ...state.approvals], {
+      const messageStored = await writeMessage([...assistantParts(state.reasoning, state.toolParts, state.text), ...state.approvals], {
         usage: usageRecord,
         checkpoint: state.changes.length > 0 && undoAvailable
       });
       controller.signal.throwIfAborted();
+
+      // A proposal turn stores its plan only after the assistant message that proposed it, and
+      // only from the reviewed proposal tool call. No plan notice appears before addPlan applies.
+      if (state.proposal) {
+        const failure = await this.finishProposalTurn(turnId, input, threadId, messageId, state, messageStored);
+        controller.signal.throwIfAborted();
+        if (failure) {
+          this.terminal(turnId, state, {
+            type: "error",
+            turnId,
+            code: "plan-state",
+            message: failure,
+            changed: state.changes.length,
+            undoAvailable
+          });
+          return;
+        }
+      }
+
+      // The terminal plan write precedes the terminal turn event. A failure here is an error turn
+      // and never a completed plan.
+      const planEnd = state.plan ? await state.plan.endTurn() : { ok: true as const };
+      controller.signal.throwIfAborted();
+      if (!planEnd.ok) {
+        this.terminal(turnId, state, {
+          type: "error",
+          turnId,
+          code: "plan-state",
+          message: planEnd.message,
+          changed: state.changes.length,
+          undoAvailable
+        });
+        return;
+      }
       const done: Extract<AgentEvent, { type: "done" }> = {
         type: "done",
         turnId,
@@ -1100,6 +1286,9 @@ export class AgentRuntime {
       // checkpoint it leaves, include that write.
       state.phase = "stopping";
       await settleRunningCalls(state.running);
+      // Provider/tool failure: close the active step by the observation rule, then fail the plan.
+      // A stop writes no plan transition.
+      if (!controller.signal.aborted) await state.plan?.settleOnFailure();
       const undoAvailable = await saveCheckpoint();
       expirePendingApprovals(state);
       if (controller.signal.aborted) {
@@ -1109,19 +1298,24 @@ export class AgentRuntime {
         });
         this.terminal(turnId, state, { type: "stopped", turnId, changed: state.changes.length, undoAvailable });
       } else {
+        // A plan-write failure is already reported as `plan-error` by the controller. Its fixed
+        // sentence becomes the terminal plan-state error, never a provider guess.
+        const planFailure = error instanceof PlanWriteError ? error : null;
         // A provider transport failure arrives as an API error carrying its status, body and
         // headers. Anything else is only words, and the normalizer treats it that way.
-        const apiError = APICallError.isInstance(error) ? error : null;
-        const retryAfter = parseRetryAfter(
+        const apiError = planFailure || !APICallError.isInstance(error) ? null : error;
+        const retryAfter = planFailure ? undefined : parseRetryAfter(
           apiError?.responseHeaders?.["retry-after"] ?? apiError?.responseHeaders?.["Retry-After"]
         );
-        const normalized = normalizeProviderError({
-          provider,
-          message: error instanceof Error ? error.message : String(error),
-          ...(apiError?.statusCode !== undefined ? { status: apiError.statusCode } : {}),
-          ...(apiError?.responseBody ? { body: apiError.responseBody } : {}),
-          ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {})
-        });
+        const normalized = planFailure
+          ? { code: "plan-state", message: planFailure.message, options: {} as { retryAfterSeconds?: number } }
+          : normalizeProviderError({
+              provider,
+              message: error instanceof Error ? error.message : String(error),
+              ...(apiError?.statusCode !== undefined ? { status: apiError.statusCode } : {}),
+              ...(apiError?.responseBody ? { body: apiError.responseBody } : {}),
+              ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {})
+            });
         const wait = normalized.options.retryAfterSeconds;
         const contextNote =
           normalized.code === "context" && state.contextLength
@@ -1161,6 +1355,20 @@ export class AgentRuntime {
 
 /** Fixed text shared by the early plan-turn prompt check and `prepareThread`'s ordinary check. */
 const EMPTY_PROMPT_MESSAGE = "Write a message before asking the agent to work.";
+
+const PROPOSAL_PERSISTENCE_MESSAGE =
+  "The plan proposal could not be saved. Nothing was started.";
+const PROPOSAL_MISSING_MESSAGE = "The model did not propose a plan. Nothing was saved.";
+const PROPOSAL_STORE_MESSAGE =
+  "The plan proposal could not be stored. Nothing was started.";
+
+/** A terminal plan is retained and immutable; it never blocks a new proposal. */
+function isTerminalPlan(plan: AgentPlan): boolean {
+  return plan.status === "completed" ||
+    plan.status === "cancelled" ||
+    plan.status === "failed" ||
+    plan.status === "expired";
+}
 
 /** Read the named conversation only; a plan id is never looked up in another thread or book. */
 async function readPlanThread(store: ThreadStore, bookId: string, threadId: string): Promise<AgentThread> {
