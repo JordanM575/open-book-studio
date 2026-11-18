@@ -1421,6 +1421,32 @@ export function registerIpc(
     return agent.cancelPlan(input.bookId, input.threadId, input.planId);
   });
 
+  handle(IPC.agent.refreshPlanGuidance, async (payload) => {
+    const input = z
+      .object({
+        bookId: idSchema,
+        threadId: idSchema,
+        planId: z
+          .string()
+          .min(1)
+          .max(200)
+          .refine((value) => value.trim().length > 0, "empty plan id"),
+        revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
+        // Transport ceiling only. The 2,000 author-facing bound is enforced in the runtime with the
+        // exact sentence, so a direct over-bound call is refused, never truncated.
+        guidance: z.string().max(50_000)
+      })
+      .strict()
+      .parse(payload);
+    return agent.refreshPlanGuidance(
+      input.bookId,
+      input.threadId,
+      input.planId,
+      input.revision,
+      input.guidance
+    );
+  });
+
   handle(IPC.agent.undoLast, async (payload) => {
     const input = z.object({ bookId: idSchema, turnId: z.string().min(1).max(80).optional() }).parse(payload);
     // A named turn is undone only while it owns the newest checkpoint; no name takes the newest.

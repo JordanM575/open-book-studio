@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Plan guidance refresh
+
+- A proposed plan's card now offers one visible Edit guidance control. Saving writes exactly one new plan revision through a plan-scoped `agent.refreshPlanGuidance` bridge, keeps the plan proposed, and updates the visible revision and Start line; blank or whitespace-only text clears the stored guidance, 2,000 characters are accepted exactly, and 2,001 are refused without truncation or a write. The refresh starts no turn, asks no model, builds no tool set, writes no chapter or book bytes, changes no approval or checkpoint and publishes no event, and Start still sends the displayed revision with no guidance and uses the plan's stored guidance. Running, waiting, pause-requested, paused, completed, cancelled, failed and expired plans show their guidance as a record with no editor. T012 remains open pending review and integration.
+
 ### Plan delivery record
 
 - The spec 031 task record now marks T005, T006 and T013–T021 complete: the thread and turn contracts, the Plan first control and durable proposal, Start and observed step progress, pause/resume, terminal cancel, restart expiry, the failure acceptance matrix, the accessibility pass and the synthetic author journey. T012 stays open because no visible stored-plan guidance refresh is mounted. The final verification records a clean node typecheck and toolkit typecheck, only the pre-existing `WorkspaceView.tsx:1816` web diagnostic, a full-suite result of 4,941 pass and 1 skip with one pre-existing editor-sync timing failure, and a smoke run blocked by that pre-existing typecheck plus the host's missing SUID sandbox. No live provider, real manuscript, device, packaged-build or release acceptance is claimed.

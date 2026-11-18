@@ -8,6 +8,7 @@ import {
   SECOND_INSTANCE_EVENT_CHANNEL,
   SYNC_EVENT_CHANNEL,
   type AgentEvent,
+  type AgentPlanGuidanceRefresh,
   type AgentTurnInput,
   type ChapterMetaPatch,
   type DraftFlushRequest,
@@ -181,6 +182,8 @@ const api: StudioApi = {
     stop: (turnId: string) => invoke(IPC.agent.stop, turnId),
     cancelPlan: (input: { bookId: string; threadId: string; planId: string }) =>
       invoke(IPC.agent.cancelPlan, input),
+    refreshPlanGuidance: (input: AgentPlanGuidanceRefresh) =>
+      invoke(IPC.agent.refreshPlanGuidance, input),
     undoLast: (bookId: string, turnId?: string) =>
       invoke(IPC.agent.undoLast, turnId ? { bookId, turnId } : { bookId }),
     approve: (turnId: string, approvalId: string, approved: boolean) =>

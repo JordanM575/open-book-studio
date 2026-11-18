@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { FormEvent, ReactElement } from "react";
 import { Cpu, GitBranch, History, Monitor, Pencil, Plus, Trash2, X } from "lucide-react";
 import type { AgentEvent, AgentPlanTurnRef, AgentTurnInput } from "@ai-book-studio/core/agent";
-import { agentModeSchema, type AgentMode, type AgentPlan, type AgentThread } from "@ai-book-studio/core/agent/messages";
+import { agentModeSchema, AGENT_PLAN_LIMITS, type AgentMode, type AgentPlan, type AgentThread } from "@ai-book-studio/core/agent/messages";
 import type { AgentPlanExpiry, AgentPlanRuntime } from "@ai-book-studio/core/ipc";
 import type { ThreadSummary } from "@ai-book-studio/core/agent/threads";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
@@ -53,6 +53,8 @@ import {
   PlanProgress,
   type PlanActionOutcome,
   type PlanCancelRef,
+  type PlanGuidanceOutcome,
+  type PlanGuidanceRef,
   type PlanResumeRef,
   type PlanStartRef
 } from "./PlanProgress";
@@ -204,7 +206,7 @@ export function ChatPanel({
    * draft or an optimistic message.
    */
   const [plans, setPlans] = useState<AgentPlan[]>([]);
-  const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | "cancel" | null>(null);
+  const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | "cancel" | "refresh" | null>(null);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
   /** The one confirmed proposal sentence, owned by the panel because the card is not mounted yet. */
   const [planProposalAnnouncement, setPlanProposalAnnouncement] = useState("");
@@ -251,7 +253,7 @@ export function ChatPanel({
   /** A cancel plan-error can beat the live Cancel response; it must not be re-entered. */
   const cancelFailureRef = useRef<{ planId: string; turnId: string } | null>(null);
   /** Guards duplicate plan actions in the same tick, before React state renders. */
-  const planActionRef = useRef<"propose" | "start" | "resume" | "cancel" | null>(null);
+  const planActionRef = useRef<"propose" | "start" | "resume" | "cancel" | "refresh" | null>(null);
   const assistantRef = useRef<string | null>(null);
   const retryRequestsRef = useRef(new Map<string, AgentTurnInput>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -298,7 +300,7 @@ export function ChatPanel({
   }, []);
 
   /** Keep the synchronous guard and the visible action state together. */
-  const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | "cancel" | null) => {
+  const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | "cancel" | "refresh" | null) => {
     planActionRef.current = next;
     setPlanAction(next);
   }, []);
@@ -1317,6 +1319,76 @@ export function ChatPanel({
     }
   };
 
+  /**
+   * Refresh the proposed plan's guidance as one new revision.
+   *
+   * This is a plan-record write, not a turn: it never sends a prompt, starts a stream or changes
+   * the composer. The confirmed plan replaces only that stored plan; a failure keeps the last
+   * confirmed proposal and performs one display read, never a retry of the write.
+   */
+  const refreshPlanGuidance = async (ref: PlanGuidanceRef): Promise<PlanGuidanceOutcome> => {
+    if (running) {
+      return { ok: false, reason: "A turn is running. Wait for it to finish before changing plan guidance." };
+    }
+    if (planActionRef.current !== null) {
+      return { ok: false, reason: "Another plan action is already in flight. Wait for it to finish." };
+    }
+    const id = threadIdRef.current;
+    if (!id) {
+      return { ok: false, reason: "Open the plan's conversation before changing its guidance. Nothing was changed." };
+    }
+    const stored = plansRef.current.find((plan) => plan.id === ref.id);
+    if (!stored) {
+      return { ok: false, reason: "That plan is not in this conversation. Nothing was changed." };
+    }
+    if (stored.status !== "proposed") {
+      return { ok: false, reason: "Only a proposed plan can receive guidance. Nothing was changed." };
+    }
+    if (stored.revision !== ref.revision) {
+      return {
+        ok: false,
+        reason: "The plan changed since you opened its guidance. Review the current revision before saving."
+      };
+    }
+    if ((stored.guidance ?? "") === ref.guidance) {
+      return { ok: false, reason: "This is already the plan's guidance. Nothing was changed." };
+    }
+    if (ref.guidance.length > AGENT_PLAN_LIMITS.guidance) {
+      return { ok: false, reason: "Shorten guidance to 2,000 characters. Your text is kept." };
+    }
+    setPlanActionState("refresh");
+    setPlanNotice(null);
+    setPlanProposalAnnouncement("");
+    try {
+      const answer = await window.studio.agent.refreshPlanGuidance({
+        bookId,
+        threadId: id,
+        planId: ref.id,
+        revision: ref.revision,
+        guidance: ref.guidance
+      });
+      if (!answer.ok) throw new Error(answer.error.message);
+      const confirmed = answer.data;
+      setPlans((current) => {
+        const next = current.map((entry) => entry.id === confirmed.id ? confirmed : entry);
+        plansRef.current = next;
+        return next;
+      });
+      return { ok: true, plan: confirmed };
+    } catch (error) {
+      // One display read of the stored winner, never a retry of the refresh.
+      await refreshStoredPlans();
+      return {
+        ok: false,
+        reason: error instanceof Error
+          ? error.message
+          : "The guidance change could not be confirmed. The last confirmed proposal is unchanged."
+      };
+    } finally {
+      setPlanActionState(null);
+    }
+  };
+
   const approve = async (message: Message, approval: Approval, approved: boolean, pressed: HTMLElement): Promise<void> => {
     if (approval.status !== "pending" || stoppingRef.current === approval.turnId) return;
     // Allow and Deny leave with the question. Focus still on them moves to their card before they
@@ -1457,6 +1529,8 @@ export function ChatPanel({
         onPause={() => void stop()}
         onResume={resumePlan}
         onCancel={cancelPlan}
+        onRefreshGuidance={refreshPlanGuidance}
+        refreshing={planAction === "refresh"}
         focusRequest={planFocusRequest}
       />
     </div>
@@ -1898,6 +1972,8 @@ export function ChatPanel({
               onPause={() => void stop()}
               onResume={resumePlan}
               onCancel={cancelPlan}
+              onRefreshGuidance={refreshPlanGuidance}
+              refreshing={planAction === "refresh"}
               showStoredPlan={false}
             />
           </div>

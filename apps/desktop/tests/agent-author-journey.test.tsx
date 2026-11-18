@@ -54,6 +54,7 @@ const EDIT_PROMPT = "Add a second light.";
 const EDIT_APPEND = "A second light crossed the room.";
 const EDIT_REPLY = "Added the second light.";
 const PLAN_APPEND = "The lantern stayed lit.";
+const REFRESH_GUIDANCE = "Use the lantern motif; keep the past tense.";
 const DESTRUCTIVE_CONTENT = "A rewritten final scene replaced the author's words.\n";
 const PROPOSAL_REPLY = "The plan is ready for your review.";
 const USAGE = {
@@ -120,6 +121,13 @@ interface JourneyAgent {
   start(input: AgentTurnInput): Promise<unknown>;
   stop(turnId: string): Promise<unknown>;
   cancelPlan(input: { bookId: string; threadId: string; planId: string }): Promise<unknown>;
+  refreshPlanGuidance(input: {
+    bookId: string;
+    threadId: string;
+    planId: string;
+    revision: number;
+    guidance: string;
+  }): Promise<unknown>;
   approve(turnId: string, approvalId: string, approved: boolean): Promise<unknown>;
   undoLast(bookId: string, turnId?: string): Promise<unknown>;
   threads: {
@@ -199,12 +207,26 @@ interface JourneyBridge {
   readonly turns: string[];
   readonly cancelPlanInputs: Array<{ bookId: string; threadId: string; planId: string }>;
   readonly cancelPlanCalls: () => number;
+  readonly refreshInputs: Array<{
+    bookId: string;
+    threadId: string;
+    planId: string;
+    revision: number;
+    guidance: string;
+  }>;
 }
 
 function createBridge(library: Library, wiring: RuntimeWiring): JourneyBridge {
   const starts: AgentTurnInput[] = [];
   const turns: string[] = [];
   const cancelPlanInputs: Array<{ bookId: string; threadId: string; planId: string }> = [];
+  const refreshInputs: Array<{
+    bookId: string;
+    threadId: string;
+    planId: string;
+    revision: number;
+    guidance: string;
+  }> = [];
   let cancelPlanCalls = 0;
   const agent: JourneyAgent = {
     start: async (input) => {
@@ -223,6 +245,16 @@ function createBridge(library: Library, wiring: RuntimeWiring): JourneyBridge {
       cancelPlanInputs.push({ ...input });
       return wrap(() => wiring.runtime.cancelPlan(input.bookId, input.threadId, input.planId));
     },
+    refreshPlanGuidance: async (input) => {
+      refreshInputs.push({ ...input });
+      return wrap(() => wiring.runtime.refreshPlanGuidance(
+        input.bookId,
+        input.threadId,
+        input.planId,
+        input.revision,
+        input.guidance
+      ));
+    },
     approve: async (turnId, approvalId, approved) =>
       wrap(() => wiring.runtime.approve(turnId, approvalId, approved)),
     undoLast: async (bookId, turnId) => wrap(() => wiring.runtime.undoLast(bookId, turnId)),
@@ -235,7 +267,7 @@ function createBridge(library: Library, wiring: RuntimeWiring): JourneyBridge {
     },
     onEvent: (listener) => wiring.subscribe(listener)
   };
-  return { agent, starts, turns, cancelPlanInputs, cancelPlanCalls: () => cancelPlanCalls };
+  return { agent, starts, turns, cancelPlanInputs, cancelPlanCalls: () => cancelPlanCalls, refreshInputs };
 }
 
 async function createJourney(script: (chapterId: string) => StreamEntry[]) {
@@ -626,9 +658,75 @@ describe("synthetic author journey (T020)", () => {
       assertOneModelChooser(view);
       assertNoGenericCards(view);
 
-      // Phase 4: Start is one explicit Edit turn with observed step progress.
+      // Phase 4: refresh the proposed guidance visibly before Start. This is a plan-record write:
+      // no model request, no turn, no event, and no chapter or book byte.
+      const streamsBeforeRefresh = journey.model.doStreamCalls.length;
+      const startsBeforeRefresh = journey.starts.length;
+      const deliveredBeforeRefresh = journey.delivered.length;
+      const messagesBeforeRefresh = proposedThread.messages.length;
+      const checkpointsBeforeRefresh = [...proposedThread.checkpointTurns];
+      const chapterBeforeRefresh = await readFile(chapterPath, "utf8");
+      const bookBeforeRefresh = await readFile(bookPath, "utf8");
+
+      testing.fireEvent.click(proposedCard.getByTestId("plan-guidance-edit"));
+      const guidanceField = proposedCard.getByTestId("plan-guidance-field");
+      expect(document.activeElement).toBe(guidanceField);
+      testing.fireEvent.change(guidanceField, { target: { value: REFRESH_GUIDANCE } });
       await testing.act(async () => {
-        testing.fireEvent.click(proposedCard.getByTestId("plan-start"));
+        testing.fireEvent.click(proposedCard.getByTestId("plan-guidance-save"));
+      });
+      await testing.waitFor(() => {
+        const card = testing.within(view.getByTestId("plan-region"));
+        if (card.getByTestId("plan-revision").textContent !== "Revision 2 · Edit plan") {
+          throw new Error("The refreshed revision is not shown.");
+        }
+      }, { timeout: 5_000 });
+
+      const refreshedCard = testing.within(view.getByTestId("plan-region"));
+      expect(refreshedCard.getByTestId("plan-guidance-text").textContent).toBe(REFRESH_GUIDANCE);
+      expect(refreshedCard.getByTestId("plan-start-revision").textContent).toBe("Start uses revision 2.");
+      expect(refreshedCard.getByTestId("plan-announcement").textContent).toBe(
+        "Plan guidance saved. Revision 2. Start uses revision 2."
+      );
+      expect(view.getByTestId("agent-mode")).toHaveProperty("value", "discuss");
+      expect(journey.refreshInputs).toEqual([{
+        bookId: journey.bookId,
+        threadId: firstThreadId,
+        planId: proposed.id,
+        revision: 1,
+        guidance: REFRESH_GUIDANCE
+      }]);
+      expect(journey.starts).toHaveLength(startsBeforeRefresh);
+      expect(journey.delivered).toHaveLength(deliveredBeforeRefresh);
+      expect(journey.model.doStreamCalls).toHaveLength(streamsBeforeRefresh);
+      expect(await readFile(chapterPath, "utf8")).toBe(chapterBeforeRefresh);
+      expect(await readFile(bookPath, "utf8")).toBe(bookBeforeRefresh);
+
+      const refreshedThread = await storedThread(journey.library, journey.bookId, firstThreadId);
+      const refreshed = await storedPlan(journey.library, journey.bookId, firstThreadId);
+      expect(refreshedThread.messages).toHaveLength(messagesBeforeRefresh);
+      expect(refreshedThread.checkpointTurns).toEqual(checkpointsBeforeRefresh);
+      expect(refreshed).toMatchObject({
+        purpose: PLAN_PURPOSE,
+        mode: "edit",
+        status: "proposed",
+        revision: 2,
+        guidance: REFRESH_GUIDANCE,
+        parent: proposed.parent,
+        createdAt: proposed.createdAt
+      });
+      expect(refreshed.steps.map((step) => [step.text, step.state])).toEqual(
+        proposed.steps.map((step) => [step.text, step.state])
+      );
+      expect(refreshed.startedAt).toBeUndefined();
+      expect(refreshed.terminalAt).toBeUndefined();
+      expect(view.getAllByTestId("plan-card")).toHaveLength(1);
+      assertOneModelChooser(view);
+      assertNoGenericCards(view);
+
+      // Phase 5: Start is one explicit Edit turn with observed step progress.
+      await testing.act(async () => {
+        testing.fireEvent.click(refreshedCard.getByTestId("plan-start"));
       });
       await testing.waitFor(() => {
         expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent)
@@ -649,7 +747,7 @@ describe("synthetic author journey (T020)", () => {
         mode: "edit",
         threadId: firstThreadId,
         prompt: "Start the reviewed plan.",
-        plan: { id: proposed.id, revision: 1, action: "start" }
+        plan: { id: proposed.id, revision: 2, action: "start" }
       });
       expect(startRequest).not.toHaveProperty("guidance");
       expect(startRequest).not.toHaveProperty("planProposal");
@@ -661,6 +759,7 @@ describe("synthetic author journey (T020)", () => {
       expect(startTools).toContain("plan_step");
       expect(startTools).toContain("append_to_chapter");
       expect(startTools).toContain("overwrite_chapter");
+      expect(JSON.stringify(startCall?.prompt)).toContain(REFRESH_GUIDANCE);
       expect(view.queryByText("plan_step")).toBeNull();
       expect(view.queryByText("propose_plan")).toBeNull();
 
@@ -699,6 +798,8 @@ describe("synthetic author journey (T020)", () => {
 
       const waitingPlan = await storedPlan(journey.library, journey.bookId, firstThreadId);
       expect(waitingPlan.status).toBe("waiting-for-approval");
+      expect(waitingPlan.revision).toBe(2);
+      expect(waitingPlan.guidance).toBe(REFRESH_GUIDANCE);
       expect(waitingPlan.steps.map((step) => step.state)).toEqual([
         "completed",
         "completed",
@@ -723,7 +824,10 @@ describe("synthetic author journey (T020)", () => {
         turnId: startTurn
       });
 
-      // Phase 5: the plan card cannot answer the approval; the existing 002 card is the only answer.
+      // Phase 6: the plan card cannot answer the approval; the existing 002 card is the only answer.
+      expect(waitingCard.getByTestId("plan-guidance-text").textContent).toBe(REFRESH_GUIDANCE);
+      expect(waitingCard.queryByTestId("plan-guidance-edit")).toBeNull();
+      expect(waitingCard.queryByTestId("plan-guidance-field")).toBeNull();
       expect(waitingCard.getAllByRole("button").map((button) => button.textContent).sort()).toEqual([
         "Cancel plan",
         "Pause plan"
@@ -746,7 +850,7 @@ describe("synthetic author journey (T020)", () => {
       expect(approvalEvent).toMatchObject({
         name: "overwrite_chapter",
         planId: proposed.id,
-        planRevision: 1
+        planRevision: 2
       });
       expect(waitingChapter.content).not.toContain(DESTRUCTIVE_CONTENT);
       expect(waitingMessage.parts.some(
@@ -756,7 +860,7 @@ describe("synthetic author journey (T020)", () => {
       expect(view.getAllByTestId("plan-card")).toHaveLength(1);
       expect(journey.model.doStreamCalls).toHaveLength(12);
 
-      // Phase 6: Cancel keeps the partial write, stops later work, and expires the approval.
+      // Phase 7: Cancel keeps the partial write, stops later work, and expires the approval.
       await testing.act(async () => {
         testing.fireEvent.click(waitingCard.getByTestId("plan-cancel"));
       });
@@ -862,7 +966,7 @@ describe("synthetic author journey (T020)", () => {
         (message) => message.role === "assistant" && message.turnId === startTurn
       )?.parts.some((part) => part.type === "tool-result" && part.name === "overwrite_chapter")).toBe(false);
 
-      // Phase 7: the stored outcome survives a new library read and a new runtime with no replay.
+      // Phase 8: the stored outcome survives a new library read and a new runtime with no replay.
       chat.unmount();
       close = null;
       const reopened = await Library.open(journey.root);
