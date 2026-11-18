@@ -21,7 +21,7 @@ import type { ExternalLink } from "./providers/links";
 import type { UsageSummary } from "./providers/usage";
 import type { VoiceTranscript } from "./providers/speech";
 import type { AgentEvent, AgentTurnInput, AgentTurnStarted, AgentUndoResult } from "./agent";
-import type { AgentThread } from "./agent/messages";
+import type { AgentPlan, AgentThread } from "./agent/messages";
 import type { AgentAnswerLength } from "./agent/settings";
 import type { DriftReport } from "./sync/types";
 import type { ThreadSummary } from "./agent/threads";
@@ -278,6 +278,8 @@ export const IPC = {
   agent: {
     start: "agent:start",
     stop: "agent:stop",
+    /** Cancel one stored plan terminally, stopping its live turn when this process holds it. */
+    cancelPlan: "agent:cancelPlan",
     undoLast: "agent:undoLast",
     approve: "agent:approve",
     /** Everything the app shows about a book's agent. */
@@ -547,6 +549,18 @@ export interface MarkdownFolderCancelResult {
   attemptId: string;
 }
 
+/**
+ * The result of one plan-scoped terminal cancel.
+ *
+ * `live` means this main process closed the plan's live turn and the terminal `stopped` event will
+ * report the partial work. `cancelled` and `terminal` are direct writes or stored reads with no live
+ * turn; the plan snapshot is the stored one.
+ */
+export type AgentPlanCancelResult =
+  | { outcome: "live"; turnId: string }
+  | { outcome: "cancelled"; plan: AgentPlan }
+  | { outcome: "terminal"; plan: AgentPlan };
+
 export interface StudioApi {
   /** Absent on unsupported hosts; controls refuse before opening a draft. */
   planning?: PlanningApi;
@@ -774,6 +788,12 @@ export interface StudioApi {
   agent: {
     start(input: AgentTurnInput): Promise<Result<AgentTurnStarted>>;
     stop(turnId: string): Promise<Result<null>>;
+    /**
+     * Cancel one stored plan terminally. A live plan turn closes dispatch, expires a pending
+     * approval, writes one `cancel` transition and reports partial work through its `stopped`
+     * event; a proposed, paused or failed-confirm plan is cancelled directly with no turn events.
+     */
+    cancelPlan(input: { bookId: string; threadId: string; planId: string }): Promise<Result<AgentPlanCancelResult>>;
     /**
      * Undo the book's newest agent turn. With `turnId`, only while that turn owns the newest checkpoint:
      * otherwise nothing changes and the error says what is newest. The chat names the turn it offers;

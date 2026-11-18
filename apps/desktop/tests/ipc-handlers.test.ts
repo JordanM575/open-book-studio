@@ -160,6 +160,10 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
   const agent = {
     start: mock(async (_input: unknown) => ({ turnId: "turn_ipc0001", threadId: "thread_ipc0001" })),
     stop: mock(async (_turnId: string) => null),
+    cancelPlan: mock(async (_bookId: string, _threadId: string, _planId: string) => ({
+      outcome: "live",
+      turnId: "turn_ipc0001"
+    })),
     undoLast: mock(async (_bookId: string, _turnId?: string) => ({ restored: 1 })),
     approve: mock(async (_turnId: string, _approvalId: string, _approved: boolean) => null)
   };
@@ -309,6 +313,10 @@ describe("ipc boundary", () => {
       [IPC.agent.start, { bookId: id, prompt: "", mode: "edit" }],
       [IPC.agent.start, { bookId: id, prompt: "Go on.", mode: "rewrite" }],
       [IPC.agent.stop, ""],
+      [IPC.agent.cancelPlan, {}],
+      [IPC.agent.cancelPlan, { bookId: id, planId: "plan_ipc0001" }],
+      [IPC.agent.cancelPlan, { bookId: id, threadId: "thread_ipc0001", planId: "" }],
+      [IPC.agent.cancelPlan, { bookId: id, threadId: "thread_ipc0001", planId: "p".repeat(201) }],
       [IPC.agent.undoLast, "turn_1"],
       [IPC.agent.undoLast, { bookId: id, turnId: "" }],
       [IPC.agent.undoLast, { bookId: id, turnId: "t".repeat(81) }],
@@ -883,6 +891,12 @@ describe("the agent", () => {
     });
     await data(IPC.agent.stop, "turn_ipc0001");
     expect(agent.stop).toHaveBeenCalledWith("turn_ipc0001");
+    expect(await data(IPC.agent.cancelPlan, {
+      bookId,
+      threadId: "thread_ipc0001",
+      planId: "plan_ipc0001"
+    })).toEqual({ outcome: "live", turnId: "turn_ipc0001" });
+    expect(agent.cancelPlan).toHaveBeenCalledWith(bookId, "thread_ipc0001", "plan_ipc0001");
     // The strip names no turn and takes the newest; the chat names the turn it offered.
     expect(await data(IPC.agent.undoLast, { bookId })).toEqual({ restored: 1 });
     expect(agent.undoLast.mock.calls.at(-1)).toEqual([bookId]);

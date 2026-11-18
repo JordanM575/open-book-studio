@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AgentPlan,
   AgentPlanStatus,
@@ -11,8 +11,9 @@ import { Button } from "@ai-book-studio/ui/button";
  *
  * A plan is a proposal, not a permission: this card only reads the confirmed plan the thread
  * store returned. It never infers progress from text, a local draft, or a tool name. Start,
- * Pause and Resume are explicit author actions; Pause is the existing Stop made plan-aware and
- * Paused appears only after the turn's terminal stopped event. There is no plan Cancel.
+ * Pause, Resume and Cancel are explicit author actions; Pause is the existing Stop made plan-aware
+ * and Paused appears only after the turn's terminal stopped event. Cancel is terminal and never
+ * claims an undo: completed steps and book changes stay.
  */
 
 const STATUS_LABEL: Record<AgentPlanStatus, string> = {
@@ -57,6 +58,16 @@ export interface PlanPauseSummary {
   readonly undoAvailable?: boolean;
 }
 
+/** The terminal stopped event's change and undo facts for a cancel this window confirmed. */
+export interface PlanCancelSummary {
+  readonly changed: number;
+  readonly undoAvailable?: boolean;
+}
+
+export interface PlanCancelRef {
+  readonly id: string;
+}
+
 interface Props {
   readonly plan: AgentPlan;
   /** A turn is running, so Start waits for it to stop. */
@@ -69,6 +80,10 @@ interface Props {
   readonly resuming?: boolean;
   /** The stopped event's facts for a pause this window confirmed. */
   readonly pauseSummary?: PlanPauseSummary | null;
+  /** A cancel is in flight or was confirmed and its terminal event has not arrived. */
+  readonly cancelling?: boolean;
+  /** The stopped event's facts for a cancel this window confirmed. */
+  readonly cancelSummary?: PlanCancelSummary | null;
   /** The model the Start turn will use, named plainly. There is no second chooser here. */
   readonly modelLabel?: string;
   /** A confirmed plan-write error, shown without changing the last confirmed state. */
@@ -79,6 +94,8 @@ interface Props {
   readonly onPause?: () => void;
   /** Resume a paused plan as one explicit new Edit turn. */
   readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  /** Cancel this plan terminally. A live turn stops; completed edits stay. */
+  readonly onCancel?: (ref: PlanCancelRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
 }
 
 function isTerminalStatus(status: AgentPlanStatus): boolean {
@@ -93,6 +110,21 @@ function pauseFacts(summary: PlanPauseSummary | null | undefined): string {
     : "no undo checkpoint"}`;
 }
 
+function cancelLabel(
+  plan: AgentPlan,
+  summary: PlanCancelSummary | null | undefined
+): string {
+  const completed = plan.steps.filter((step) => step.state === "completed").length;
+  const total = plan.steps.length;
+  const steps = `Cancelled · ${completed} of ${total} ${total === 1 ? "step" : "steps"} completed`;
+  if (!summary) return steps;
+  if (summary.changed <= 0) return `${steps} · no book changes`;
+  const chapters = summary.changed === 1 ? "chapter" : "chapters";
+  return `${steps} · ${summary.changed} ${chapters} changed · ${summary.undoAvailable
+    ? "undo available"
+    : "no undo checkpoint"}`;
+}
+
 export function PlanProgress({
   plan,
   running,
@@ -100,15 +132,23 @@ export function PlanProgress({
   stopping = false,
   resuming = false,
   pauseSummary,
+  cancelling = false,
+  cancelSummary,
   modelLabel,
   notice,
   onStart,
   onPause,
-  onResume
+  onResume,
+  onCancel
 }: Props) {
   const [starting, setStarting] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [resumeFailure, setResumeFailure] = useState<string | null>(null);
+  const [cancelFailure, setCancelFailure] = useState<string | null>(null);
+  const [cancelConfirming, setCancelConfirming] = useState(false);
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const restoreCancelFocus = useRef(false);
   const canStart = plan.status === "proposed" && !running && Boolean(onStart);
   // Pause stays mounted while its stop is open, disabled, so focus and the state stay announced.
   // The request-pause notice changes the stored status to `pause-requested`; the open stop keeps
@@ -116,19 +156,46 @@ export function PlanProgress({
   const pauseOffered = Boolean(onPause) && live &&
     (plan.status === "running" || plan.status === "waiting-for-approval" ||
       (stopping && plan.status === "pause-requested"));
-  const canPause = pauseOffered && !stopping && !starting && !resuming;
+  const canPause = pauseOffered && !stopping && !starting && !resuming && !cancelling;
   const resumeAvailable = Boolean(onResume) && plan.status === "paused" && !running && !stopping;
   const resumeOffered = resumeAvailable && !resuming;
-  const canResume = resumeOffered && !starting;
+  const canResume = resumeOffered && !starting && !cancelling;
   const paused = plan.status === "paused";
+  const cancelBusy = cancelling || cancelSubmitting;
+  // A live-only action is not offered after a reload: the main process is still the authority.
+  const cancelOffered = Boolean(onCancel) && !isTerminalStatus(plan.status) &&
+    (plan.status === "proposed" || plan.status === "paused" || plan.status === "pause-requested" ||
+      ((plan.status === "running" || plan.status === "waiting-for-approval") && live));
+  const canCancel = cancelOffered && !starting && !resuming && !cancelBusy;
+  const cancelled = plan.status === "cancelled";
 
+  // The inline confirmation belongs to one plan status; a new plan, a status change or a started
+  // cancel closes it. The effect intentionally keys on props it does not read.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset the inline confirmation on a plan or cancel change
+  useEffect(() => {
+    setCancelConfirming(false);
+  }, [plan.id, plan.status, cancelling]);
+
+  useEffect(() => {
+    if (cancelConfirming || !restoreCancelFocus.current) return;
+    restoreCancelFocus.current = false;
+    cancelButtonRef.current?.focus();
+  }, [cancelConfirming]);
+
+  const cancelStatus = cancelled ? cancelLabel(plan, cancelSummary) : "";
   const statusLabel = isTerminalStatus(plan.status)
-    ? STATUS_LABEL[plan.status]
-    : stopping
-      ? "Stopping…"
-      : plan.status === "pause-requested"
-        ? "Pause not confirmed"
-        : STATUS_LABEL[plan.status];
+    ? cancelled && cancelling
+      ? "Cancelled · finishing in-flight work…"
+      : cancelled
+        ? cancelStatus
+        : STATUS_LABEL[plan.status]
+    : cancelling
+      ? "Cancelling…"
+      : stopping
+        ? "Stopping…"
+        : plan.status === "pause-requested"
+          ? "Pause not confirmed"
+          : STATUS_LABEL[plan.status];
   const pauseDetail = paused
     ? `${pauseFacts(pauseSummary)}${resuming ? " · Resuming…" : ""}`
     : "";
@@ -159,6 +226,28 @@ export function PlanProgress({
       }
     } catch (error) {
       setResumeFailure(error instanceof Error ? error.message : "The plan could not be resumed. Nothing changed.");
+    }
+  };
+
+  const keepPlan = (): void => {
+    restoreCancelFocus.current = true;
+    setCancelConfirming(false);
+  };
+
+  const cancel = async (): Promise<void> => {
+    if (!onCancel || !canCancel || cancelBusy) return;
+    setCancelConfirming(false);
+    setCancelFailure(null);
+    setCancelSubmitting(true);
+    try {
+      const outcome = await onCancel({ id: plan.id });
+      if (outcome && !outcome.ok) {
+        setCancelFailure(outcome.reason ?? "The plan could not be cancelled. Nothing changed.");
+      }
+    } catch (error) {
+      setCancelFailure(error instanceof Error ? error.message : "The plan could not be cancelled. Nothing changed.");
+    } finally {
+      setCancelSubmitting(false);
     }
   };
 
@@ -201,6 +290,11 @@ export function PlanProgress({
           </li>
         ))}
       </ol>
+      {cancelled ? (
+        <p data-testid="plan-cancel-note" className="text-xs text-muted-foreground">
+          Completed steps stay. Cancel does not undo them.
+        </p>
+      ) : null}
       {plan.guidance !== undefined ? (
         <p data-testid="plan-guidance-text" className="whitespace-pre-wrap text-xs text-muted-foreground">
           {plan.guidance}
@@ -211,6 +305,7 @@ export function PlanProgress({
       {notice ? <p role="alert" data-testid="plan-notice" className="text-xs text-[var(--destructive-text)]">{notice}</p> : null}
       {failure ? <p role="alert" data-testid="plan-action-error" className="text-xs text-[var(--destructive-text)]">{failure}</p> : null}
       {resumeFailure ? <p role="alert" data-testid="plan-resume-error" className="text-xs text-[var(--destructive-text)]">{resumeFailure}</p> : null}
+      {cancelFailure ? <p role="alert" data-testid="plan-cancel-error" className="text-xs text-[var(--destructive-text)]">{cancelFailure}</p> : null}
       {canStart ? (
         <p className="text-xs text-muted-foreground">
           Start creates a new Edit turn. Your composer choice stays as it is, and destructive actions still ask for approval.
@@ -254,6 +349,65 @@ export function PlanProgress({
         >
           Resume plan
         </Button>
+      ) : null}
+      {cancelOffered ? (
+        <div className="space-y-1">
+          <p className="text-xs text-muted-foreground">
+            Cancel ends this plan and stops its later steps. Completed edits stay; Cancel does not undo them.
+            Cancel does not allow or deny any action.
+          </p>
+          {!live ? (
+            <p className="text-xs text-muted-foreground">It does not stop another turn.</p>
+          ) : null}
+          {cancelConfirming ? (
+            <fieldset
+              aria-label="Cancel this plan?"
+              data-testid="plan-cancel-confirmation"
+              className="border-0 p-0"
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.stopPropagation();
+                keepPlan();
+              }}
+            >
+              <p className="text-xs">Cancel this plan? Completed edits stay; Cancel does not undo them.</p>
+              <div className="mt-1 flex flex-wrap gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  data-testid="plan-cancel-confirm"
+                  onClick={() => void cancel()}
+                >
+                  Yes, cancel plan
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  data-testid="plan-cancel-keep"
+                  onClick={keepPlan}
+                >
+                  Keep plan
+                </Button>
+              </div>
+            </fieldset>
+          ) : (
+            <Button
+              ref={cancelButtonRef}
+              variant="secondary"
+              size="sm"
+              disabled={!canCancel}
+              aria-label={cancelBusy ? "Cancelling plan… Waiting for in-flight work to settle." : "Cancel plan"}
+              data-testid="plan-cancel"
+              onClick={() => {
+                if (!canCancel) return;
+                setCancelFailure(null);
+                setCancelConfirming(true);
+              }}
+            >
+              Cancel plan
+            </Button>
+          )}
+        </div>
       ) : null}
     </article>
   );

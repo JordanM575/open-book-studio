@@ -5,6 +5,8 @@ import { Button } from "@ai-book-studio/ui/button";
 import {
   PlanProgress,
   type PlanActionOutcome,
+  type PlanCancelRef,
+  type PlanCancelSummary,
   type PlanPauseSummary,
   type PlanResumeRef,
   type PlanStartRef
@@ -49,8 +51,13 @@ interface Props {
   readonly resuming?: boolean;
   /** The stopped event's facts for a pause this window confirmed. */
   readonly pauseSummary?: PlanPauseSummary | null;
+  /** A cancel is in flight or was confirmed and its terminal event has not arrived. */
+  readonly cancelling?: boolean;
+  /** The stopped event's facts for a cancel this window confirmed. */
+  readonly cancelSummary?: PlanCancelSummary | null;
   readonly onPause?: () => void;
   readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  readonly onCancel?: (ref: PlanCancelRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
 }
 
 interface DraftStep {
@@ -82,8 +89,11 @@ export function PlanFirstControl({
   stopping = false,
   resuming = false,
   pauseSummary = null,
+  cancelling = false,
+  cancelSummary = null,
   onPause,
-  onResume
+  onResume,
+  onCancel
 }: Props) {
   const headingId = useId();
   const requestId = useId();
@@ -260,11 +270,14 @@ export function PlanFirstControl({
                 stopping={stopping}
                 resuming={resuming}
                 pauseSummary={pauseSummary}
+                cancelling={cancelling}
+                cancelSummary={cancelSummary}
                 modelLabel={modelLabel}
                 notice={notice}
                 onStart={onStart}
                 {...(onPause ? { onPause } : {})}
                 {...(onResume ? { onResume } : {})}
+                {...(onCancel ? { onCancel } : {})}
               />
             </div>
           ) : null}

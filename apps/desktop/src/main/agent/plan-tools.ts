@@ -48,6 +48,8 @@ const PAUSE_REQUEST_WRITE_MESSAGE =
   "The plan's pause could not be saved. The plan remains at its last confirmed state.";
 const PAUSE_CONFIRM_WRITE_MESSAGE =
   "The plan's pause could not be confirmed. The plan remains at its last confirmed state.";
+const CANCEL_WRITE_MESSAGE =
+  "The plan could not be cancelled. The plan remains at its last confirmed state.";
 
 export type PlanStepResult =
   | { ok: true; step: number; total: number; text: string; purpose?: string }
@@ -62,6 +64,18 @@ export type PlanPauseRequest = "finished" | "confirmed" | "failed";
 
 /** The one confirm-pause attempt after the run settles. */
 export type PlanPauseConfirmation = { ok: true; confirmed: boolean } | { ok: false };
+
+/** The one cancel write a stop may own. A terminal plan is `finished`, never cancelled. */
+export type PlanCancelRequest = "finished" | "cancelled" | "failed";
+
+/** The cancel outcome after settlement. A failed write never claims cancelled. */
+export type PlanCancelConfirmation = { ok: true; cancelled: boolean } | { ok: false };
+
+/** What one stop's plan writes did. A cancel intent wins over an earlier pause intent. */
+export type PlanStopOutcome =
+  | { kind: "none" }
+  | { kind: "pause"; ok: boolean; confirmed: boolean }
+  | { kind: "cancel"; ok: boolean; cancelled: boolean };
 
 /** A plan write failed in a path where the turn must end with the fixed plan-state error. */
 export class PlanWriteError extends Error {
@@ -100,6 +114,10 @@ function isOpen(state: AgentPlanStepState): boolean {
   return state === "pending" || state === "in-progress";
 }
 
+function isTerminalStatus(status: AgentPlan["status"]): boolean {
+  return status === "completed" || status === "cancelled" || status === "failed" || status === "expired";
+}
+
 function writeFailureMessage(error: unknown, fallback: string): string {
   if (error instanceof ThreadStoreError) {
     const message = error.message.trim();
@@ -120,6 +138,8 @@ function fallbackFor(event: AgentPlanEvent): string {
       return PAUSE_REQUEST_WRITE_MESSAGE;
     case "confirm-pause":
       return PAUSE_CONFIRM_WRITE_MESSAGE;
+    case "cancel":
+      return CANCEL_WRITE_MESSAGE;
     case "complete":
       return COMPLETE_WRITE_MESSAGE;
     case "fail":
@@ -142,6 +162,11 @@ export class PlanProgress {
   /** One confirm-pause attempt after settlement, even if a caller asks twice. */
   private pauseConfirmation: Promise<PlanPauseConfirmation> | null = null;
   private pauseFailed = false;
+  /** Synchronous so a cancel refuses every later plan write before its promise exists. */
+  private cancelRequested = false;
+  /** One cancel write per stop. It never rejects and never retries. */
+  private cancelRequest: Promise<PlanCancelRequest> | null = null;
+  private cancelFailed = false;
 
   constructor(private readonly options: PlanProgressOptions) {
     this.plan = options.plan;
@@ -163,7 +188,7 @@ export class PlanProgress {
   /** Refuse an ordinary tool when it cannot be attributed to a reviewed step. */
   gateRefusal(): string | null {
     if (this.terminal) return PLAN_TOOL_REFUSALS.planFinished;
-    if (this.blocked || this.pauseHeld) return PLAN_TOOL_REFUSALS.planBlocked;
+    if (this.cancelRequested || this.blocked || this.pauseHeld) return PLAN_TOOL_REFUSALS.planBlocked;
     if (this.activeIndex === null) return PLAN_TOOL_REFUSALS.noActiveStep;
     return null;
   }
@@ -177,7 +202,9 @@ export class PlanProgress {
     if (!parsed.success) return { ok: false, message: PLAN_TOOL_REFUSALS.outOfPlan };
     const step = parsed.data.step;
     if (this.terminal) return { ok: false, message: PLAN_TOOL_REFUSALS.planFinished };
-    if (this.blocked || this.pauseHeld) return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
+    if (this.cancelRequested || this.blocked || this.pauseHeld) {
+      return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
+    }
     if (step > this.plan.steps.length) return { ok: false, message: PLAN_TOOL_REFUSALS.outOfPlan };
     if (!this.options.canWrite()) return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
 
@@ -246,7 +273,7 @@ export class PlanProgress {
    */
   async recordResult(name: string, output: unknown): Promise<void> {
     if (isPlanControlTool(name)) return;
-    if (this.terminal || this.blocked || this.activeIndex === null) return;
+    if (this.terminal || this.cancelRequested || this.blocked || this.activeIndex === null) return;
     if (!this.options.canWrite()) return;
     if (planToolResultSucceeded(output)) {
       this.successes += 1;
@@ -304,7 +331,7 @@ export class PlanProgress {
 
   private async writePauseRequest(): Promise<PlanPauseRequest> {
     if (this.terminal) return "finished";
-    const write = await this.applyPause({ type: "request-pause" });
+    const write = await this.applyStopWrite({ type: "request-pause" });
     if (write.outcome === "applied") {
       this.publishPlan("request-pause");
       return "confirmed";
@@ -336,7 +363,7 @@ export class PlanProgress {
     if (requested === "failed") return { ok: false };
     if (this.stateError) return { ok: false };
     if (this.terminal) return { ok: true, confirmed: false };
-    const write = await this.applyPause({ type: "confirm-pause" });
+    const write = await this.applyStopWrite({ type: "confirm-pause" });
     if (write.outcome === "applied") {
       this.publishPlan("confirm-pause");
       return { ok: true, confirmed: true };
@@ -350,8 +377,81 @@ export class PlanProgress {
     return { ok: false };
   }
 
-  /** The pause writes are the only plan writes allowed after the stop gate closes. */
-  private async applyPause(event: AgentPlanEvent): Promise<StepWrite> {
+  /**
+   * Start the one cancel write a stop owns. This path bypasses `canWrite` because the controller is
+   * already aborted when it runs. A late pause request is awaited first so a `request-pause` write
+   * cannot land after `cancel`.
+   */
+  requestCancel(): Promise<PlanCancelRequest> {
+    this.cancelRequested = true;
+    this.cancelRequest ??= this.writeCancel();
+    return this.cancelRequest;
+  }
+
+  private async writeCancel(): Promise<PlanCancelRequest> {
+    // The store serializes writes, and a late request-pause must not follow cancel and emit a
+    // spurious plan error.
+    if (this.pauseRequest) await this.pauseRequest;
+    // A completion, failure or expiry that applied first owns the terminal outcome. A cancel
+    // request never relabels it. Only the last confirmed plan is evidence here.
+    if (isTerminalStatus(this.plan.status)) {
+      return this.plan.status === "cancelled" ? "cancelled" : "finished";
+    }
+    const write = await this.applyStopWrite({ type: "cancel" });
+    if (write.outcome === "applied") {
+      this.publishPlan("cancel");
+      return "cancelled";
+    }
+    if (write.outcome === "unchanged") {
+      this.terminal = true;
+      return "cancelled";
+    }
+    // One bounded re-read classifies a terminal race. It is not a retry and it writes nothing.
+    const stored = await this.readStoredPlan();
+    if (stored === "terminal") {
+      return this.plan.status === "cancelled" ? "cancelled" : "finished";
+    }
+    this.cancelFailed = true;
+    this.errorNotice("cancel", write.message ?? CANCEL_WRITE_MESSAGE);
+    return "failed";
+  }
+
+  /**
+   * Await the one cancel write after settlement. It never writes and never retries. A failed write
+   * reports not ok so the stopped event can carry the fixed planCancel warning.
+   */
+  async finishCancel(): Promise<PlanCancelConfirmation> {
+    if (!this.cancelRequest) return { ok: true, cancelled: false };
+    if (this.cancelFailed) return { ok: false };
+    const result = await this.cancelRequest;
+    if (result === "cancelled") return { ok: true, cancelled: true };
+    if (result === "finished") return { ok: true, cancelled: false };
+    return { ok: false };
+  }
+
+  /**
+   * Choose the stop's plan outcome after settlement, checkpoint and stopped message. A cancel intent
+   * wins over pause; a cancel that arrives while `confirm-pause` awaits the store is awaited here so
+   * its notice still precedes `stopped`.
+   */
+  async finishStop(): Promise<PlanStopOutcome> {
+    if (this.cancelRequest) {
+      const cancel = await this.finishCancel();
+      return { kind: "cancel", ok: cancel.ok, cancelled: cancel.ok ? cancel.cancelled : false };
+    }
+    if (this.pauseRequest) {
+      const pause = await this.confirmPause();
+      if (this.cancelRequest) {
+        const cancel = await this.finishCancel();
+        return { kind: "cancel", ok: cancel.ok, cancelled: cancel.ok ? cancel.cancelled : false };
+      }
+      return { kind: "pause", ok: pause.ok, confirmed: pause.ok ? pause.confirmed : false };
+    }
+    return { kind: "none" };
+  }
+
+  /** The stop writes are the only plan writes allowed after the stop gate closes. */
+  private async applyStopWrite(event: AgentPlanEvent): Promise<StepWrite> {
     try {
       const applied = await this.options.store.applyPlanEvent(
         this.options.bookId,
@@ -361,10 +461,7 @@ export class PlanProgress {
       );
       const stored = applied.thread.plans.find((entry) => entry.id === this.plan.id);
       if (stored) this.plan = stored;
-      if (this.plan.status === "completed" || this.plan.status === "cancelled" ||
-        this.plan.status === "failed" || this.plan.status === "expired") {
-        this.terminal = true;
-      }
+      if (isTerminalStatus(this.plan.status)) this.terminal = true;
       return { outcome: applied.outcome };
     } catch (error) {
       return { outcome: "failed", message: writeFailureMessage(error, fallbackFor(event)) };
@@ -378,8 +475,7 @@ export class PlanProgress {
       const stored = thread?.plans.find((entry) => entry.id === this.plan.id);
       if (!stored) return "unknown";
       this.plan = stored;
-      if (stored.status === "completed" || stored.status === "cancelled" ||
-        stored.status === "failed" || stored.status === "expired") {
+      if (isTerminalStatus(stored.status)) {
         this.terminal = true;
         return "terminal";
       }
