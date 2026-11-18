@@ -206,6 +206,10 @@ export function ChatPanel({
   const [plans, setPlans] = useState<AgentPlan[]>([]);
   const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | "cancel" | null>(null);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
+  /** The one confirmed proposal sentence, owned by the panel because the card is not mounted yet. */
+  const [planProposalAnnouncement, setPlanProposalAnnouncement] = useState("");
+  /** Bumped when a proposal is stored so the new card can take focus once it appears. */
+  const [planFocusRequest, setPlanFocusRequest] = useState(0);
   /** The one expiry warning a thread read reported; a live `plan-error` stays in planNotice. */
   const [expiryNotice, setExpiryNotice] = useState<string | null>(null);
   /** A plan this process could not mark expired, so Start and Resume stay off. */
@@ -297,6 +301,12 @@ export function ChatPanel({
   const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | "cancel" | null) => {
     planActionRef.current = next;
     setPlanAction(next);
+  }, []);
+
+  /** A cleared plan view owns no proposal sentence and no pending card focus. */
+  const resetPlanProposalAnnouncement = useCallback(() => {
+    setPlanProposalAnnouncement("");
+    setPlanFocusRequest(0);
   }, []);
 
   /** A new conversation or thread switch holds no live, stopping, cancel or pause view. */
@@ -401,6 +411,7 @@ export function ChatPanel({
     setPlans([]);
     plansRef.current = [];
     clearPlanTurnView();
+    resetPlanProposalAnnouncement();
     setPlanActionState(null);
     setPlanNotice(null);
     setMode("discuss");
@@ -426,7 +437,7 @@ export function ChatPanel({
     return () => {
       loadToken.current += 1;
     };
-  }, [applyPlans, applyReadPlanState, bookId, clearPlanTurnView, openThreadId, setPlanActionState]);
+  }, [applyPlans, applyReadPlanState, bookId, clearPlanTurnView, openThreadId, resetPlanProposalAnnouncement, setPlanActionState]);
 
   const startNew = (): void => {
     if (running) return;
@@ -438,6 +449,7 @@ export function ChatPanel({
     setCheckpointTurns([]);
     applyPlans([]);
     clearPlanTurnView();
+    resetPlanProposalAnnouncement();
     setPlanActionState(null);
     setPlanNotice(null);
     setInput("");
@@ -473,6 +485,7 @@ export function ChatPanel({
       // Clear the previous plan view before applying the new read, so it cannot wipe the new
       // thread's reattach or expiry state.
       clearPlanTurnView();
+      resetPlanProposalAnnouncement();
       setPlanActionState(null);
       setPlanNotice(null);
       setThreadId(thread.id);
@@ -522,6 +535,7 @@ export function ChatPanel({
         setCheckpointTurns([]);
         applyPlans([]);
         clearPlanTurnView();
+        resetPlanProposalAnnouncement();
         setPlanActionState(null);
         setPlanNotice(null);
       }
@@ -543,6 +557,7 @@ export function ChatPanel({
       setMessages(created.messages.map((entry) => toChatMessage(entry, checkpointTurn)));
       applyPlans(created.plans ?? []);
       clearPlanTurnView();
+      resetPlanProposalAnnouncement();
       setPlanActionState(null);
       setPlanNotice(null);
       setHistoryOpen(false);
@@ -795,9 +810,13 @@ export function ChatPanel({
           plansRef.current = next;
           return next;
         });
+        if (event.change !== "proposed") setPlanProposalAnnouncement("");
         if (event.change === "proposed") {
           // The proposal is stored. The composer returns to its new-turn Discuss default;
-          // the plan region keeps the reviewed plan available.
+          // the plan region keeps the reviewed plan available. The panel owns this sentence
+          // because the card does not exist at the moment the proposal lands.
+          setPlanProposalAnnouncement("Plan proposed. Review the stored plan before starting it.");
+          setPlanFocusRequest((current) => current + 1);
           setMode("discuss");
           setGuidance("");
           setBackground(false);
@@ -842,6 +861,7 @@ export function ChatPanel({
       } else if (event.type === "plan-step") {
         setPlanActionState(null);
         setPlanNotice(null);
+        setPlanProposalAnnouncement("");
         setPlans((current) => {
           const next = current.map((plan) =>
             plan.id === event.planId
@@ -870,6 +890,7 @@ export function ChatPanel({
           setCancellingPlanId(null);
         }
         setPlanNotice(event.message);
+        setPlanProposalAnnouncement("");
       } else if (event.type === "done") {
         patchAssistant(event.turnId, (message) => ({
           ...message,
@@ -1054,6 +1075,7 @@ export function ChatPanel({
     }
     setPlanActionState("propose");
     setPlanNotice(null);
+    setPlanProposalAnnouncement("");
     const outcome = await sendPrompt(planRequestPrompt(request), {
       mode: "edit",
       threadId: threadId ?? undefined,
@@ -1095,6 +1117,7 @@ export function ChatPanel({
     }
     setPlanActionState("start");
     setPlanNotice(null);
+    setPlanProposalAnnouncement("");
     const outcome = await sendPrompt("Start the reviewed plan.", {
       mode: "edit",
       threadId: id,
@@ -1152,6 +1175,7 @@ export function ChatPanel({
     }
     setPlanActionState("resume");
     setPlanNotice(null);
+    setPlanProposalAnnouncement("");
     const outcome = await sendPrompt("Resume the reviewed plan.", {
       mode: "edit",
       threadId: id,
@@ -1207,6 +1231,7 @@ export function ChatPanel({
     }
     setPlanActionState("cancel");
     setPlanNotice(null);
+    setPlanProposalAnnouncement("");
     setCancelSummary(null);
     cancelConfirmedRef.current = null;
     cancelFailureRef.current = null;
@@ -1432,6 +1457,7 @@ export function ChatPanel({
         onPause={() => void stop()}
         onResume={resumePlan}
         onCancel={cancelPlan}
+        focusRequest={planFocusRequest}
       />
     </div>
   ) : null;
@@ -1442,6 +1468,15 @@ export function ChatPanel({
       aria-label="Writing agent"
       data-testid="chat-panel"
     >
+      <p
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+        data-testid="plan-proposal-announcement"
+        className="sr-only"
+      >
+        {planProposalAnnouncement}
+      </p>
       <header className="flex items-center justify-between border-b border-[var(--glass-outline)] px-4 py-3">
         <div>
           <h2 className="text-(length:--text-headline-size) font-semibold">Writing agent</h2>
@@ -1822,7 +1857,7 @@ export function ChatPanel({
               "Changes use checked saves and turn undo. Destructive actions still ask for approval."}
           </p>
           <details>
-            <summary className="cursor-pointer rounded-sm focus-visible:outline-2">One-turn guidance (optional)</summary>
+            <summary tabIndex={0} className="cursor-pointer rounded-sm focus-visible:outline-2">One-turn guidance (optional)</summary>
             <label className="mt-2 block">
               Guidance for next turn
               <textarea
@@ -1863,6 +1898,7 @@ export function ChatPanel({
               onPause={() => void stop()}
               onResume={resumePlan}
               onCancel={cancelPlan}
+              showStoredPlan={false}
             />
           </div>
         ) : null}

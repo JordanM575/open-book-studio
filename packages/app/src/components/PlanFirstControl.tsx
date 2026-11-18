@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { AgentMode, AgentPlan } from "@ai-book-studio/core/agent/messages";
 import { AGENT_PLAN_LIMITS } from "@ai-book-studio/core/agent/messages";
 import { Button } from "@ai-book-studio/ui/button";
@@ -60,6 +60,8 @@ interface Props {
   readonly onPause?: () => void;
   readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
   readonly onCancel?: (ref: PlanCancelRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  /** The conversation owns the one plan card; the composer keeps its guard without a second card. */
+  readonly showStoredPlan?: boolean;
 }
 
 interface DraftStep {
@@ -96,12 +98,19 @@ export function PlanFirstControl({
   cancelSummary = null,
   onPause,
   onResume,
-  onCancel
+  onCancel,
+  showStoredPlan = true
 }: Props) {
   const headingId = useId();
   const requestId = useId();
   const stepsId = useId();
   const guidanceId = useId();
+  const purposeCountId = useId();
+  const stepLimitId = useId();
+  const guidanceCountId = useId();
+  const askRef = useRef<HTMLButtonElement>(null);
+  const stepInputs = useRef(new Map<string, HTMLInputElement>());
+  const pendingStepFocus = useRef<string | null>(null);
   const stepSerial = useRef(0);
   const nextStep = (text: string): DraftStep => {
     stepSerial.current += 1;
@@ -122,6 +131,33 @@ export function PlanFirstControl({
   const editable = mode === "edit" && !busy && !openPlan;
   const canPropose =
     editable && request.trim().length > 0 && !requestTooLong && !guidanceTooLong && !stepTooLong;
+
+  useEffect(() => {
+    if (!failure || submitting) return;
+    askRef.current?.focus();
+  }, [failure, submitting]);
+
+  // Add and Remove replace the pressed button with another row. Focus stays in the step list.
+  useEffect(() => {
+    const id = pendingStepFocus.current;
+    if (!id) return;
+    const input = stepInputs.current.get(id);
+    if (!input) return;
+    pendingStepFocus.current = null;
+    input.focus();
+  }, [steps]);
+
+  const addStep = (): void => {
+    const step = nextStep("");
+    pendingStepFocus.current = step.id;
+    setSteps((existing) => [...existing, step]);
+  };
+
+  const removeStep = (index: number): void => {
+    const target = steps[index + 1] ?? steps[index - 1];
+    if (target) pendingStepFocus.current = target.id;
+    setSteps((existing) => existing.filter((_, position) => position !== index));
+  };
 
   const propose = async (): Promise<void> => {
     if (!canPropose) return;
@@ -167,9 +203,13 @@ export function PlanFirstControl({
         <p role="status">A turn is running. Plan controls stay off until it stops.</p>
       ) : openPlan ? (
         stale ? (
-          <p role="status" data-testid="plan-open">
-            {notice ?? "This plan's runtime is no longer available, but the plan could not be marked expired. It remains at its last confirmed state. Nothing was replayed."}
-          </p>
+          notice ? (
+            <p data-testid="plan-open">{notice}</p>
+          ) : (
+            <p role="status" data-testid="plan-open">
+              This plan's runtime is no longer available, but the plan could not be marked expired. It remains at its last confirmed state. Nothing was replayed.
+            </p>
+          )
         ) : (
           <p role="status" data-testid="plan-open">Start the stored plan before asking for another.</p>
         )
@@ -185,11 +225,12 @@ export function PlanFirstControl({
               disabled={!editable}
               rows={3}
               aria-invalid={requestTooLong}
+              aria-describedby={purposeCountId}
               data-testid="plan-purpose"
               className={fieldClass}
             />
           </label>
-          <p>{request.length.toLocaleString()} / {AGENT_PLAN_LIMITS.purpose.toLocaleString()} characters</p>
+          <p id={purposeCountId}>{request.length.toLocaleString()} / {AGENT_PLAN_LIMITS.purpose.toLocaleString()} characters</p>
           <div className="space-y-2">
             <p id={stepsId}>Steps to consider (optional)</p>
             <p>The agent may propose different or better-ordered steps.</p>
@@ -199,6 +240,10 @@ export function PlanFirstControl({
                   <label className="min-w-0 flex-1">
                     Step {index + 1}
                     <input
+                      ref={(node) => {
+                        if (node) stepInputs.current.set(step.id, node);
+                        else stepInputs.current.delete(step.id);
+                      }}
                       value={step.text}
                       onChange={(event) => {
                         const value = event.target.value;
@@ -207,6 +252,7 @@ export function PlanFirstControl({
                       disabled={!editable}
                       aria-invalid={step.text.length > AGENT_PLAN_LIMITS.stepText}
                       aria-label={`Step ${index + 1}`}
+                      aria-describedby={stepLimitId}
                       data-testid="plan-step"
                       className={fieldClass}
                     />
@@ -216,7 +262,7 @@ export function PlanFirstControl({
                     size="xs"
                     disabled={!editable || steps.length === 1}
                     aria-label={`Remove step ${index + 1}`}
-                    onClick={() => setSteps((existing) => existing.filter((item) => item.id !== step.id))}
+                    onClick={() => removeStep(index)}
                   >
                     Remove
                   </Button>
@@ -227,11 +273,11 @@ export function PlanFirstControl({
               variant="ghost"
               size="xs"
               disabled={!editable || stepCountFull}
-              onClick={() => setSteps((existing) => [...existing, nextStep("")])}
+              onClick={addStep}
             >
               Add step
             </Button>
-            <p>
+            <p id={stepLimitId}>
               Up to {AGENT_PLAN_LIMITS.steps} steps · {AGENT_PLAN_LIMITS.stepText.toLocaleString()} characters each
             </p>
           </div>
@@ -244,11 +290,12 @@ export function PlanFirstControl({
               disabled={!editable}
               rows={2}
               aria-invalid={guidanceTooLong}
+              aria-describedby={guidanceCountId}
               data-testid="plan-guidance"
               className={fieldClass}
             />
           </label>
-          <p>
+          <p id={guidanceCountId}>
             {guidance.length.toLocaleString()} / {AGENT_PLAN_LIMITS.guidance.toLocaleString()} characters · This request only
           </p>
           {requestTooLong ? (
@@ -262,6 +309,7 @@ export function PlanFirstControl({
           ) : null}
           {failure ? <p role="alert" data-testid="plan-refusal">{failure}</p> : null}
           <Button
+            ref={askRef}
             variant="secondary"
             size="sm"
             disabled={!canPropose}
@@ -270,7 +318,7 @@ export function PlanFirstControl({
           >
             Ask for plan
           </Button>
-          {plan ? (
+          {showStoredPlan && plan ? (
             <div data-testid="plan-current">
               <PlanProgress
                 plan={plan}
