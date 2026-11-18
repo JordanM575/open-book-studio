@@ -1,7 +1,7 @@
 # Feature Specification: Agent interaction and guidance
 
 **Feature Branch**: `031-agent-interaction`
-**Status**: In progress — Discuss/Edit runtime, composer and bounded guidance implemented in W03; plans and integrated delivery acceptance remain open
+**Status**: Delivered at the source/test level — Discuss/Edit runtime, composer, bounded guidance, proposed-plan guidance refresh and the visible plan lifecycle are implemented and reviewed; live provider, real manuscript, device, packaged-build and release acceptance remain separate
 **Input**: User description: "Author-facing discuss/edit interaction, a visible plan lifecycle and guidance controls."
 
 ## Overview
@@ -26,7 +26,9 @@ to Discuss. Discuss offers only enabled read-tier built-ins and does not load pl
 checked tools, destructive approvals and turn-level undo. Actual mode and one-turn guidance are
 stored in the book's conversation; legacy messages remain unrecorded. Book tone/answer length and
 bounded one-turn guidance reach the submitted request without changing permissions or model choice.
-There is no first-class plan state yet. Background work, where available, is an explicit per-turn
+There is a stored plan state with ordered steps. Proposed plans can receive revised guidance through
+one visible refresh, and Start, Pause, Resume and Cancel operate on the stored plan under the
+boundaries below. Background work, where available, is an explicit per-turn
 choice under [017](../017-voice-and-background/spec.md). See [candidate evidence and the matching
 delivery runbook](implementation.md); source completion is not public film/release acceptance.
 
@@ -38,8 +40,8 @@ pause, resume or cancel that plan under the boundaries below. Per-book tone and 
 plus optional one-turn guidance, help authors shape responses without changing the model, its
 permissions or the existing tool protocol.
 
-The plan lifecycle remains planned; the mode/guidance source candidate still requires integrated
-acceptance and the matching interaction runbook below.
+The plan lifecycle is delivered at the source/test level; live provider, real manuscript, device,
+packaged-build and release acceptance remain separate.
 
 ## Accepted decisions and delivery conditions
 
@@ -50,9 +52,9 @@ new controls. The substantive mode, continuation and no-live-steering decisions 
 
 | Decision | Accepted behavior | Remaining implementation |
 | --- | --- | --- |
-| D-177 · Discuss default and tools | Discuss is the new-turn default; exactly the six read-tier built-ins, subject to author-disabled tools, are offered. Writes, destructive/unclassified/future tools and plugins are withheld and denied at the bridge. The mode is fixed for the turn. | W03 implements the mode part of T006 and T007–T009; integrated runtime/UI and review acceptance remain. |
-| D-178 · Pause and continuation | Show Stopping until the terminal `stopped` event, then Paused with actual changes/undo availability. Start/Resume creates a new explicit turn; approvals never carry over. Non-background close stops; restart expires plans. | Plan state and runtime/control tasks, including T005–T006 and T013–T018. |
-| D-179 · Guidance | No live steering. Edit guidance before sending or while a plan is proposed; a running/paused turn needs stop and a new explicit turn for revised guidance. | W03 implements T011; T012 and plan lifecycle wiring remain. No in-flight guidance queue. |
+| D-177 · Discuss default and tools | Discuss is the new-turn default; exactly the six read-tier built-ins, subject to author-disabled tools, are offered. Writes, destructive/unclassified/future tools and plugins are withheld and denied at the bridge. The mode is fixed for the turn. | W03 delivered the mode part of T006 and T007–T009; T019–T021 record the integrated runtime/UI review. Live provider, real manuscript and device acceptance remain outside this spec. |
+| D-178 · Pause and continuation | Show Stopping until the terminal `stopped` event, then Paused with actual changes/undo availability. Start/Resume creates a new explicit turn; approvals never carry over. Non-background close stops; restart expires plans. | Delivered by T005–T006 and T013–T018; restart expiry and partial-work visibility are covered by synthetic tests. |
+| D-179 · Guidance | No live steering. Edit guidance before sending or while a plan is proposed; a running/paused turn needs stop and a new explicit turn for revised guidance. | W03 implements T011; T012 delivers the proposed-plan guidance refresh. No in-flight guidance queue. |
 
 ## User scenarios & testing
 
