@@ -1,8 +1,7 @@
 # Tasks: agent interaction and guidance
 
 **Spec:** [spec.md](spec.md) · **Plan:** [plan.md](plan.md)
-**Status:** Delivered at the source/test level — T005, T006 and T013–T021 are recorded complete
-below; T012 remains open because no visible stored-plan guidance refresh is mounted. Live provider,
+**Status:** Delivered at the source/test level — T001–T021 are recorded complete below. Live provider,
 real manuscript, device, packaged-build and release acceptance remain separate.
 
 Tasks are ordered. An unresolved decision blocks only the task that depends on it. All tests use
@@ -128,15 +127,17 @@ authorized; no task requires a live provider, credential, paid service, real man
   [implementation evidence and delivery runbook](implementation.md). These source/test
   completions do not close integrated runtime/UI verification and independent review. The November 7
   decision update replaces the event-only re-shoot hold; film work remains separately tracked.
-- [ ] T012 Add guidance to a proposed plan and require a refreshed visible proposal before **Start
+- [x] T012 Add guidance to a proposed plan and require a refreshed visible proposal before **Start
   plan**. No tool may write during this refresh. Keep live steering disabled under D-179.
-  Partial: `packages/core/src/agent/proposed-plan.ts` refreshes guidance on a proposed Edit plan
-  only. A blank value is omitted. More than 2,000 characters is refused without truncation or a
-  write. The refresh returns a new frozen revision and does not change the previous proposal,
-  mode, model, tool permissions, or approvals. A running, paused, started, or terminal plan is
-  refused. The Plan first control is mounted for an Edit turn. Refreshing its guidance shows a new
-  revision and does not apply while a turn is running. Durable persistence and start execution are
-  merged; the visible proposed-plan refresh control is still not mounted, so this task stays open.
+  Completed 2026-11-18: a proposed plan's card offers one visible Edit guidance control over a
+  plan-scoped `agent.refreshPlanGuidance` channel and the existing `ThreadStore.refreshPlanProposal`.
+  Saving writes exactly one new revision, keeps the plan proposed, and updates the visible revision
+  and Start line; blank or whitespace-only text clears the stored guidance, 2,000 characters are
+  accepted exactly, and 2,001 are refused without truncation or a write. The refresh starts no turn,
+  asks no model, builds no tool set, writes no chapter or book bytes, changes no approval or
+  checkpoint and publishes no event. Start sends the displayed revision with no guidance and uses
+  the stored guidance. Running, waiting, pause-requested, paused, completed, cancelled, failed and
+  expired plans show their guidance as a record with no editor, so live steering stays disabled.
 
 ## Phase 4 — Visible plan lifecycle
 
