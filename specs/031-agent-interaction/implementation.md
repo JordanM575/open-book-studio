@@ -73,7 +73,8 @@ new interaction portion, with synthetic data and the isolated mock provider:
 For integrated hidden checks, retain current test-only credential isolation; never
 use an author profile/keychain or live provider. No recording/upload, packaged app,
 light/dark visual pass or whole-application accessibility pass was performed by W03.
-T019–T021 remain open. Plan-first, pause/resume plans and autonomy remain later work.
+T019–T021 were delivered with the integrated plan slices. Plan-first, pause/resume plans and
+guided execution are delivered at the source/test level; 037 autonomy remains separate work.
 
 ## Integration seams
 
