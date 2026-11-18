@@ -79,6 +79,12 @@ authorized; no task requires a live provider, credential, paid service, real man
   W03: mode/guidance validation and request snapshots are implemented; actual user guidance
   and user/assistant mode persist, including failed, stopped and approval-waiting attempts.
   Retry identity includes prompt, mode and guidance. Plan/event expansion remains open.
+  T006 builder: the turn contract now accepts an identity-only plan reference, returns the
+  confirmed mode and running plan snapshot, refuses invalid, foreign, stale, non-startable,
+  non-resumable, over-bound and mismatched plan turns before the provider, and records one
+  start/resume write with a single fail compensation for a later setup failure. Additive plan
+  notices are defined for T014–T018 but are not emitted here. Focused synthetic tests pass; the
+  box stays open until independent review and merge.
 
 ## Phase 2 — Discuss and Edit permissions
 

@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Plan turn contract
+
+- The main-process turn input accepts an optional identity-only plan reference: a stored plan id, the revision the author reviewed, and an explicit `start` or `resume`. The reference is strict; purpose, steps, guidance, model, tools and approval keys are refused before any book read, model construction, user-message write or provider request. A plan turn is Edit-only and needs an existing conversation. The runtime resolves the plan from that conversation, refuses a missing or foreign id, a stale revision, a non-startable or non-resumable status, invalid or over-bound guidance, an over-bound stored plan and unreviewed guidance with a fixed author-facing sentence, and records exactly one `start` or `resume` through the thread store before the first provider request. The start acknowledgment returns the confirmed mode and a `running` plan snapshot; a duplicate or uncertain write is refused, never treated as started. If setup fails after that write and before the provider request, one `fail` transition is attempted and the caller is told whether it applied. Additive `plan`, `plan-step` and `plan-error` event shapes and optional plan identity on the approval event are defined for later execution work but are not emitted by this slice. No renderer, approval, step, pause, cancel, expiry or restart-sweep behavior is added. T006 remains open.
+
 ### Reading position
 
 - An in-memory cursor keeps a paragraph index for one caller-supplied source id and revision, moves only inside that frozen paragraph list, and accepts a speed from 0.25 through 4 without clamping. A different revision or a changed body is refused. It does not speak, choose a voice, or close a task box. No task box is closed.

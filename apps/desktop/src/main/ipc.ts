@@ -61,6 +61,7 @@ import {
 } from "@ai-book-studio/core/providers/usage";
 import type { AgentStatus, PluginStatus, SpendingStatus } from "@ai-book-studio/core/agent/metrics";
 import { agentGuidanceTextSchema, agentModeSchema } from "@ai-book-studio/core/agent/messages";
+import { agentPlanTurnRefSchema } from "@ai-book-studio/core/agent";
 import { ANSWER_LENGTHS } from "@ai-book-studio/core/agent/settings";
 import { loadPlugins, pluginTools, validatePluginFolder } from "./agent/plugins";
 import { readBookSkills } from "./agent/skills";
@@ -1393,6 +1394,7 @@ export function registerIpc(
     prompt: z.string().min(1).max(50_000),
     mode: agentModeSchema,
     guidance: agentGuidanceTextSchema.optional(),
+    plan: agentPlanTurnRefSchema.optional(),
     threadId: idSchema.nullable().optional(),
     background: z.boolean().optional(),
     model: z

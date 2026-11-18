@@ -7,30 +7,39 @@ import {
   type ToolApprovalResponse,
   type ToolSet
 } from "ai";
-import type {
-  AgentEvent,
-  AgentTurnInput,
-  AgentTurnResult,
-  AgentTurnStarted,
-  AgentUndoResult
+import {
+  AGENT_TURN_REFUSAL_MESSAGES,
+  AgentTurnRefusedError,
+  agentPlanTurnRefSchema,
+  agentTurnRefused,
+  effectivePlanTurnGuidance,
+  type AgentEvent,
+  type AgentPlanTurnRef,
+  type AgentTurnInput,
+  type AgentTurnResult,
+  type AgentTurnStarted,
+  type AgentUndoResult
 } from "@ai-book-studio/core/agent";
 import {
   AGENT_ERROR_LIMITS,
   agentMessageSchema,
   agentModeSchema,
   agentGuidanceTextSchema,
+  agentPlanSchema,
   messageText,
   type AgentApprovalPart,
   type AgentApprovalStatus,
   type AgentErrorPart,
   type AgentMessage,
   type AgentPart,
+  type AgentPlan,
   type AgentThread,
   type AgentUsage
 } from "@ai-book-studio/core/agent/messages";
 import { compactHistory } from "@ai-book-studio/core/agent/history";
 import { contextBreakdown, type ContextBreakdown } from "@ai-book-studio/core/agent/context";
-import type { ThreadStore } from "@ai-book-studio/core/agent/threads";
+import { agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
+import { ThreadStoreError, type ThreadStore } from "@ai-book-studio/core/agent/threads";
 import { findModel, unavailableReason } from "@ai-book-studio/core/providers/models";
 import { isContributorModelId } from "@ai-book-studio/core/providers/compatibility";
 import { reportedCost } from "@ai-book-studio/core/providers/openrouter";
@@ -78,6 +87,9 @@ interface ActiveTurn {
   threadId: string;
   messageId: string;
   background: boolean;
+  /** The stored plan this turn continues, for same-process reattach. Never a persisted message field. */
+  planId?: string | undefined;
+  planRevision?: number | undefined;
   /** The chapter the author was looking at when the turn started, so a reopened window can return to it. */
   chapterId?: string | undefined;
   state: TurnState;
@@ -406,11 +418,28 @@ export class AgentRuntime {
     input = structuredClone(input);
     this.assertNotStopping(input.bookId);
     if (!agentModeSchema.safeParse(input.mode).success) {
-      throw new ProviderError("invalid-request", "Choose Discuss or Edit before sending this turn.");
+      throw agentTurnRefused("invalid-mode");
     }
-    if (input.guidance !== undefined && !agentGuidanceTextSchema.safeParse(input.guidance).success) {
-      throw new ProviderError("invalid-request", "One-turn guidance must contain 1–2,000 characters. Shorten it before sending.");
+
+    let planRef: AgentPlanTurnRef | undefined;
+    if (input.plan !== undefined) {
+      const parsed = agentPlanTurnRefSchema.safeParse(input.plan);
+      if (!parsed.success) throw agentTurnRefused("invalid-plan", { cause: parsed.error });
+      planRef = parsed.data;
+      if (input.mode !== "edit") throw agentTurnRefused("plan-in-discuss");
+      if (input.threadId === null || input.threadId === undefined) {
+        throw agentTurnRefused("plan-without-thread");
+      }
+      // A plan always appends an explicit author turn; an empty request cannot start one.
+      if (!input.prompt.trim()) {
+        throw new ProviderError("invalid-request", EMPTY_PROMPT_MESSAGE);
+      }
+    } else if (input.guidance !== undefined && (
+      !agentGuidanceTextSchema.safeParse(input.guidance).success || input.guidance.trim().length === 0
+    )) {
+      throw agentTurnRefused("invalid-guidance");
     }
+
     const library = this.studio.requireLibrary();
     const { book, chapters } = await library.readBook(input.bookId).catch((error: unknown) => {
       if (error instanceof LibraryError && error.code === "format" && /settings\.agent\.(tone|answerLength)/.test(error.message)) {
@@ -421,6 +450,42 @@ export class AgentRuntime {
     if (!agentSettingsSchema.safeParse(book.settings?.agent).success) {
       throw new ProviderError("invalid-request", "The book's agent guidance is invalid. Shorten tone to 500 characters and choose Brief, Standard or Detailed before sending.");
     }
+
+    // Resolve the stored plan before any provider read, model construction or write. Every plan
+    // refusal is decided here; the plan's own guidance is the only guidance a continuation uses.
+    let storedPlan: AgentPlan | null = null;
+    let effectiveGuidance = input.guidance;
+    if (planRef) {
+      const thread = await readPlanThread(library.threads, input.bookId, input.threadId!);
+      const found = thread.plans.find((plan) => plan.id === planRef!.id);
+      if (!found) throw agentTurnRefused("plan-not-found");
+      const parsedPlan = agentPlanSchema.safeParse(found);
+      if (!parsedPlan.success) throw agentTurnRefused("plan-invalid", { cause: parsedPlan.error });
+      const plan = parsedPlan.data;
+      if (plan.revision !== planRef.revision) throw agentTurnRefused("plan-stale-revision");
+      if (planRef.action === "start" && plan.status !== "proposed") {
+        throw agentTurnRefused("plan-not-startable");
+      }
+      if (planRef.action === "resume" && plan.status !== "paused") {
+        throw agentTurnRefused("plan-not-resumable");
+      }
+      // Step 9: the submitted guidance is the author's one-turn field; an invalid value is not
+      // allowed to hide behind an over-bound stored plan.
+      if (input.guidance !== undefined && (
+        !agentGuidanceTextSchema.safeParse(input.guidance).success || input.guidance.trim().length === 0
+      )) {
+        throw agentTurnRefused("invalid-guidance");
+      }
+      // Step 10: defense in depth for a plan that reached the runtime through a seam. The store's
+      // schema normally refuses an over-bound document at read as `corrupt` (`plan-invalid`).
+      if (agentPlanBoundsRefusal(plan) !== null) throw agentTurnRefused("plan-bounds");
+      // Step 11: only the reviewed proposal guidance may be used for this one turn.
+      const guidance = effectivePlanTurnGuidance(input.guidance, plan.guidance);
+      if (!guidance.ok) throw agentTurnRefused(guidance.refusal);
+      effectiveGuidance = guidance.guidance;
+      storedPlan = plan;
+    }
+
     const connectionId = input.model?.connectionId ?? book.defaultConnectionId;
     const modelId = input.model?.modelId ?? book.defaultModelId;
     if (!connectionId || !modelId) {
@@ -453,114 +518,179 @@ export class AgentRuntime {
     }
     const model = this.makeModel(credential, modelId);
     this.assertNotStopping(input.bookId);
-    const prepared = await prepareThread(library.threads, input);
-    await this.expireStaleApprovals(input.bookId, prepared.thread);
-    const activeChapter = input.chapterId ? (chapters.find((chapter) => chapter.id === input.chapterId) ?? null) : null;
-    const skills = await readBookSkills(
-      library.root,
-      input.bookId,
-      book.settings?.agent?.skillsEnabled !== false
-    );
-    const built = buildPrompt({ book, chapters, activeChapter, skills: skills?.text ?? null, mode: input.mode });
-    const compacted = compactHistory(prepared.thread).messages;
-    const messages = modelMessagesFor(compacted, input.guidance);
-    const context = contextBreakdown(
-      built.sections,
-      messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n")
-    );
-    const messageId = newId("msg");
-    const state: TurnState = {
-      phase: "active",
-      text: "",
-      reasoning: "",
-      toolParts: [],
-      approvals: [],
-      changes: [],
-      modelName,
-      inputTokens: 0,
-      outputTokens: 0,
-      cachedInputTokens: 0,
-      cacheReported: false,
-      costUsd: null,
-      contextLength,
-      context,
-      steps: 0,
-      createdAt: new Date().toISOString(),
-      checkpoint: { revision: 0, saved: 0, at: null, file: null, queue: Promise.resolve() },
-      proposed: new ProposedBases(library, input.bookId),
-      running: new Set(),
-      executions: new Set()
-    };
-    const turnId = newId("turn");
-    const cache = cachePrefixFor(
-      credential.provider,
-      book.settings?.cache?.prefixMode !== "off"
-    );
-    const tools = buildToolSet(library, input.bookId, {
-      mode: input.mode,
-      disabledTools: book.settings?.agent?.disabledTools ?? [],
-      pluginTools: input.mode === "edit" ? await this.pluginToolsFor() : [],
-      ...(cache.toolProviderOptions ? { toolProviderOptions: cache.toolProviderOptions } : {}),
-      proposed: state.proposed,
-      // Every change goes into the checkpoint as it is made, before the tool answers the model, so
-      // a change after a pause or a resume is as undoable as one before it.
-      onBeforeChange: async (change) => {
-        recordChange(state.changes, change);
-        state.checkpoint.revision += 1;
-        await this.saveCheckpoint(turnId, input, state);
+
+    // The first thread write is the confirmed Start/Resume. A caller creates a turn only on
+    // `applied`; `unchanged` is a duplicate or concurrent move, never success.
+    let planWrite: { thread: AgentThread; outcome: "applied" | "unchanged" } | null = null;
+    if (planRef && storedPlan) {
+      planWrite = await applyPlanTurn(
+        library.threads,
+        input.bookId,
+        input.threadId!,
+        storedPlan,
+        planRef.action
+      );
+      if (planWrite.outcome !== "applied") {
+        throw agentTurnRefused(planRef.action === "start" ? "plan-not-startable" : "plan-not-resumable");
       }
-    });
-    trackRunningCalls(tools, state, (id, name, toolInput) => this.recordToolStart(turnId, state, id, name, toolInput),
-      (id, name, output) => this.recordToolResult(turnId, input.bookId, state, id, name, output));
-    const agent = new ToolLoopAgent({
-      id: "chapter-writer",
-      model,
-      instructions: cache.systemProviderOptions
-        ? ({ role: "system", content: built.system, providerOptions: cache.systemProviderOptions } as const)
-        : built.system,
-      tools,
-      // The destructive tools are the ones the toolkit also keeps behind an explicit opt-in. A
-      // tool the author withdrew is not in the set, so it is not listed here either.
-      toolApproval: Object.fromEntries(
-        DESTRUCTIVE_TOOL_NAMES.filter((name) => name in tools).map((name) => [name, "user-approval"])
-      ) as Record<string, "user-approval">,
-      // A failed request is the author's to retry, not the loop's: the SDK must not hide a
-      // rate limit behind its own backoff and replays.
-      maxRetries: 0,
-      stopWhen: isStepCount(MAX_STEPS)
-    });
+    }
 
-    const controller = new AbortController();
-    this.assertNotStopping(input.bookId);
-    const active: ActiveTurn = {
-      controller,
-      bookId: input.bookId,
-      bookTitle: book.title,
-      threadId: prepared.thread.id,
-      messageId,
-      background: input.background === true,
-      chapterId: activeChapter?.id,
-      state,
-      completion: Promise.resolve()
-    };
-    this.active.set(turnId, active);
+    try {
+      const startedPlan = planWrite && storedPlan
+        ? confirmedStartedPlan(planWrite.thread, storedPlan)
+        : undefined;
+      const prepared = await prepareThread(
+        library.threads,
+        {
+          bookId: input.bookId,
+          threadId: input.threadId,
+          prompt: input.prompt,
+          history: input.history,
+          mode: input.mode,
+          guidance: effectiveGuidance
+        },
+        undefined,
+        { forceNew: planRef !== undefined }
+      );
+      await this.expireStaleApprovals(input.bookId, prepared.thread);
+      const activeChapter = input.chapterId ? (chapters.find((chapter) => chapter.id === input.chapterId) ?? null) : null;
+      const skills = await readBookSkills(
+        library.root,
+        input.bookId,
+        book.settings?.agent?.skillsEnabled !== false
+      );
+      const built = buildPrompt({ book, chapters, activeChapter, skills: skills?.text ?? null, mode: input.mode });
+      const compacted = compactHistory(prepared.thread).messages;
+      const messages = modelMessagesFor(compacted, effectiveGuidance);
+      const context = contextBreakdown(
+        built.sections,
+        messages.map((message) => typeof message.content === "string" ? message.content : "").join("\n")
+      );
+      const messageId = newId("msg");
+      const state: TurnState = {
+        phase: "active",
+        text: "",
+        reasoning: "",
+        toolParts: [],
+        approvals: [],
+        changes: [],
+        modelName,
+        inputTokens: 0,
+        outputTokens: 0,
+        cachedInputTokens: 0,
+        cacheReported: false,
+        costUsd: null,
+        contextLength,
+        context,
+        steps: 0,
+        createdAt: new Date().toISOString(),
+        checkpoint: { revision: 0, saved: 0, at: null, file: null, queue: Promise.resolve() },
+        proposed: new ProposedBases(library, input.bookId),
+        running: new Set(),
+        executions: new Set()
+      };
+      const turnId = newId("turn");
+      const cache = cachePrefixFor(
+        credential.provider,
+        book.settings?.cache?.prefixMode !== "off"
+      );
+      const tools = buildToolSet(library, input.bookId, {
+        mode: input.mode,
+        disabledTools: book.settings?.agent?.disabledTools ?? [],
+        pluginTools: input.mode === "edit" ? await this.pluginToolsFor() : [],
+        ...(cache.toolProviderOptions ? { toolProviderOptions: cache.toolProviderOptions } : {}),
+        proposed: state.proposed,
+        // Every change goes into the checkpoint as it is made, before the tool answers the model, so
+        // a change after a pause or a resume is as undoable as one before it.
+        onBeforeChange: async (change) => {
+          recordChange(state.changes, change);
+          state.checkpoint.revision += 1;
+          await this.saveCheckpoint(turnId, input, state);
+        }
+      });
+      trackRunningCalls(tools, state, (id, name, toolInput) => this.recordToolStart(turnId, state, id, name, toolInput),
+        (id, name, output) => this.recordToolResult(turnId, input.bookId, state, id, name, output));
+      const agent = new ToolLoopAgent({
+        id: "chapter-writer",
+        model,
+        instructions: cache.systemProviderOptions
+          ? ({ role: "system", content: built.system, providerOptions: cache.systemProviderOptions } as const)
+          : built.system,
+        tools,
+        // The destructive tools are the ones the toolkit also keeps behind an explicit opt-in. A
+        // tool the author withdrew is not in the set, so it is not listed here either.
+        toolApproval: Object.fromEntries(
+          DESTRUCTIVE_TOOL_NAMES.filter((name) => name in tools).map((name) => [name, "user-approval"])
+        ) as Record<string, "user-approval">,
+        // A failed request is the author's to retry, not the loop's: the SDK must not hide a
+        // rate limit behind its own backoff and replays.
+        maxRetries: 0,
+        stopWhen: isStepCount(MAX_STEPS)
+      });
 
-    active.completion = this.run(
-      turnId,
-      input,
-      agent,
-      messages,
-      controller,
-      prepared.thread.id,
-      library.threads,
-      credential.provider,
-      connectionId,
-      credential.label,
-      modelId,
-      messageId,
-      state
-    );
-    return { turnId, threadId: prepared.thread.id };
+      const controller = new AbortController();
+      this.assertNotStopping(input.bookId);
+      const active: ActiveTurn = {
+        controller,
+        bookId: input.bookId,
+        bookTitle: book.title,
+        threadId: prepared.thread.id,
+        messageId,
+        background: input.background === true,
+        ...(startedPlan ? { planId: startedPlan.id, planRevision: startedPlan.revision } : {}),
+        chapterId: activeChapter?.id,
+        state,
+        completion: Promise.resolve()
+      };
+      this.active.set(turnId, active);
+
+      active.completion = this.run(
+        turnId,
+        input,
+        agent,
+        messages,
+        controller,
+        prepared.thread.id,
+        library.threads,
+        credential.provider,
+        connectionId,
+        credential.label,
+        modelId,
+        messageId,
+        state
+      );
+      return {
+        turnId,
+        threadId: prepared.thread.id,
+        mode: input.mode,
+        ...(startedPlan ? { plan: startedPlan } : {})
+      };
+    } catch (error) {
+      // The plan start/resume write already happened. A setup failure before the provider request
+      // attempts one fail transition so a running plan is not left without a turn; no user message
+      // is deleted and no automatic retry is made.
+      if (!planWrite || !storedPlan) throw error;
+      const failed = await this.failPlanAfterSetupFailure(input.bookId, input.threadId!, storedPlan.id);
+      throw new ProviderError(
+        "invalid-request",
+        failed
+          ? "The turn did not start. Its plan was marked failed; review the conversation before continuing."
+          : "The turn did not start, and its plan could not be marked failed. Reload the conversation before continuing.",
+        { cause: error }
+      );
+    }
+  }
+
+  /** One start-path compensation; `unchanged` means the plan was already failed. */
+  private async failPlanAfterSetupFailure(bookId: string, threadId: string, planId: string): Promise<boolean> {
+    try {
+      const { outcome } = await this.studio.requireLibrary().threads.applyPlanEvent(bookId, threadId, planId, {
+        type: "fail"
+      });
+      return outcome === "applied" || outcome === "unchanged";
+    } catch {
+      return false;
+    }
   }
 
   private assertNotStopping(bookId: string): void {
@@ -1029,6 +1159,92 @@ export class AgentRuntime {
   }
 }
 
+/** Fixed text shared by the early plan-turn prompt check and `prepareThread`'s ordinary check. */
+const EMPTY_PROMPT_MESSAGE = "Write a message before asking the agent to work.";
+
+/** Read the named conversation only; a plan id is never looked up in another thread or book. */
+async function readPlanThread(store: ThreadStore, bookId: string, threadId: string): Promise<AgentThread> {
+  try {
+    const thread = await store.read(bookId, threadId);
+    if (!thread) throw agentTurnRefused("plan-not-found");
+    return thread;
+  } catch (error) {
+    if (error instanceof AgentTurnRefusedError) throw error;
+    throw planReadRefusal(error);
+  }
+}
+
+/** Apply exactly one Start or Resume through the checked store mutation. */
+function applyPlanTurn(
+  store: ThreadStore,
+  bookId: string,
+  threadId: string,
+  plan: AgentPlan,
+  action: "start" | "resume"
+): Promise<{ thread: AgentThread; outcome: "applied" | "unchanged" }> {
+  return store
+    .applyPlanEvent(
+      bookId,
+      threadId,
+      plan.id,
+      action === "start" ? { type: "start", revision: plan.revision } : { type: "resume" }
+    )
+    .catch((error: unknown) => {
+      throw planEventRefusal(error);
+    });
+}
+
+/** The confirmed `running` snapshot returned only after the Start/Resume write applied. */
+function confirmedStartedPlan(
+  thread: AgentThread,
+  plan: AgentPlan
+): { id: string; revision: number; status: "running" } {
+  const stored = thread.plans.find((entry) => entry.id === plan.id);
+  const parsed = agentPlanSchema.safeParse(stored);
+  if (!parsed.success || parsed.data.status !== "running") {
+    throw new Error("The conversation store did not confirm the plan's running state.");
+  }
+  return { id: parsed.data.id, revision: parsed.data.revision, status: "running" };
+}
+
+/** A missing conversation is `plan-not-found`; an unreadable one keeps the store's safe sentence. */
+function planReadRefusal(error: unknown): AgentTurnRefusedError {
+  if (error instanceof ThreadStoreError) {
+    if (error.code === "not-found") return agentTurnRefused("plan-not-found", { cause: error });
+    return new AgentTurnRefusedError(
+      "plan-invalid",
+      error.message.trim() || AGENT_TURN_REFUSAL_MESSAGES["plan-invalid"],
+      { cause: error }
+    );
+  }
+  return agentTurnRefused("plan-invalid", { cause: error });
+}
+
+/** A refused, conflicted, uncertain or failed Start/Resume is `plan-state`, never applied. */
+function planEventRefusal(error: unknown): AgentTurnRefusedError {
+  if (error instanceof ThreadStoreError) {
+    if (error.code === "not-found") return agentTurnRefused("plan-not-found", { cause: error });
+    if (
+      error.code === "corrupt" ||
+      error.code === "unsupported" ||
+      error.code === "newer" ||
+      error.code === "too-large"
+    ) {
+      return new AgentTurnRefusedError(
+        "plan-invalid",
+        error.message.trim() || AGENT_TURN_REFUSAL_MESSAGES["plan-invalid"],
+        { cause: error }
+      );
+    }
+    return new AgentTurnRefusedError(
+      "plan-state",
+      error.message.trim() || AGENT_TURN_REFUSAL_MESSAGES["plan-state"],
+      { cause: error }
+    );
+  }
+  return agentTurnRefused("plan-state", { cause: error });
+}
+
 /** Keep the existing on-disk bounds without shortening a provider's requested wait. */
 function storedFailure(code: string, detail: string, checkpointNote: string, wait: number | undefined): AgentErrorPart {
   const numericWait = wait !== undefined && wait <= AGENT_ERROR_LIMITS.retryAfterSeconds;
@@ -1053,11 +1269,12 @@ function storedFailure(code: string, detail: string, checkpointNote: string, wai
 export async function prepareThread(
   store: ThreadStore,
   input: Pick<AgentTurnInput, "bookId" | "threadId" | "prompt" | "history"> & Partial<Pick<AgentTurnInput, "mode" | "guidance">>,
-  now: () => string = () => new Date().toISOString()
+  now: () => string = () => new Date().toISOString(),
+  options: { forceNew?: boolean } = {}
 ): Promise<{ thread: AgentThread; reused: boolean }> {
   const prompt = input.prompt.trim();
   if (!prompt) {
-    throw new ProviderError("invalid-request", "Write a message before asking the agent to work.");
+    throw new ProviderError("invalid-request", EMPTY_PROMPT_MESSAGE);
   }
   const at = now();
   const userMessage = agentMessageSchema.parse({
@@ -1082,7 +1299,7 @@ export async function prepareThread(
   const lastUserIndex = thread.messages.findLastIndex((message) => message.role === "user");
   const last = thread.messages[lastUserIndex];
   const failedAttempts = thread.messages.slice(lastUserIndex + 1);
-  if (last && messageText(last) === prompt && last.mode === input.mode &&
+  if (!options.forceNew && last && messageText(last) === prompt && last.mode === input.mode &&
     last.parts.find((part) => part.type === "guidance")?.text === input.guidance &&
     failedAttempts.every((message) => message.role === "assistant" &&
       message.parts.some((part) => part.type === "error" && part.code !== "stopped"))) {
