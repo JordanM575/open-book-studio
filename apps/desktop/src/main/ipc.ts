@@ -1395,6 +1395,7 @@ export function registerIpc(
     mode: agentModeSchema,
     guidance: agentGuidanceTextSchema.optional(),
     plan: agentPlanTurnRefSchema.optional(),
+    planProposal: z.boolean().optional(),
     threadId: idSchema.nullable().optional(),
     background: z.boolean().optional(),
     model: z

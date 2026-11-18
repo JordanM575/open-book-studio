@@ -2,9 +2,14 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { simulateReadableStream } from "ai";
+import { simulateReadableStream, tool } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
+import { z } from "zod";
 import type { AgentEvent, AgentTurnInput } from "@ai-book-studio/core/agent";
+import {
+  PLAN_STEP_TOOL_NAME,
+  PROPOSE_PLAN_TOOL_NAME
+} from "@ai-book-studio/core/agent/plan-tools";
 import { DEFAULT_AGENT_SETTINGS } from "@ai-book-studio/core/agent/settings";
 import type { ProviderService } from "../src/main/providers";
 import type { Studio } from "../src/main/studio";
@@ -149,7 +154,9 @@ describe("Discuss runtime boundary", () => {
       [{ bookId, prompt: "Read", mode: "edit", guidance: "" }, "invalid-guidance"],
       [{ bookId, prompt: "Read", mode: "edit", guidance: "   " }, "invalid-guidance"],
       [{ bookId, prompt: "Read", mode: "discuss", plan }, "plan-in-discuss"],
-      [{ bookId, prompt: "Read", mode: "edit", plan }, "plan-without-thread"]
+      [{ bookId, prompt: "Read", mode: "edit", plan }, "plan-without-thread"],
+      [{ bookId, prompt: "Propose", mode: "discuss", planProposal: true }, "plan-in-discuss"],
+      [{ bookId, prompt: "Propose", mode: "edit", planProposal: true, plan }, "invalid-plan"]
     ];
     for (const [input, refusal] of cases) {
       await expect(runtime.start(input as AgentTurnInput)).rejects.toMatchObject({
@@ -171,6 +178,73 @@ describe("Discuss runtime boundary", () => {
     await expect(runtime.start({ bookId, mode: "discuss", prompt: "Read" })).rejects.toThrow(/tone/);
     expect(providerReads).toBe(0);
     expect(await readFile(path, "utf8")).toBe(raw);
+  });
+});
+
+describe("plan tool sets", () => {
+  const fakeStep = tool({
+    description: "Synthetic step boundary",
+    inputSchema: z.object({ step: z.number() }),
+    execute: async () => ({ ok: true })
+  });
+  const fakeProposal = tool({
+    description: "Synthetic proposal",
+    inputSchema: z.object({ purpose: z.string(), steps: z.array(z.string()) }),
+    execute: async () => ({ ok: true })
+  });
+
+  test("a proposal turn offers only the enabled reads plus propose_plan and loads no plugin", async () => {
+    let pluginCalls = 0;
+    const tools = buildToolSet(library, bookId, {
+      mode: "edit",
+      disabledTools: ["table_of_contents"],
+      pluginTools: [{
+        name: "plugin_write",
+        description: "Synthetic",
+        parameters: { type: "object" },
+        handler: () => { pluginCalls++; }
+      }],
+      planProposal: { proposeTool: fakeProposal as never }
+    });
+    expect(Object.keys(tools).sort()).toEqual(
+      [...READ_TOOL_NAMES.filter((name) => name !== "table_of_contents"), PROPOSE_PLAN_TOOL_NAME].sort()
+    );
+    expect(PROPOSE_PLAN_TOOL_NAME in tools).toBe(true);
+    expect("append_to_chapter" in tools).toBe(false);
+    expect("plugin_write" in tools).toBe(false);
+    expect(pluginCalls).toBe(0);
+  });
+
+  test("a plan turn is the Edit set plus plan_step; plan_step survives disabled and plugin shadowing", async () => {
+    const tools = buildToolSet(library, bookId, {
+      mode: "edit",
+      disabledTools: ["append_to_chapter", PLAN_STEP_TOOL_NAME],
+      pluginTools: [{
+        name: PLAN_STEP_TOOL_NAME,
+        description: "Synthetic shadow",
+        parameters: { type: "object" },
+        handler: () => {}
+      }],
+      plan: { stepTool: fakeStep as never, gate: () => null }
+    });
+    const names = Object.keys(tools);
+    expect(names).toContain(PLAN_STEP_TOOL_NAME);
+    expect(names).not.toContain(PROPOSE_PLAN_TOOL_NAME);
+    expect(names).not.toContain("append_to_chapter");
+    expect(tools[PLAN_STEP_TOOL_NAME]).toBe(fakeStep as never);
+  });
+
+  test("the plan gate refuses an ordinary tool with a result before it executes", async () => {
+    const before = await library.readChapter(bookId, chapterId);
+    const refusal = "Call plan_step with the next step before doing the work. Nothing changed.";
+    const tools = buildToolSet(library, bookId, {
+      mode: "edit",
+      plan: { stepTool: fakeStep as never, gate: () => refusal }
+    });
+    const execute = tools.append_to_chapter?.execute;
+    const output = await execute!({ chapterId, text: "A gated change." }, { toolCallId: "call-gate", messages: [] } as never);
+    expect(output).toMatchObject({ ok: false, message: refusal });
+    expect((await library.readChapter(bookId, chapterId)).content).toBe(before.content);
   });
 });
 

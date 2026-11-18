@@ -150,6 +150,17 @@ authorized; no task requires a live provider, credential, paid service, real man
 - [ ] T014 Add Start plan and confirmed per-step progress using D-178's accepted new-turn continuation
   semantics. The model/runtime must report only observed outcomes; tests cover completed, skipped
   and not-completed steps using scripted events.
+  Partial: the main-process runtime and contract slice runs a stored plan as one new Edit turn.
+  Start keeps the identity-only ref and its pre-flight, emits no plan notice, and acknowledges the
+  confirmed `running` state only through the turn-start result. A read-only Edit proposal turn
+  stores its assistant message, then adds the plan and emits one `proposed` notice; a missing or
+  invalid proposal and a failed add leave no plan. `plan_step` accepts one strict 1-based integer,
+  writes only `in-progress`, and the runtime closes each step `completed` only from at least one
+  successful observed tool result and zero failures, otherwise `not-completed`. Approval request
+  and settled writes precede publishing and resuming, completion requires every step completed and
+  the complete write applied, and a plan write failure ends as `plan-state` rather than completed.
+  Pause, resume ownership, cancel and expiry remain T015-T017. The plan control, plan card and
+  composer wiring remain a follow-up slice, and this task stays open.
 - [ ] T015 Add Pause and Resume according to T002. A requested pause is not shown as complete until
   the runtime confirms the boundary; no later tool may start while paused. Use a synthetic in-flight
   tool fixture to cover the chosen boundary.

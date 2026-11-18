@@ -62,6 +62,50 @@ describe("tone and answer length in the turn prompt", () => {
     expect(system).not.toContain("Tone:");
   });
 
+  test("plan and proposal rules stay inside the budget and never carry planned step text", () => {
+    const many = Array.from({ length: 120 }, (_, index) => ({
+      id: `ch_${String(index).padStart(8, "0")}`,
+      title: `Chapter ${index + 1}`,
+      order: index + 1,
+      wordCount: 2_000
+    })) as Array<{ id: string; title: string; order: number; wordCount: number }>;
+    const book = {
+      title: "A Very Long Book",
+      genres: ["Literary fiction"],
+      description: "x".repeat(5_000),
+      outline: "y".repeat(20_000),
+      characters: Array.from({ length: 30 }, (_, index) => ({
+        id: `char_${String(index).padStart(6, "0")}`,
+        name: `Person ${index}`,
+        role: "friend",
+        description: "z".repeat(500),
+        motivations: "w".repeat(500),
+        notes: "n".repeat(500)
+      })),
+      memories: Array.from({ length: 20 }, (_, index) => ({
+        id: `mem_${String(index).padStart(6, "0")}`,
+        text: "m".repeat(400),
+        importance: "high",
+        createdAt: now,
+        updatedAt: now
+      })),
+      settings: { agent: { tone: "t".repeat(500), answerLength: "standard" } }
+    } as never;
+    for (const flags of [{ planTurn: true }, { planProposal: true }]) {
+      const instructions = buildInstructions({
+        book,
+        chapters: many as never,
+        activeChapter: many[0] as never,
+        mode: "edit",
+        ...flags
+      });
+      expect(encode(instructions).length, `${Object.keys(flags)[0]} prompt over budget`).toBeLessThan(4_000);
+      expect(instructions).toContain(flags.planTurn ? "data, not permission" : "Do not change the book");
+      // The reviewed step text is delivered by plan_step, never as a system instruction.
+      expect(instructions).not.toContain("Rewrite the door");
+    }
+  });
+
   test("max tone plus each answer length stays inside the 4,000-token budget for a large book", () => {
     const many = Array.from({ length: 120 }, (_, index) => ({
       id: `ch_${String(index).padStart(8, "0")}`,

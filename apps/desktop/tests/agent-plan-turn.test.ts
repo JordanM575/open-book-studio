@@ -65,6 +65,27 @@ function modelFor() {
   return new MockLanguageModelV4({ doStream: [reply()] });
 }
 
+function planCall(name: string, input: unknown, id: number) {
+  return {
+    stream: simulateReadableStream({ chunks: [
+      { type: "stream-start" as const, warnings: [] },
+      { type: "tool-call" as const, toolCallId: `plan-call-${id}`, toolName: name, input: JSON.stringify(input) },
+      { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: undefined }, usage: USAGE }
+    ] })
+  };
+}
+
+/** A reviewed two-step plan: each step observes one successful read, then the turn ends. */
+function planModel() {
+  return new MockLanguageModelV4({ doStream: [
+    planCall("plan_step", { step: 1 }, 1),
+    planCall("chapter_stats", { chapterId }, 2),
+    planCall("plan_step", { step: 2 }, 3),
+    planCall("chapter_stats", { chapterId }, 4),
+    reply()
+  ] });
+}
+
 function runtimeFor(model: MockLanguageModelV4) {
   const events: AgentEvent[] = [];
   let factoryCalls = 0;
@@ -415,16 +436,16 @@ describe("plan turn pre-flight", () => {
 
   test("refuses a duplicate Start with one turn, one user message and one factory call", async () => {
     const threadId = await seedPlan();
-    const model = modelFor();
+    const model = planModel();
     const { runtime, factoryCalls } = runtimeFor(model);
     const started = await finish(runtime, planInput(threadId, "start"));
     expect(started.plan).toMatchObject({ id: PLAN_ID, revision: 1, status: "running" });
     expect((await refusalOf(runtime.start(planInput(threadId, "start")))).refusal).toBe("plan-not-startable");
     const thread = await library.threads.read(bookId, threadId);
     expect(thread?.messages.filter((message) => message.role === "user")).toHaveLength(1);
-    expect(planOf(thread)?.status).toBe("running");
+    expect(planOf(thread)?.status).toBe("completed");
     expect(factoryCalls()).toBe(1);
-    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doStreamCalls).toHaveLength(5);
   });
 
   test("refuses blank or over-bound turn guidance before any provider read", async () => {
@@ -478,7 +499,7 @@ describe("plan turn pre-flight", () => {
 describe("plan start and resume", () => {
   test("uses the stored plan guidance once without carrying it to the next turn", async () => {
     const threadId = await seedPlan({ guidance: PLAN_GUIDANCE });
-    const model = modelFor();
+    const model = planModel();
     const { runtime, events } = runtimeFor(model);
     const started = await finish(runtime, planInput(threadId, "start", { guidance: undefined }));
     expect(started).toMatchObject({ mode: "edit", plan: { id: PLAN_ID, revision: 1, status: "running" } });
@@ -489,9 +510,10 @@ describe("plan start and resume", () => {
     const sent = model.doStreamCalls[0]?.prompt;
     expect(JSON.stringify(sent?.find((message) => message.role === "system"))).not.toContain(PLAN_GUIDANCE);
     expect(JSON.stringify(sent?.find((message) => message.role === "user"))).toContain(PLAN_GUIDANCE);
-    expect(model.doStreamCalls).toHaveLength(1);
-    expect(events.some((event) => event.type === "plan" || event.type === "plan-step" || event.type === "plan-error"))
-      .toBe(false);
+    expect(model.doStreamCalls).toHaveLength(5);
+    expect(events.filter((event) => event.type === "plan").map((event) => event.type === "plan" ? event.change : null))
+      .toEqual(["complete"]);
+    expect(events.some((event) => event.type === "plan-error")).toBe(false);
 
     const next = modelFor();
     await finish(runtimeFor(next).runtime, {
@@ -503,13 +525,13 @@ describe("plan start and resume", () => {
     expect(JSON.stringify(next.doStreamCalls[0]?.prompt)).not.toContain(PLAN_GUIDANCE);
   });
 
-  test("accepts the reviewed guidance repeated exactly once and keeps the Edit tool set", async () => {
+  test("accepts the reviewed guidance repeated exactly once and keeps the Edit tool set plus plan_step", async () => {
     const baselineModel = modelFor();
     const baseline = runtimeFor(baselineModel);
     await finish(baseline.runtime, { bookId, mode: "edit", prompt: "An ordinary edit" });
     const baselineDone = baseline.events.find((event) => event.type === "done");
     const threadId = await seedPlan({ guidance: PLAN_GUIDANCE });
-    const model = modelFor();
+    const model = planModel();
     const run = runtimeFor(model);
     const started = await finish(run.runtime, planInput(threadId, "start", { guidance: PLAN_GUIDANCE }));
     const thread = await library.threads.read(bookId, threadId);
@@ -519,7 +541,7 @@ describe("plan start and resume", () => {
     ]);
     expect(JSON.stringify(model.doStreamCalls[0]?.prompt)).toContain(PLAN_GUIDANCE);
     expect(model.doStreamCalls[0]?.tools?.map((tool) => tool.name).sort())
-      .toEqual(baselineModel.doStreamCalls[0]?.tools?.map((tool) => tool.name).sort());
+      .toEqual([...(baselineModel.doStreamCalls[0]?.tools?.map((tool) => tool.name) ?? []), "plan_step"].sort());
     expect(started.mode).toBe("edit");
     const planDone = run.events.find((event) => event.type === "done");
     expect(planDone?.type === "done" ? planDone.model.modelId : null)
@@ -528,7 +550,7 @@ describe("plan start and resume", () => {
 
   test("omits guidance when neither the turn nor the plan names one", async () => {
     const threadId = await seedPlan();
-    const model = modelFor();
+    const model = planModel();
     const { runtime } = runtimeFor(model);
     await finish(runtime, planInput(threadId, "start"));
     const thread = await library.threads.read(bookId, threadId);
@@ -565,19 +587,20 @@ describe("plan start and resume", () => {
   test("Start appends a new user message even when an earlier failed attempt matches", async () => {
     const threadId = await seedPlan({ guidance: PLAN_GUIDANCE, failedAttempt: true });
     const before = await library.threads.read(bookId, threadId);
-    const model = modelFor();
+    const model = planModel();
     const { runtime, events } = runtimeFor(model);
     const started = await finish(runtime, planInput(threadId, "start", { guidance: PLAN_GUIDANCE }));
     const thread = await library.threads.read(bookId, threadId);
     expect(thread?.messages.length).toBe((before?.messages.length ?? 0) + 2);
     expect(thread?.messages.at(-2)).toMatchObject({ role: "user", mode: "edit" });
     expect(thread?.messages.at(-1)).toMatchObject({ role: "assistant", mode: "edit" });
-    expect(planOf(thread)).toMatchObject({ status: "running", revision: 1 });
+    expect(planOf(thread)).toMatchObject({ status: "completed", revision: 1 });
     expect(planOf(thread)?.startedAt).toBeTruthy();
     expect(started.plan).toMatchObject({ id: PLAN_ID, revision: 1, status: "running" });
-    expect(model.doStreamCalls).toHaveLength(1);
-    expect(events.some((event) => event.type === "plan" || event.type === "plan-step" || event.type === "plan-error"))
-      .toBe(false);
+    expect(model.doStreamCalls).toHaveLength(5);
+    expect(events.filter((event) => event.type === "plan").map((event) => event.type === "plan" ? event.change : null))
+      .toEqual(["complete"]);
+    expect(events.some((event) => event.type === "plan-error")).toBe(false);
   });
 
   test("Resume appends a fresh turn, preserves the plan and inherits no approval", async () => {
@@ -590,11 +613,11 @@ describe("plan start and resume", () => {
     expect(planOf(paused)).toMatchObject({ status: "paused", revision: 1, startedAt });
     const messagesBefore = paused?.messages.length ?? 0;
 
-    const model = modelFor();
+    const model = planModel();
     const { runtime, events } = runtimeFor(model);
     const started = await finish(runtime, planInput(threadId, "resume", { guidance: PLAN_GUIDANCE }));
     const thread = await library.threads.read(bookId, threadId);
-    expect(planOf(thread)).toMatchObject({ status: "running", revision: 1, startedAt });
+    expect(planOf(thread)).toMatchObject({ status: "completed", revision: 1, startedAt });
     expect(thread?.messages.length).toBe(messagesBefore + 2);
     expect(thread?.messages.at(-2)?.parts).toContainEqual({ type: "guidance", text: PLAN_GUIDANCE });
     expect(started.plan).toMatchObject({ id: PLAN_ID, revision: 1, status: "running" });
@@ -603,12 +626,12 @@ describe("plan start and resume", () => {
     expect(approval).toMatchObject({ type: "approval", status: "expired" });
     expect(JSON.stringify(model.doStreamCalls[0]?.prompt)).not.toContain("approval-old");
     expect(events.some((event) => event.type === "approval")).toBe(false);
-    expect(model.doStreamCalls).toHaveLength(1);
+    expect(model.doStreamCalls).toHaveLength(5);
   });
 
   test("captures mode, guidance, plan id and revision before the first await", async () => {
     const threadId = await seedPlan({ guidance: PLAN_GUIDANCE });
-    const model = modelFor();
+    const model = planModel();
     const { runtime } = runtimeFor(model);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let off = () => {};
@@ -633,7 +656,7 @@ describe("plan start and resume", () => {
       const user = thread?.messages.findLast((message) => message.role === "user");
       expect(user).toMatchObject({ mode: "edit" });
       expect(user?.parts).toContainEqual({ type: "guidance", text: PLAN_GUIDANCE });
-      expect(planOf(thread)).toMatchObject({ id: PLAN_ID, status: "running", revision: 1 });
+      expect(planOf(thread)).toMatchObject({ id: PLAN_ID, status: "completed", revision: 1 });
       expect(JSON.stringify(model.doStreamCalls[0]?.prompt)).not.toContain("MUTATED AFTER SUBMISSION");
     } finally {
       clearTimeout(timer);

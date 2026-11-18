@@ -6,7 +6,11 @@ import {
   type PluginParameters,
   type PluginTool
 } from "@ai-book-studio/core/agent/plugins";
-import { createChapterTools, type ChapterChange, type ProposedBases } from "./tools";
+import {
+  PLAN_STEP_TOOL_NAME,
+  PROPOSE_PLAN_TOOL_NAME
+} from "@ai-book-studio/core/agent/plan-tools";
+import { createChapterTools, READ_TOOL_NAMES, type ChapterChange, type ProposedBases } from "./tools";
 import type { ProviderOptions } from "./cache";
 import type { Library } from "../library/store";
 import type { AgentMode } from "@ai-book-studio/core/agent/messages";
@@ -37,16 +41,33 @@ export function buildToolSet(
      * nowhere else (FR-001).
      */
     toolProviderOptions?: ProviderOptions;
+    /**
+     * The plan turn's `plan_step` and its ordinary-tool gate. Present only on a Start or Resume
+     * turn. The plan tools are never disabled by the author's tool settings and are never
+     * shadowed by a plugin.
+     */
+    plan?: {
+      stepTool: ToolSet[string];
+      /** A fixed refusal when a book tool cannot be attributed to a reviewed step. */
+      gate: () => string | null;
+    };
+    /**
+     * The read-only proposal turn's `propose_plan`. Its presence makes the built-in set the six
+     * read tools only and loads no plugins.
+     */
+    planProposal?: { proposeTool: ToolSet[string] };
   } = {}
 ): ToolSet {
   const disabled = new Set(options.disabledTools ?? []);
   const mode = options.mode ?? "edit";
+  const proposal = options.planProposal !== undefined;
   const tools: ToolSet = Object.create(null);
   for (const [name, definition] of Object.entries(createChapterTools(library, bookId, options.onBeforeChange, options.proposed))) {
     if (disabled.has(name) || !modeAllowsTool(mode, name)) continue;
+    if (proposal && !(READ_TOOL_NAMES as readonly string[]).includes(name)) continue;
     tools[name] = definition as ToolSet[string];
   }
-  for (const plugin of mode === "edit" ? options.pluginTools ?? [] : []) {
+  for (const plugin of mode === "edit" && !proposal ? options.pluginTools ?? [] : []) {
     if (disabled.has(plugin.name)) continue;
     if (plugin.name in tools) continue;
     tools[plugin.name] = tool({
@@ -72,6 +93,29 @@ export function buildToolSet(
       if (disabled.has(name) || !modeAllowsTool(mode, name)) throw new Error(DISCUSS_NEXT_STEP);
       return execute(input, context);
     };
+  }
+  // Every ordinary book tool on a plan turn needs an active reviewed step. The refusal is a tool
+  // result, so it fails the call without failing the active step or writing plan state.
+  if (options.plan) {
+    const gate = options.plan.gate;
+    for (const [name, definition] of Object.entries(tools)) {
+      if (name === PLAN_STEP_TOOL_NAME) continue;
+      const execute = definition.execute;
+      if (!execute) continue;
+      definition.execute = async (input, context) => {
+        const refusal = gate();
+        if (refusal) return { ok: false, message: refusal } as never;
+        return execute(input, context);
+      };
+    }
+  }
+  // The plan control tools come last: a plugin cannot shadow them, and the author's disabled-tool
+  // settings never remove them.
+  if (mode === "edit" && options.plan) {
+    tools[PLAN_STEP_TOOL_NAME] = options.plan.stepTool;
+  }
+  if (mode === "edit" && options.planProposal) {
+    tools[PROPOSE_PLAN_TOOL_NAME] = options.planProposal.proposeTool;
   }
   if (options.toolProviderOptions) {
     const names = Object.keys(tools);

@@ -1,9 +1,14 @@
 import type { BookMeta, Chapter, Character, Memory } from "@ai-book-studio/core/schema";
 import type { AgentMode } from "@ai-book-studio/core/agent/messages";
+import { PLAN_PROPOSAL_RULE, PLAN_TURN_RULE } from "@ai-book-studio/core/agent/plan-tools";
 import { DISCUSS_NEXT_STEP } from "./mode";
 
 export interface PromptInput {
   mode?: AgentMode;
+  /** A Start or Resume turn that runs a reviewed plan. The step text is never in this prompt. */
+  planTurn?: boolean;
+  /** The read-only Edit turn that may propose a plan. */
+  planProposal?: boolean;
   book: BookMeta;
   chapters: Chapter[];
   activeChapter: Chapter | null;
@@ -37,6 +42,7 @@ export type PromptSectionId =
   | "skills"
   | "voice"
   | "interaction"
+  | "plan"
   | "guard"
   | "book"
   | "outline"
@@ -63,7 +69,7 @@ export interface BuiltPrompt {
  * The writing agent's system text in named sections. Kept short and testable; the tools describe
  * their own limits. Nothing here addresses the author — that is the model's reply, in its own words.
  */
-export function buildPrompt({ book, chapters, activeChapter, skills, mode }: PromptInput): BuiltPrompt {
+export function buildPrompt({ book, chapters, activeChapter, skills, mode, planTurn, planProposal }: PromptInput): BuiltPrompt {
   const outline = truncate(book.outline, MAX_OUTLINE);
   const characters = book.characters ?? [];
   const memories = book.memories ?? [];
@@ -133,6 +139,13 @@ export function buildPrompt({ book, chapters, activeChapter, skills, mode }: Pro
     { id: "voice", label: "Author's voice", text: voice },
     { id: "interaction", label: "Turn mode and guidance", text: interaction },
     {
+      id: "plan",
+      label: "Plan turn",
+      // Fixed host-authored rule only. Purpose and step text are delivered one step at a time as
+      // plan_step tool output, never as standing instructions.
+      text: planProposal ? PLAN_PROPOSAL_RULE : planTurn ? PLAN_TURN_RULE : ""
+    },
+    {
       id: "skills",
       label: "Author's skills",
       text: skills?.trim()
@@ -177,7 +190,7 @@ export function buildPrompt({ book, chapters, activeChapter, skills, mode }: Pro
 
   // The instructions, the author's own skills file and the guard are trusted. Everything else comes
   // from the book's content, which is data the agent must not obey (FR-006).
-  const trusted = new Set<PromptSectionId>(["instructions", "skills", "voice", "interaction", "guard"]);
+  const trusted = new Set<PromptSectionId>(["instructions", "skills", "voice", "interaction", "plan", "guard"]);
   const measured = sections.map((section) =>
     trusted.has(section.id) ? section : { ...section, text: escapeDelimiters(section.text) }
   );
