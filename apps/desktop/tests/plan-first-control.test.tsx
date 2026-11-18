@@ -300,6 +300,49 @@ function renderChat(options: {
   };
 }
 
+type DoneEvent = Extract<AgentEvent, { type: "done" }>;
+
+/**
+ * Send one Edit turn through the composer so the panel owns a live assistant message. The terminal
+ * event then patches that message by id, exactly as it does in the app; the stored plan stays the
+ * card's only source of status and steps.
+ */
+async function startFailureTurn(
+  chat: ReturnType<typeof renderChat>,
+  view: ReturnType<typeof testing.within>
+): Promise<void> {
+  testing.fireEvent.change(view.getByTestId("agent-mode"), { target: { value: "edit" } });
+  const input = view.getByTestId("chat-input");
+  testing.fireEvent.change(input, { target: { value: "Continue the reviewed plan." } });
+  await testing.act(async () => {
+    testing.fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+  });
+  await testing.waitFor(() => expect(chat.start).toHaveBeenCalledTimes(1));
+}
+
+function doneEvent(overrides: Partial<DoneEvent> = {}): DoneEvent {
+  return {
+    type: "done",
+    turnId: START_TURN,
+    text: "Finished.",
+    model: { provider: "openrouter", modelId: "test-model", connectionLabel: "Test connection", name: "Test Model" },
+    inputTokens: 10,
+    outputTokens: 2,
+    costUsd: null,
+    costBasis: "unknown",
+    contextLength: 1000,
+    context: {
+      estimated: true as const,
+      sections: [{ id: "chapters", label: "Chapters", characters: 10, estimatedTokens: 3 }],
+      conversationTokens: 0,
+      totalTokens: 3
+    },
+    changed: 0,
+    undoAvailable: false,
+    ...overrides
+  };
+}
+
 describe("plan first control", () => {
   test("asks for a proposal with the request, suggestions and one-turn guidance", async () => {
     const onPropose = countingOnPropose();
@@ -1499,5 +1542,228 @@ describe("plan expiry and reattach", () => {
     expect(card.getByTestId("plan-start")).toBeDefined();
     expect(card.queryByTestId("plan-resume")).toBeNull();
     expect(chat.start).not.toHaveBeenCalled();
+  });
+});
+
+describe("plan failure interface", () => {
+  test("R1: a kept conflict copy is named without claiming a save or a completion", async () => {
+    const plan = makePlan({
+      status: "failed",
+      steps: [
+        { text: "Read the current opening", state: "completed" },
+        { text: "Revise the door scene", state: "not-completed" }
+      ]
+    });
+    const chat = renderChat({ thread: planThread(plan) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    await startFailureTurn(chat, view);
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "tool",
+        turnId: START_TURN,
+        id: "call_overwrite01",
+        name: "overwrite_chapter",
+        status: "start",
+        input: { chapterId: CHAPTER, content: "The door opened.\n" }
+      });
+      chat.fire({
+        type: "tool",
+        turnId: START_TURN,
+        id: "call_overwrite01",
+        name: "overwrite_chapter",
+        status: "end",
+        output: {
+          ok: false,
+          chapterId: CHAPTER,
+          changedSinceRead: true,
+          savedAs: `books/${BOOK}/conflicts/0002-the-door.conflict-newer-version.md`
+        },
+        detail: "The door changed since you read it, so nothing was overwritten."
+      });
+      chat.fire(doneEvent({
+        changed: 1,
+        undoAvailable: true,
+        text: "The door changed, so I left it."
+      }));
+    });
+    await testing.waitFor(() => expect(view.getByTestId("agent-undo-turn")).toBeDefined());
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Failed");
+    expect(card.getByTestId("plan-status").textContent).not.toContain("Completed");
+    expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent))
+      .toEqual(["Completed", "Not completed"]);
+    expect(card.queryByTestId("plan-notice")).toBeNull();
+    for (const testId of ["plan-start", "plan-resume", "plan-pause", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+
+    const toolRow = view.getByText("Asked to replace a chapter");
+    expect(toolRow.closest('[data-slot="trace-line"]')?.getAttribute("data-status")).toBe("error");
+    expect(view.getByTestId("agent-kept").textContent)
+      .toContain("Left the chapter as you wrote it. The replacement is kept as a conflict copy.");
+    expect(view.getByTestId("agent-show-copy").textContent).toBe("Show the saved copy");
+    expect(view.queryByText(/\bSaved\b/)).toBeNull();
+    expect(view.queryByText(/Replaced/)).toBeNull();
+    expect(view.queryByText(/no undo checkpoint/)).toBeNull();
+  });
+
+  test("R2: a checkpoint failure leaves a confirmed completion with no undo claim", async () => {
+    const plan = makePlan({
+      status: "completed",
+      steps: [{ text: "Read the current opening", state: "completed" }]
+    });
+    const chat = renderChat({ thread: planThread(plan) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    await startFailureTurn(chat, view);
+
+    await testing.act(async () => {
+      chat.fire(doneEvent({
+        changed: 1,
+        undoAvailable: false,
+        text: "The lantern flared."
+      }));
+    });
+    await testing.waitFor(() => expect(view.getByText(/no undo checkpoint/)).toBeDefined());
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Completed");
+    expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent)).toEqual(["Completed"]);
+    for (const testId of ["plan-start", "plan-resume", "plan-pause", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+    expect(view.queryByTestId("agent-undo-turn")).toBeNull();
+    expect(view.queryByText(/undo available/)).toBeNull();
+  });
+
+  test("R3: an unapplied complete is a failed plan while the real change stays undoable", async () => {
+    const plan = makePlan({
+      status: "failed",
+      steps: [{ text: "Read the current opening", state: "completed" }]
+    });
+    const chat = renderChat({ thread: planThread(plan) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    await startFailureTurn(chat, view);
+    const notice = "The plan could not be marked complete. Nothing was marked complete.";
+    const errorMessage = "The plan's progress could not be saved. Nothing was marked complete.";
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "complete",
+        message: notice
+      });
+      chat.fire({
+        type: "error",
+        turnId: START_TURN,
+        code: "plan-state",
+        message: errorMessage,
+        changed: 1,
+        undoAvailable: true
+      });
+    });
+    await testing.waitFor(() => expect(card.getByTestId("plan-notice").textContent).toBe(notice));
+    await testing.waitFor(() => expect(
+      view.getByText(/This attempt changed 1 chapter\. Undo it before retrying\./)
+    ).toBeDefined());
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Failed");
+    expect(card.getByTestId("plan-status").textContent).not.toContain("Completed");
+    expect(view.getByTestId("agent-undo-turn")).toBeDefined();
+  });
+
+  test("R4: a failed complete and a failed fail keep Running and show the last error", async () => {
+    const plan = makePlan({
+      status: "running",
+      steps: [{ text: "Read the current opening", state: "completed" }]
+    });
+    const chat = renderChat({ thread: planThread(plan) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    await startFailureTurn(chat, view);
+    const completeSentence = "The plan could not be marked complete. Nothing was marked complete.";
+    const failSentence = "The plan could not be marked failed. Its last confirmed state remains.";
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "complete",
+        message: completeSentence
+      });
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "fail",
+        message: failSentence
+      });
+      chat.fire({
+        type: "error",
+        turnId: START_TURN,
+        code: "plan-state",
+        message: "The plan's progress could not be saved. Nothing was marked complete.",
+        changed: 1,
+        undoAvailable: true
+      });
+    });
+    await testing.waitFor(() => expect(card.getByTestId("plan-notice").textContent).toBe(failSentence));
+    await testing.waitFor(() => expect(
+      view.getByText(/This attempt changed 1 chapter\. Undo it before retrying\./)
+    ).toBeDefined());
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Running");
+    expect(card.getByTestId("plan-status").textContent).not.toContain("Completed");
+    expect(card.getByTestId("plan-status").textContent).not.toContain("Paused");
+    expect(card.getByTestId("plan-status").textContent).not.toContain("Cancelled");
+    for (const testId of ["plan-start", "plan-resume", "plan-pause", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+    expect(view.getByTestId("agent-undo-turn")).toBeDefined();
+  });
+
+  test("R5: a failed pause request keeps Running and never says Paused or Stopping", async () => {
+    const plan = makePlan({ status: "running" });
+    const chat = renderChat({ thread: planThread(plan) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    await startFailureTurn(chat, view);
+    const pauseSentence = "The plan's pause could not be saved. The plan remains at its last confirmed state.";
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "request-pause",
+        message: pauseSentence
+      });
+      chat.fire({ type: "stopped", turnId: START_TURN, changed: 0, undoAvailable: false });
+    });
+    await testing.waitFor(() => expect(card.queryByTestId("plan-pause")).toBeNull());
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Running");
+    expect(card.getByTestId("plan-notice").textContent).toBe(pauseSentence);
+    expect(view.queryByText("Paused")).toBeNull();
+    expect(view.queryByText(/Pause not confirmed/)).toBeNull();
+    expect(view.queryByText(/Stopping…/)).toBeNull();
+    for (const testId of ["plan-start", "plan-resume", "plan-pause", "plan-cancel"]) {
+      expect(card.queryByTestId(testId)).toBeNull();
+    }
+    expect(view.queryByTestId("agent-undo-turn")).toBeNull();
   });
 });

@@ -1669,8 +1669,10 @@ export function ChatPanel({
                         ) : null}
                         {message.failed && message.changed ? (
                           <p role="status" className="mt-2 text-(length:--text-caption-size) text-muted-foreground">
-                            This attempt changed {message.changed} {message.changed === 1 ? "chapter" : "chapters"}. Undo it
-                            before retrying.
+                            This attempt changed {message.changed} {message.changed === 1 ? "chapter" : "chapters"}.{" "}
+                            {message.undoAvailable === true
+                              ? "Undo it before retrying."
+                              : "Review the affected chapters before retrying."}
                           </p>
                         ) : null}
                         {message.failed && message.errorCode === "offline" ? (
