@@ -39,6 +39,7 @@ import {
 import { compactHistory } from "@ai-book-studio/core/agent/history";
 import { contextBreakdown, type ContextBreakdown } from "@ai-book-studio/core/agent/context";
 import { agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
+import type { AgentPlanCancelResult } from "@ai-book-studio/core/ipc";
 import { isPlanControlTool } from "@ai-book-studio/core/agent/plan-tools";
 import { ThreadStoreError, type ThreadStore } from "@ai-book-studio/core/agent/threads";
 import { findModel, unavailableReason } from "@ai-book-studio/core/providers/models";
@@ -102,6 +103,8 @@ interface ActiveTurn {
   chapterId?: string | undefined;
   state: TurnState;
   pending?: PendingApproval | undefined;
+  /** Why the one stop was requested. A cancel intent is never downgraded to pause. */
+  stopIntent?: "pause" | "cancel" | undefined;
   /** Retained through tool, approval and outcome persistence settlement. */
   completion: Promise<void>;
 }
@@ -186,7 +189,8 @@ const PERSISTENCE_WARNINGS = {
   approval: "The approval could not be saved. Its action was not started.",
   conversation: "The conversation outcome could not be fully saved. Changes to the book remain.",
   usage: "The turn's usage could not be saved. Local usage and spend history may be incomplete.",
-  planPause: "The plan's pause could not be saved. The plan remains at its last confirmed state."
+  planPause: "The plan's pause could not be saved. The plan remains at its last confirmed state.",
+  planCancel: "The plan's cancellation could not be saved. The plan remains at its last confirmed state."
 } as const;
 
 function recordPersistenceError(state: TurnState, kind: keyof typeof PERSISTENCE_WARNINGS): void {
@@ -824,22 +828,112 @@ export class AgentRuntime {
 
   /** Request stop synchronously. Only the run's settlement barrier can acknowledge it. */
   async stop(turnId: string): Promise<null> {
-    const turn = this.active.get(turnId);
-    if (!turn || turn.state.phase === "settled") return null;
-    turn.state.phase = "stopping";
-    const pending = turn.pending;
-    turn.pending = undefined;
-    expirePendingApprovals(turn.state);
-    const firstStop = !turn.controller.signal.aborted;
-    turn.controller.abort();
-    if (firstStop) {
-      this.publish({ type: "stopping", turnId });
-      // Exactly one request-pause write per stop. It never rejects; the terminal stopped event
-      // still waits for settlement, the checkpoint and the confirm attempt.
-      void turn.state.plan?.requestPause();
+    return this.beginStop(turnId, "pause");
+  }
+
+  /**
+   * Cancel one stored plan terminally.
+   *
+   * The live lookup and the host dispatch closure happen before the first await, so no tool can
+   * start after the author cancels. A plan with no live turn in this process is read and, when its
+   * status is directly cancellable, written once with no turn events. A runtime-loss running or
+   * waiting plan is refused: restart expiry owns that state.
+   */
+  async cancelPlan(bookId: string, threadId: string, planId: string): Promise<AgentPlanCancelResult> {
+    const live = this.livePlanTurn(bookId, threadId, planId);
+    if (live) return this.cancelLiveTurn(live);
+
+    const library = this.studio.requireLibrary();
+    const thread = await library.threads.read(bookId, threadId);
+    if (!thread) throw new ProviderError("not-found", "That conversation no longer exists. Start a new one.");
+    const plan = thread.plans.find((entry) => entry.id === planId);
+    if (!plan) throw new ProviderError("not-found", "That plan is not in this conversation.");
+
+    if (plan.status === "cancelled") return { outcome: "cancelled", plan };
+    if (isTerminalPlan(plan)) return { outcome: "terminal", plan };
+    if (plan.status === "running" || plan.status === "waiting-for-approval") {
+      throw new ProviderError(
+        "invalid-request",
+        "This plan's turn is not running in this app, so it cannot be cancelled here. A plan whose turn was lost is marked expired after the app restarts."
+      );
     }
-    pending?.resume(null);
+
+    // A Start or Resume may have begun while the thread was being read. Stop that turn instead of
+    // writing over a plan another live turn now owns; this is a re-check, not a second lifecycle.
+    const raced = this.livePlanTurn(bookId, threadId, planId);
+    if (raced) return this.cancelLiveTurn(raced);
+
+    const applied = await library.threads.applyPlanEvent(bookId, threadId, planId, { type: "cancel" });
+    const stored = applied.thread.plans.find((entry) => entry.id === planId);
+    if (!stored || stored.status !== "cancelled") {
+      throw new ProviderError(
+        "invalid-request",
+        "The plan's cancellation could not be confirmed. The plan remains at its last confirmed state."
+      );
+    }
+    return { outcome: "cancelled", plan: stored };
+  }
+
+  /** The one active turn whose plan identity matches, before any read or write. */
+  private livePlanTurn(
+    bookId: string,
+    threadId: string,
+    planId: string
+  ): { turnId: string; turn: ActiveTurn } | null {
+    for (const [turnId, turn] of this.active.entries()) {
+      if (turn.bookId === bookId && turn.threadId === threadId && turn.planId === planId &&
+        turn.state.phase !== "settled") {
+        return { turnId, turn };
+      }
+    }
     return null;
+  }
+
+  /**
+   * Close a live plan turn's dispatch and start the cancel write. A plan-linked turn without its
+   * controller is a contract violation: the turn still stops, and the caller is told the plan
+   * state could not be cancelled in this process.
+   */
+  private cancelLiveTurn(live: { turnId: string; turn: ActiveTurn }): AgentPlanCancelResult {
+    this.beginStop(live.turnId, "cancel");
+    if (!live.turn.state.plan) {
+      throw new ProviderError(
+        "invalid-request",
+        "The plan's turn was stopped, but its plan state was not available in this process. Reload the conversation to see the plan's last confirmed state."
+      );
+    }
+    return { outcome: "live", turnId: live.turnId };
+  }
+
+  /**
+   * Close the host gate and request one stop. Everything here is synchronous: a cancel closes
+   * dispatch before the main process reads a thread, writes a plan or returns to the renderer. A
+   * later Pause cannot downgrade a cancel intent, and a second call only reaches the idempotent
+   * plan write promises.
+   */
+  private beginStop(turnId: string, intent: "pause" | "cancel"): Promise<null> {
+    const turn = this.active.get(turnId);
+    if (!turn || turn.state.phase === "settled") return Promise.resolve(null);
+    if (intent === "cancel") turn.stopIntent = "cancel";
+    else turn.stopIntent ??= "pause";
+    const firstStop = !turn.controller.signal.aborted;
+    const pending = turn.pending;
+    if (firstStop) {
+      turn.state.phase = "stopping";
+      turn.pending = undefined;
+      expirePendingApprovals(turn.state);
+      turn.controller.abort();
+      // Exactly one stopping event closes this stop. The plan write starts after it, so a
+      // confirmed cancel notice can never precede the gate.
+      this.publish({ type: "stopping", turnId });
+      if (intent === "cancel") void turn.state.plan?.requestCancel();
+      else void turn.state.plan?.requestPause();
+      pending?.resume(null);
+    } else if (intent === "cancel") {
+      // A Pause stop won the first call. Upgrade it without a second stopping event or expiry.
+      void turn.state.plan?.requestCancel();
+    }
+    return Promise.resolve(null);
   }
 
   /** Continue a turn that paused on a destructive tool call. */
@@ -1303,10 +1397,12 @@ export class AgentRuntime {
         await writeMessage([...assistantParts(state.reasoning, state.toolParts, state.text, stopped), ...state.approvals], {
           checkpoint: state.changes.length > 0 && undoAvailable
         });
-        // The pause is confirmed only after the in-flight work, checkpoint and stopped message are
-        // written. A failed confirm never claims Paused and leaves the last confirmed state.
-        const pause = state.plan ? await state.plan.confirmPause() : null;
-        if (pause && !pause.ok) recordPersistenceError(state, "planPause");
+        // The terminal plan outcome is chosen only after the in-flight work, checkpoint and stopped
+        // message are written. A cancel intent wins over pause; a failed write never claims the
+        // terminal status and adds its fixed warning instead.
+        const stop = state.plan ? await state.plan.finishStop() : null;
+        if (stop?.kind === "cancel" && !stop.ok) recordPersistenceError(state, "planCancel");
+        if (stop?.kind === "pause" && !stop.ok) recordPersistenceError(state, "planPause");
         this.terminal(turnId, state, { type: "stopped", turnId, changed: state.changes.length, undoAvailable });
       } else {
         // A plan-write failure is already reported as `plan-error` by the controller. Its fixed
@@ -1351,8 +1447,9 @@ export class AgentRuntime {
           });
           // Same confirm-and-warning sequence as the early abort path: after the stopped message,
           // before the one terminal event.
-          const pause = state.plan ? await state.plan.confirmPause() : null;
-          if (pause && !pause.ok) recordPersistenceError(state, "planPause");
+          const stop = state.plan ? await state.plan.finishStop() : null;
+          if (stop?.kind === "cancel" && !stop.ok) recordPersistenceError(state, "planCancel");
+          if (stop?.kind === "pause" && !stop.ok) recordPersistenceError(state, "planPause");
         }
         this.terminal(turnId, state, {
           type: controller.signal.aborted ? "stopped" : "error",

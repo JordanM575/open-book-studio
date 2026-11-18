@@ -51,6 +51,7 @@ import { PlanFirstControl, type PlanProposalRequest } from "./PlanFirstControl";
 import {
   PlanProgress,
   type PlanActionOutcome,
+  type PlanCancelRef,
   type PlanResumeRef,
   type PlanStartRef
 } from "./PlanProgress";
@@ -202,14 +203,22 @@ export function ChatPanel({
    * draft or an optimistic message.
    */
   const [plans, setPlans] = useState<AgentPlan[]>([]);
-  const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | null>(null);
+  const [planAction, setPlanAction] = useState<"propose" | "start" | "resume" | "cancel" | null>(null);
   const [planNotice, setPlanNotice] = useState<string | null>(null);
   /** The plan of the live, acknowledged plan turn this window started. */
   const [livePlanId, setLivePlanId] = useState<string | null>(null);
   /** The plan whose stop was requested and whose terminal event has not arrived. */
   const [stoppingPlanId, setStoppingPlanId] = useState<string | null>(null);
+  /** The plan whose live cancel is settling or was confirmed before its stopped event. */
+  const [cancellingPlanId, setCancellingPlanId] = useState<string | null>(null);
   /** The stopped event's change and undo facts for a pause this window confirmed. */
   const [pauseSummary, setPauseSummary] = useState<{
+    planId: string;
+    changed: number;
+    undoAvailable?: boolean;
+  } | null>(null);
+  /** The stopped event's change and undo facts for a cancel this window confirmed. */
+  const [cancelSummary, setCancelSummary] = useState<{
     planId: string;
     changed: number;
     undoAvailable?: boolean;
@@ -226,8 +235,14 @@ export function ChatPanel({
   const stoppingPlanRef = useRef<string | null>(null);
   /** Set by a confirm-pause notice; only the terminal stopped event may show Paused. */
   const pauseConfirmedRef = useRef<{ planId: string; turnId: string } | null>(null);
+  /** A live cancel was requested for this plan/turn. It is not a confirmation. */
+  const cancelAttemptRef = useRef<{ planId: string; turnId: string } | null>(null);
+  /** Set only by a confirmed `plan { change: "cancel" }` notice. A request alone is not a confirm. */
+  const cancelConfirmedRef = useRef<{ planId: string; turnId: string } | null>(null);
+  /** A cancel plan-error can beat the live Cancel response; it must not be re-entered. */
+  const cancelFailureRef = useRef<{ planId: string; turnId: string } | null>(null);
   /** Guards duplicate plan actions in the same tick, before React state renders. */
-  const planActionRef = useRef<"propose" | "start" | "resume" | null>(null);
+  const planActionRef = useRef<"propose" | "start" | "resume" | "cancel" | null>(null);
   const assistantRef = useRef<string | null>(null);
   const retryRequestsRef = useRef(new Map<string, AgentTurnInput>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -273,12 +288,12 @@ export function ChatPanel({
   }, []);
 
   /** Keep the synchronous guard and the visible action state together. */
-  const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | null) => {
+  const setPlanActionState = useCallback((next: "propose" | "start" | "resume" | "cancel" | null) => {
     planActionRef.current = next;
     setPlanAction(next);
   }, []);
 
-  /** A new conversation or thread switch holds no live, stopping or pause view. */
+  /** A new conversation or thread switch holds no live, stopping, cancel or pause view. */
   const clearPlanTurnView = useCallback(() => {
     livePlanRef.current = null;
     setLivePlanId(null);
@@ -286,6 +301,11 @@ export function ChatPanel({
     setStoppingPlanId(null);
     pauseConfirmedRef.current = null;
     setPauseSummary(null);
+    setCancellingPlanId(null);
+    setCancelSummary(null);
+    cancelAttemptRef.current = null;
+    cancelConfirmedRef.current = null;
+    cancelFailureRef.current = null;
   }, []);
 
   /** Re-read the conversation after a confirmed plan notice or a terminal turn. */
@@ -559,6 +579,10 @@ export function ChatPanel({
   useEffect(() => {
     const unsubscribe = window.studio.agent.onEvent((event: AgentEvent) => {
       if (event.turnId !== turnRef.current) return;
+      // A terminal stopped event shows Cancelled only for a cancel this window saw confirmed.
+      const cancelConfirmation = cancelConfirmedRef.current;
+      const cancelledStop = event.type === "stopped" && cancelConfirmation !== null &&
+        cancelConfirmation.turnId === event.turnId;
       // A turn that changed the book and saved its checkpoint now owns the newest one, the next undo.
       // The runtime lists it in the thread file on the same terms.
       if ((event.type === "done" || event.type === "stopped" || event.type === "error") && event.changed && event.undoAvailable) {
@@ -573,7 +597,21 @@ export function ChatPanel({
         // window saw confirmed. A confirm-pause notice alone never reaches this branch.
         const pausedHere = event.type === "stopped" && confirmation !== null &&
           confirmation.turnId === event.turnId && confirmation.planId === livePlanRef.current;
-        if (pausedHere) {
+        if (cancelledStop && cancelConfirmation) {
+          const planId = cancelConfirmation.planId;
+          setPlans((current) => {
+            const next = current.map((plan) =>
+              plan.id === planId ? { ...plan, status: "cancelled" as const } : plan
+            );
+            plansRef.current = next;
+            return next;
+          });
+          setCancelSummary({
+            planId,
+            changed: event.changed ?? 0,
+            ...(event.undoAvailable !== undefined ? { undoAvailable: event.undoAvailable } : {})
+          });
+        } else if (pausedHere) {
           const planId = confirmation.planId;
           setPlans((current) => {
             const next = current.map((plan) =>
@@ -589,8 +627,13 @@ export function ChatPanel({
           });
         } else {
           setPauseSummary(null);
+          setCancelSummary(null);
         }
         pauseConfirmedRef.current = null;
+        cancelAttemptRef.current = null;
+        cancelConfirmedRef.current = null;
+        cancelFailureRef.current = null;
+        setCancellingPlanId(null);
         stoppingRef.current = null;
         stoppingPlanRef.current = null;
         setStoppingPlanId(null);
@@ -603,7 +646,12 @@ export function ChatPanel({
         stoppingRef.current = event.turnId;
         stoppingPlanRef.current = livePlanRef.current;
         setStoppingPlanId(livePlanRef.current);
-        patchAssistant(event.turnId, (message) => ({ ...message, note: "Stopping… Waiting for in-flight work to settle." }));
+        patchAssistant(event.turnId, (message) => ({
+          ...message,
+          note: cancelAttemptRef.current?.turnId === event.turnId
+            ? "Cancelling… Waiting for in-flight work to settle. Completed edits stay."
+            : "Stopping… Waiting for in-flight work to settle."
+        }));
       } else if (event.type === "text") {
         patchAssistant(event.turnId, (message) => ({ ...message, text: message.text + event.delta }));
       } else if (event.type === "reasoning") {
@@ -680,11 +728,34 @@ export function ChatPanel({
           setGuidance("");
           setBackground(false);
           setPauseSummary(null);
+          // The new plan starts with no cancel view from the earlier one.
+          setCancellingPlanId(null);
+          setCancelSummary(null);
+          cancelAttemptRef.current = null;
+          cancelConfirmedRef.current = null;
+          cancelFailureRef.current = null;
         }
         if (event.change === "complete" || event.change === "fail" || event.change === "cancel") {
-          // A terminal plan wins over the stopping label and can never be shown Paused.
+          // A terminal plan wins over the stopping and cancelling labels and can never be Paused.
           pauseConfirmedRef.current = null;
           setPauseSummary(null);
+        }
+        if (event.change === "cancel") {
+          // Only this confirmed notice may show Cancelled. The terminal stopped event still owns
+          // the change and undo facts.
+          cancelAttemptRef.current = { planId: event.planId, turnId: event.turnId };
+          cancelConfirmedRef.current = { planId: event.planId, turnId: event.turnId };
+          cancelFailureRef.current = null;
+          setCancellingPlanId(event.planId);
+          setCancelSummary(null);
+        }
+        if (event.change === "complete" || event.change === "fail") {
+          // A completion or failure race wins; no cancel label or stopped facts survive it.
+          cancelAttemptRef.current = null;
+          cancelConfirmedRef.current = null;
+          cancelFailureRef.current = null;
+          setCancellingPlanId(null);
+          setCancelSummary(null);
         }
         // Purpose, steps, status and revision are the stored thread's; a notice only says a
         // confirmed write happened.
@@ -711,6 +782,14 @@ export function ChatPanel({
       } else if (event.type === "plan-error") {
         // No state changed. Keep the last confirmed plan and show the fixed sentence.
         if (event.change === "confirm-pause") pauseConfirmedRef.current = null;
+        if (event.change === "cancel") {
+          // The cancel write failed; the turn is still stopping, so the card falls back to
+          // Stopping and never shows Cancelled.
+          cancelFailureRef.current = { planId: event.planId, turnId: event.turnId };
+          cancelAttemptRef.current = null;
+          cancelConfirmedRef.current = null;
+          setCancellingPlanId(null);
+        }
         setPlanNotice(event.message);
       } else if (event.type === "done") {
         patchAssistant(event.turnId, (message) => ({
@@ -749,9 +828,15 @@ export function ChatPanel({
           turnId: event.turnId,
           changed: event.changed ?? 0,
           undoAvailable: event.undoAvailable,
-          note: `Stopped · ${event.changed ?? 0} ${event.changed === 1 ? "chapter" : "chapters"} changed` +
-            (event.changed ? (event.undoAvailable ? " · undo available" : " · no undo checkpoint") : "") +
-            (event.persistenceError ? ` · ${event.persistenceError}` : ""),
+          note: cancelledStop
+            ? `Cancelled · ${event.changed
+              ? `${event.changed} ${event.changed === 1 ? "chapter" : "chapters"} changed` +
+                (event.undoAvailable ? " · undo available" : " · no undo checkpoint")
+              : "no book changes"}` +
+              (event.persistenceError ? ` · ${event.persistenceError}` : "")
+            : `Stopped · ${event.changed ?? 0} ${event.changed === 1 ? "chapter" : "chapters"} changed` +
+              (event.changed ? (event.undoAvailable ? " · undo available" : " · no undo checkpoint") : "") +
+              (event.persistenceError ? ` · ${event.persistenceError}` : ""),
           approvals: message.approvals?.map((entry) =>
             entry.status === "pending" ? { ...entry, status: "expired" } : entry
           )
@@ -1020,6 +1105,114 @@ export function ChatPanel({
     return { ok: true };
   };
 
+  /**
+   * Cancel one stored plan terminally. A live turn stops through the runtime barrier; a plan with no
+   * live turn is cancelled directly. The request is never treated as a confirmation: Cancelled comes
+   * only from the returned stored plan or a confirmed `plan { change: "cancel" }` notice.
+   */
+  const cancelPlan = async (ref: PlanCancelRef): Promise<PlanActionOutcome> => {
+    if (planActionRef.current !== null) {
+      return { ok: false, reason: "Another plan action is already in flight. Wait for it to finish." };
+    }
+    const id = threadIdRef.current;
+    if (!id) {
+      return { ok: false, reason: "Open the plan's conversation before cancelling it. Nothing was changed." };
+    }
+    const stored = plansRef.current.find((plan) => plan.id === ref.id);
+    if (!stored) {
+      return { ok: false, reason: "That plan is not in this conversation. Nothing was changed." };
+    }
+    if (stored.status === "completed" || stored.status === "cancelled" ||
+      stored.status === "failed" || stored.status === "expired") {
+      return { ok: false, reason: "That plan has already ended. Nothing was changed." };
+    }
+    setPlanActionState("cancel");
+    setPlanNotice(null);
+    setCancelSummary(null);
+    cancelConfirmedRef.current = null;
+    cancelFailureRef.current = null;
+    try {
+      const answer = await window.studio.agent.cancelPlan({ bookId, threadId: id, planId: ref.id });
+      if (!answer.ok) throw new Error(answer.error.message);
+      const result = answer.data;
+      const replacePlan = (plan: AgentPlan): void => {
+        setPlans((current) => {
+          const next = current.map((entry) => entry.id === plan.id ? plan : entry);
+          plansRef.current = next;
+          return next;
+        });
+      };
+      if (result.outcome === "live") {
+        setPlanActionState(null);
+        if (result.turnId !== turnRef.current) {
+          // A reloaded or unowned window learns only the stored plan; it does not fabricate the
+          // stopped facts of a turn this view does not hold.
+          void refreshStoredPlans();
+          return { ok: true };
+        }
+        const cancelFailure = cancelFailureRef.current as { planId: string; turnId: string } | null;
+        if (cancelFailure?.turnId === result.turnId && cancelFailure.planId === ref.id) {
+          // The plan-error already recorded the failure; do not re-enter a cancelling label.
+          return { ok: true };
+        }
+        cancelAttemptRef.current = { planId: ref.id, turnId: result.turnId };
+        setCancellingPlanId(ref.id);
+        patchAssistant(result.turnId, (message) => ({
+          ...message,
+          note: "Cancelling… Waiting for in-flight work to settle. Completed edits stay."
+        }));
+        return { ok: true };
+      }
+      if (result.outcome === "cancelled") {
+        replacePlan(result.plan);
+        pauseConfirmedRef.current = null;
+        setPauseSummary(null);
+        setCancelSummary(null);
+        setCancellingPlanId(null);
+        cancelAttemptRef.current = null;
+        cancelConfirmedRef.current = null;
+        cancelFailureRef.current = null;
+        if (livePlanRef.current === result.plan.id) {
+          livePlanRef.current = null;
+          setLivePlanId(null);
+        }
+        if (stoppingPlanRef.current === result.plan.id) {
+          stoppingPlanRef.current = null;
+          setStoppingPlanId(null);
+        }
+        setPlanActionState(null);
+        void refreshStoredPlans();
+        return { ok: true };
+      }
+      // A completion, failure or expiry won the race. The stored plan is the fact.
+      replacePlan(result.plan);
+      setPlanActionState(null);
+      setCancellingPlanId(null);
+      setCancelSummary(null);
+      cancelAttemptRef.current = null;
+      cancelConfirmedRef.current = null;
+      cancelFailureRef.current = null;
+      pauseConfirmedRef.current = null;
+      setPauseSummary(null);
+      setPlanNotice(
+        result.plan.status === "completed"
+          ? "This plan completed before Cancel. Nothing was cancelled."
+          : "This plan already ended. Nothing was changed."
+      );
+      return { ok: true };
+    } catch (error) {
+      setPlanActionState(null);
+      setCancellingPlanId(null);
+      cancelAttemptRef.current = null;
+      cancelConfirmedRef.current = null;
+      cancelFailureRef.current = null;
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : "The plan could not be cancelled. Nothing changed."
+      };
+    }
+  };
+
   const approve = async (message: Message, approval: Approval, approved: boolean, pressed: HTMLElement): Promise<void> => {
     if (approval.status !== "pending" || stoppingRef.current === approval.turnId) return;
     // Allow and Deny leave with the question. Focus still on them moves to their card before they
@@ -1145,11 +1338,14 @@ export function ChatPanel({
         stopping={currentPlan.id === stoppingPlanId}
         resuming={planAction === "resume"}
         pauseSummary={pauseSummary?.planId === currentPlan.id ? pauseSummary : null}
+        cancelling={currentPlan.id === cancellingPlanId || planAction === "cancel"}
+        cancelSummary={cancelSummary?.planId === currentPlan.id ? cancelSummary : null}
         modelLabel={modelLabel}
         notice={planNotice}
         onStart={startPlan}
         onPause={() => void stop()}
         onResume={resumePlan}
+        onCancel={cancelPlan}
       />
     </div>
   ) : null;
@@ -1573,8 +1769,11 @@ export function ChatPanel({
               stopping={currentPlan !== null && currentPlan.id === stoppingPlanId}
               resuming={planAction === "resume"}
               pauseSummary={pauseSummary?.planId === currentPlan?.id ? pauseSummary : null}
+              cancelling={currentPlan !== null && (currentPlan.id === cancellingPlanId || planAction === "cancel")}
+              cancelSummary={cancelSummary?.planId === currentPlan?.id ? cancelSummary : null}
               onPause={() => void stop()}
               onResume={resumePlan}
+              onCancel={cancelPlan}
             />
           </div>
         ) : null}
