@@ -1,9 +1,11 @@
 # Plan: agent interaction and guidance
 
 **Spec:** [spec.md](spec.md) · **Tasks:** [tasks.md](tasks.md)
-**Status:** In progress — T004/T010 and W03 Discuss/Edit permissions, composer and bounded
-request guidance implemented. Plan lifecycle and integrated delivery acceptance remain open.
-See [candidate evidence and delivery runbook](implementation.md).
+**Status:** Delivered at the source/test level — T001–T021 are checked. W03 implements
+Discuss/Edit permissions, composer, bounded request guidance and the proposed-plan guidance
+refresh; the visible plan lifecycle, pause/resume, cancel, restart expiry and the failure matrix
+are merged. Live provider, real manuscript, device, packaged-build and release acceptance remain
+separate. See [candidate evidence and delivery runbook](implementation.md).
 
 ## Shape
 

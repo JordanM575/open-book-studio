@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Plan notes status
+
+- The 031 plan and implementation notes now record the delivered source/test state: T001–T021 are checked, including the proposed-plan guidance refresh and the visible plan lifecycle, with the separate live/device/release limits. 037 autonomy stays separate.
+
 ### Delivery index reconciliation
 
 - The spec index and agentic coverage record now describe spec 031 as delivered at the source/test level: all T001–T021 tasks are checked, including the proposed-plan guidance refresh, the visible plan lifecycle, pause/resume, cancel, restart expiry, the failure matrix, accessibility and the synthetic author journey. Live provider, real manuscript, device, packaged-build and release acceptance remain separate.
