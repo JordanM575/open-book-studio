@@ -97,6 +97,7 @@
     "tests/editor-sync.test.tsx",
     "tests/move-open-chapter.test.tsx",
     "tests/failed-save.test.tsx",
+    "tests/agent-author-journey.test.tsx",
     "tests/support/dom.ts"
   ]
 }
