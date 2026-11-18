@@ -1175,4 +1175,32 @@ describe("plan state through the thread store", () => {
     ).rejects.toMatchObject({ code: "plan-state" });
     expect(await bytesOf(thread.id)).toBe(before);
   });
+
+  test("refreshPlanProposal clears through omitted guidance and refuses a running plan", async () => {
+    const thread = await store.create(BOOK, "Refresh clear");
+    await store.appendMessage(BOOK, thread.id, planParentMessage());
+    await store.addPlan(BOOK, thread.id, newPlan({ guidance: "Keep the tense." }));
+    const cleared = await store.refreshPlanProposal(BOOK, thread.id, "plan-1", { revision: 2 });
+    expect(cleared.plans[0]?.revision).toBe(2);
+    expect(cleared.plans[0]?.guidance).toBeUndefined();
+    expect(cleared.plans[0]?.status).toBe("proposed");
+    expect(cleared.plans[0]?.purpose).toBe("Revise the opening");
+    expect(cleared.plans[0]?.steps.map((step) => step.text)).toEqual([
+      "Read the opening",
+      "Rewrite the door"
+    ]);
+    expect(cleared.plans[0]?.parent).toEqual({
+      messageId: PLAN_PARENT_ID,
+      turnId: PLAN_TURN_ID
+    });
+
+    const running = await seedThreadWithPlan("running", {
+      guidance: "Keep the tense."
+    });
+    const runningBefore = await bytesOf(running);
+    await expect(
+      store.refreshPlanProposal(BOOK, running, "plan-1", { revision: 2, guidance: "Past tense." })
+    ).rejects.toMatchObject({ code: "plan-state" });
+    expect(await bytesOf(running)).toBe(runningBefore);
+  });
 });

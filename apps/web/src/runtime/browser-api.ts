@@ -421,6 +421,10 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
         Promise.resolve(
           failure("invalid", "The writing agent is not available in the browser build yet. Use the desktop app.")
         ),
+      refreshPlanGuidance: () =>
+        Promise.resolve(
+          failure("invalid", "The writing agent is not available in the browser build yet. Use the desktop app.")
+        ),
       undoLast: () =>
         Promise.resolve(
           failure("invalid", "The writing agent is not available in the browser build yet. Use the desktop app.")

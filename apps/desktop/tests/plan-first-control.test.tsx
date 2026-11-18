@@ -127,6 +127,12 @@ function countingOnCancel(result: { ok: boolean; reason?: string } = { ok: true 
   return mock(async (_ref: unknown) => result);
 }
 
+function countingOnRefreshGuidance(
+  result: { ok: boolean; reason?: string; plan?: AgentPlan } = { ok: true }
+) {
+  return mock(async (_ref: unknown) => result);
+}
+
 function renderPlan(options: {
   mode?: AgentMode;
   running?: boolean;
@@ -145,12 +151,15 @@ function renderPlan(options: {
   onPause?: ReturnType<typeof countingOnPause>;
   onResume?: ReturnType<typeof countingOnResume>;
   onCancel?: ReturnType<typeof countingOnCancel>;
+  onRefreshGuidance?: ReturnType<typeof countingOnRefreshGuidance>;
+  refreshing?: boolean;
 } = {}) {
   const onPropose = options.onPropose ?? countingOnPropose();
   const onStart = options.onStart ?? countingOnStart();
   const onPause = options.onPause ?? countingOnPause();
   const onResume = options.onResume ?? countingOnResume();
   const onCancel = options.onCancel ?? countingOnCancel();
+  const onRefreshGuidance = options.onRefreshGuidance;
   const props = {
     mode: options.mode ?? "edit" as AgentMode,
     running: options.running ?? false,
@@ -166,6 +175,8 @@ function renderPlan(options: {
     stale: options.stale ?? false,
     stopping: options.stopping ?? false,
     resuming: options.resuming ?? false,
+    refreshing: options.refreshing ?? false,
+    ...(onRefreshGuidance ? { onRefreshGuidance } : {}),
     ...(options.notice !== undefined ? { notice: options.notice } : {}),
     ...(options.pauseSummary !== undefined ? { pauseSummary: options.pauseSummary } : {}),
     ...(options.cancelling !== undefined ? { cancelling: options.cancelling } : {}),
@@ -179,6 +190,7 @@ function renderPlan(options: {
     onPause,
     onResume,
     onCancel,
+    onRefreshGuidance,
     rerenderWith(next: Partial<typeof props>) {
       view.rerender(React.createElement(PlanFirstControl, { ...props, ...next }));
     }
@@ -216,6 +228,7 @@ function renderChat(options: {
   expiry?: AgentPlanExpiry;
   start?: ReturnType<typeof mock>;
   cancelPlan?: ReturnType<typeof mock>;
+  refreshPlanGuidance?: ReturnType<typeof mock>;
 } = {}) {
   let stored = options.thread ?? planThread(null);
   const planRuntime = options.planRuntime ?? null;
@@ -227,6 +240,8 @@ function renderChat(options: {
   }));
   const stop = mock(async (_turnId: string) => ({ ok: true, data: null }));
   const cancelPlan = options.cancelPlan ?? mock(async (_input: unknown) => ({ ok: true, data: null }));
+  const refreshPlanGuidance = options.refreshPlanGuidance ??
+    mock(async (_input: unknown) => ({ ok: false, error: { code: "invalid-request", message: "not used" } }));
   const read = mock(async () => {
     // The live turn and the one expiry attempt belong to the first read. A later read of a
     // settled turn reports neither, exactly as the main process does after the turn ends.
@@ -262,6 +277,7 @@ function renderChat(options: {
       start,
       stop,
       cancelPlan,
+      refreshPlanGuidance,
       approve: mock(async () => ({ ok: true, data: null })),
       undoLast: mock(async () => ({ ok: true, data: null })),
       onEvent: mock((handler: (event: AgentEvent) => void) => {
@@ -289,6 +305,7 @@ function renderChat(options: {
     start,
     stop,
     cancelPlan,
+    refreshPlanGuidance,
     read,
     view: testing.within(document.body),
     setStored(next: AgentThread) {
@@ -1545,6 +1562,283 @@ describe("plan expiry and reattach", () => {
   });
 });
 
+describe("plan guidance refresh", () => {
+  const FIXED_PROPOSED =
+    "Guidance is included in the plan's explicit Start or Resume turn. It does not change the plan's steps, mode, model, tools or approvals.";
+
+  test("P1: a proposed plan opens one labelled editor, counter and described bounds", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const refresh = countingOnRefreshGuidance({ ok: false, reason: "not used" });
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    expect(card.getByTestId("plan-guidance-block").textContent).toBe("Guidance for this plan");
+    expect(card.getByTestId("plan-guidance-fixed").textContent).toBe(FIXED_PROPOSED);
+
+    const edit = card.getByTestId("plan-guidance-edit");
+    expect(edit.tagName).toBe("BUTTON");
+    testing.fireEvent.click(edit);
+
+    const field = card.getByTestId("plan-guidance-field");
+    expect(field.tagName).toBe("TEXTAREA");
+    expect(document.activeElement).toBe(field);
+    expect(card.getByText("Plan guidance (optional)")).toBeDefined();
+    expect((field as HTMLTextAreaElement).maxLength).toBe(2_000);
+    expect(card.getByTestId("plan-guidance-limit").textContent).toBe(
+      `${"Keep the names".length} / 2,000 characters · Blank clears the plan's guidance`
+    );
+    const described = field.getAttribute("aria-describedby")?.split(" ") ?? [];
+    expect(described).toHaveLength(2);
+    expect(described.map((id) => document.getElementById(id)?.textContent)).toEqual([
+      `${"Keep the names".length} / 2,000 characters · Blank clears the plan's guidance`,
+      "Editing revision 1. Saving creates revision 2; the plan stays proposed and nothing runs until Start plan."
+    ]);
+    expect(card.getByTestId("plan-guidance-save")).toHaveProperty("disabled", true);
+
+    testing.fireEvent.change(field, { target: { value: "Past tense." } });
+    expect(card.getByTestId("plan-guidance-save")).toHaveProperty("disabled", false);
+  });
+
+  test("P2: Save sends the displayed revision and shows the confirmed plan", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const confirmed = makePlan({ revision: 2, guidance: "Past tense." });
+    const refresh = mock(async (_input: unknown) => ({ ok: true, data: confirmed }));
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(card.getByTestId("plan-guidance-field"), {
+      target: { value: "Past tense." }
+    });
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-guidance-save")));
+
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(refresh).toHaveBeenCalledWith({
+      bookId: BOOK,
+      threadId: THREAD,
+      planId: PLAN_ID,
+      revision: 1,
+      guidance: "Past tense."
+    });
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-revision").textContent).toBe("Revision 2 · Edit plan");
+    });
+    expect(card.getByTestId("plan-guidance-text").textContent).toBe("Past tense.");
+    expect(card.getByTestId("plan-start-revision").textContent).toBe("Start uses revision 2.");
+    expect(card.getByTestId("plan-announcement").textContent).toBe(
+      "Plan guidance saved. Revision 2. Start uses revision 2."
+    );
+    expect(card.queryByTestId("plan-guidance-field")).toBeNull();
+    await testing.waitFor(() => {
+      expect(document.activeElement).toBe(card.getByTestId("plan-guidance-edit"));
+    });
+    expect(view.getAllByTestId("plan-card")).toHaveLength(1);
+  });
+
+  test("P3: a blank draft reads Clear guidance and clears the confirmed value", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const confirmed = makePlan({ revision: 2, guidance: null });
+    const refresh = mock(async (_input: unknown) => ({ ok: true, data: confirmed }));
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    const field = card.getByTestId("plan-guidance-field");
+    testing.fireEvent.change(field, { target: { value: "   " } });
+    expect(card.getByTestId("plan-guidance-save").textContent).toBe("Clear guidance");
+    expect(card.getByTestId("plan-guidance-save")).toHaveProperty("disabled", false);
+
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-guidance-save")));
+
+    expect(refresh).toHaveBeenCalledWith({
+      bookId: BOOK,
+      threadId: THREAD,
+      planId: PLAN_ID,
+      revision: 1,
+      guidance: "   "
+    });
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-guidance-omitted").textContent).toBe("No plan guidance");
+    });
+    expect(card.getByTestId("plan-revision").textContent).toBe("Revision 2 · Edit plan");
+    expect(card.getByTestId("plan-announcement").textContent).toBe(
+      "Plan guidance cleared. Revision 2. Start uses revision 2."
+    );
+  });
+
+  test("P4: Cancel edit discards the draft, keeps revision 1 and sends nothing", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const refresh = countingOnRefreshGuidance();
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const card = testing.within(await view.findByTestId("plan-region"));
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(card.getByTestId("plan-guidance-field"), { target: { value: "Past tense." } });
+    testing.fireEvent.click(card.getByTestId("plan-guidance-cancel"));
+
+    expect(refresh).not.toHaveBeenCalled();
+    expect(card.getByTestId("plan-revision").textContent).toBe("Revision 1 · Edit plan");
+    expect(card.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
+    expect(card.getByTestId("plan-announcement").textContent).toBe(
+      "Guidance edit closed. Revision 1 is unchanged."
+    );
+    expect(document.activeElement).toBe(card.getByTestId("plan-guidance-edit"));
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    expect(card.getByTestId("plan-guidance-field")).toHaveProperty("value", "Keep the names");
+  });
+
+  test("P5: 2,001 characters are kept, marked invalid and never sent", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const refresh = countingOnRefreshGuidance();
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const card = testing.within(await view.findByTestId("plan-region"));
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    const field = card.getByTestId("plan-guidance-field");
+    const over = "g".repeat(2_001);
+    testing.fireEvent.change(field, { target: { value: over } });
+
+    expect(field).toHaveProperty("value", over);
+    expect(field.getAttribute("aria-invalid")).toBe("true");
+    expect(card.getByTestId("plan-guidance-error").textContent).toBe(
+      "Shorten guidance to 2,000 characters. Your text is kept."
+    );
+    expect(card.getByTestId("plan-guidance-save")).toHaveProperty("disabled", true);
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  test("P6: a stale save keeps the draft, shows the stored winner and focuses the field", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const winner = makePlan({ revision: 2, guidance: "Winner." });
+    const stale =
+      "The plan changed since you opened its guidance. Review the current revision before saving.";
+    const refresh = mock(async (_input: unknown) => ({
+      ok: false,
+      error: { code: "invalid-request", message: stale }
+    }));
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const card = testing.within(await view.findByTestId("plan-region"));
+
+    chat.setStored(planThread(winner));
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(card.getByTestId("plan-guidance-field"), { target: { value: "Past tense." } });
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-guidance-save")));
+
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-revision").textContent).toBe("Revision 2 · Edit plan");
+    });
+    expect(card.getByTestId("plan-guidance-error").textContent).toBe(stale);
+    expect(card.getByTestId("plan-guidance-text").textContent).toBe("Winner.");
+    expect(card.getByTestId("plan-guidance-field")).toHaveProperty("value", "Past tense.");
+    expect(card.getByTestId("plan-announcement").textContent).toBe("");
+    await testing.waitFor(() => {
+      expect(document.activeElement).toBe(card.getByTestId("plan-guidance-field"));
+    });
+    expect(card.getByTestId("plan-announcement").textContent).not.toContain("Plan guidance saved");
+  });
+
+  test("P7: Start is disabled while editing and sends the confirmed revision with no guidance", async () => {
+    const plan = makePlan({ revision: 1, guidance: "Keep the names" });
+    const confirmed = makePlan({ revision: 2, guidance: "Past tense." });
+    const refresh = mock(async (_input: unknown) => ({ ok: true, data: confirmed }));
+    const chat = renderChat({ thread: planThread(plan), refreshPlanGuidance: refresh });
+    const view = chat.view;
+    const card = testing.within(await view.findByTestId("plan-region"));
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    expect(card.getByTestId("plan-start")).toHaveProperty("disabled", true);
+    expect(card.getByTestId("plan-start-blocked").textContent).toBe(
+      "Save or cancel the guidance edit before starting."
+    );
+    testing.fireEvent.click(card.getByTestId("plan-guidance-cancel"));
+    expect(card.getByTestId("plan-start")).toHaveProperty("disabled", false);
+    expect(card.queryByTestId("plan-start-blocked")).toBeNull();
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(card.getByTestId("plan-guidance-field"), { target: { value: "Past tense." } });
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-guidance-save")));
+    await testing.waitFor(() => {
+      expect(card.getByTestId("plan-revision").textContent).toBe("Revision 2 · Edit plan");
+    });
+    expect(card.getByTestId("plan-start")).toHaveProperty("disabled", false);
+
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-start")));
+    expect(chat.start).toHaveBeenCalledTimes(1);
+    const request = chat.start.mock.calls[0]?.[0];
+    if (!request) throw new Error("the Start request was not sent");
+    expect(request.plan).toEqual({ id: PLAN_ID, revision: 2, action: "start" });
+    expect(request).not.toHaveProperty("guidance");
+  });
+
+  test("P8: only a proposed plan offers the editor; stale proposed keeps it without Start", async () => {
+    const fixed: Record<AgentPlan["status"], string> = {
+      proposed: FIXED_PROPOSED,
+      running: "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      "waiting-for-approval": "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      "pause-requested": "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      paused: "Plan guidance is fixed for this plan. Resume uses it; to change direction, send a new turn.",
+      completed: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      cancelled: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      failed: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      expired: "The plan has ended. Its guidance is a record of the reviewed proposal."
+    };
+    for (const status of [
+      "running",
+      "waiting-for-approval",
+      "pause-requested",
+      "paused",
+      "completed",
+      "cancelled",
+      "failed",
+      "expired"
+    ] as const) {
+      const view = renderPlan({
+        plan: makePlan({ status, guidance: "Keep the names" }),
+        onRefreshGuidance: countingOnRefreshGuidance()
+      });
+      const card = cardOf(view);
+      for (const testId of [
+        "plan-guidance-edit",
+        "plan-guidance-field",
+        "plan-guidance-save",
+        "plan-guidance-cancel"
+      ]) {
+        expect({ status, testId, found: card.queryByTestId(testId) !== null })
+          .toEqual({ status, testId, found: false });
+      }
+      expect(card.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
+      expect(card.getByTestId("plan-guidance-fixed").textContent).toBe(fixed[status]);
+    }
+
+    const stale = renderPlan({
+      plan: makePlan({ revision: 1, guidance: "Keep the names" }),
+      stale: true,
+      onRefreshGuidance: countingOnRefreshGuidance()
+    });
+    expect(cardOf(stale).getByTestId("plan-guidance-edit")).toBeDefined();
+    expect(cardOf(stale).queryByTestId("plan-start")).toBeNull();
+
+    testing.cleanup();
+    const chat = renderChat({
+      thread: planThread(makePlan({ revision: 1, guidance: "Keep the names" })),
+      refreshPlanGuidance: countingOnRefreshGuidance()
+    });
+    const chatView = chat.view;
+    await chatView.findByTestId("plan-region");
+    testing.fireEvent.change(chatView.getByTestId("agent-mode"), { target: { value: "edit" } });
+    expect(chatView.getByTestId("plan-guidance")).toHaveProperty("disabled", true);
+    expect(chatView.getAllByTestId("plan-card")).toHaveLength(1);
+  });
+});
 describe("plan failure interface", () => {
   test("R1: a kept conflict copy is named without claiming a save or a completion", async () => {
     const plan = makePlan({

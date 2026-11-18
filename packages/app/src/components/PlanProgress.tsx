@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from "react";
-import type {
-  AgentPlan,
-  AgentPlanStatus,
-  AgentPlanStepState
+import {
+  AGENT_PLAN_LIMITS,
+  type AgentPlan,
+  type AgentPlanStatus,
+  type AgentPlanStepState
 } from "@ai-book-studio/core/agent/messages";
 import { Button } from "@ai-book-studio/ui/button";
 
@@ -68,6 +69,18 @@ export interface PlanCancelRef {
   readonly id: string;
 }
 
+/** The displayed proposed revision and the verbatim guidance to save as its next revision. */
+export interface PlanGuidanceRef {
+  readonly id: string;
+  readonly revision: number;
+  readonly guidance: string;
+}
+
+/** A refresh's confirmed stored plan is the only success; a refusal carries its author sentence. */
+export interface PlanGuidanceOutcome extends PlanActionOutcome {
+  readonly plan?: AgentPlan;
+}
+
 interface Props {
   readonly plan: AgentPlan;
   /** A turn is running, so Start waits for it to stop. */
@@ -101,6 +114,10 @@ interface Props {
   readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
   /** Cancel this plan terminally. A live turn stops; completed edits stay. */
   readonly onCancel?: (ref: PlanCancelRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  /** Refresh the proposed plan's guidance as its next revision. Omitted in a read-only review. */
+  readonly onRefreshGuidance?: (ref: PlanGuidanceRef) => PlanGuidanceOutcome | Promise<PlanGuidanceOutcome>;
+  /** A refresh is in flight; the editor and Start wait for the confirmed plan. */
+  readonly refreshing?: boolean;
   /** The conversation stored a new proposal: put focus on this card's stable heading. */
   readonly focusRequest?: number;
 }
@@ -188,6 +205,22 @@ function confirmedAnnouncement(
   }
 }
 
+/** The one sentence that says whether guidance can still change for this stored status. */
+function guidanceFixedText(status: AgentPlanStatus): string {
+  switch (status) {
+    case "proposed":
+      return "Guidance is included in the plan's explicit Start or Resume turn. It does not change the plan's steps, mode, model, tools or approvals.";
+    case "running":
+    case "waiting-for-approval":
+    case "pause-requested":
+      return "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.";
+    case "paused":
+      return "Plan guidance is fixed for this plan. Resume uses it; to change direction, send a new turn.";
+    default:
+      return "The plan has ended. Its guidance is a record of the reviewed proposal.";
+  }
+}
+
 export function PlanProgress({
   plan,
   running,
@@ -204,6 +237,8 @@ export function PlanProgress({
   onPause,
   onResume,
   onCancel,
+  onRefreshGuidance,
+  refreshing = false,
   focusRequest = 0
 }: Props) {
   const headingId = useId();
@@ -230,6 +265,19 @@ export function PlanProgress({
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const restoreCancelFocus = useRef(false);
+  const [guidanceEditing, setGuidanceEditing] = useState(false);
+  const [guidanceDraft, setGuidanceDraft] = useState(plan.guidance ?? "");
+  const [guidanceSaving, setGuidanceSaving] = useState(false);
+  const [guidanceFailure, setGuidanceFailure] = useState<string | null>(null);
+  const [guidanceFocusRequest, setGuidanceFocusRequest] = useState(0);
+  const guidanceFocus = useRef<"field" | "edit" | "heading" | null>(null);
+  const guidanceFieldRef = useRef<HTMLTextAreaElement>(null);
+  const guidanceButtonRef = useRef<HTMLButtonElement>(null);
+  const guidanceFieldId = useId();
+  const guidanceCounterId = useId();
+  const guidanceHelpId = useId();
+  const previousGuidancePlanId = useRef(plan.id);
+  const previousGuidanceStatus = useRef(plan.status);
   const canStart = plan.status === "proposed" && !running && Boolean(onStart) && !stale;
   // Pause stays mounted while its stop is open, disabled, so focus and the state stay announced.
   // The request-pause notice changes the stored status to `pause-requested`; the open stop keeps
@@ -249,6 +297,21 @@ export function PlanProgress({
       ((plan.status === "running" || plan.status === "waiting-for-approval") && live));
   const canCancel = cancelOffered && !starting && !resuming && !cancelBusy;
   const cancelled = plan.status === "cancelled";
+  // The editor is available in Discuss too: after a proposal the composer returns to Discuss, but
+  // the stored Edit plan is still the author's review surface. It is never gated on composer mode.
+  const guidanceEditorOffered = plan.status === "proposed" && !running &&
+    !starting && !resuming && !cancelling && !guidanceSaving && !refreshing &&
+    Boolean(onRefreshGuidance) && !guidanceEditing;
+  const guidanceEditorOpen = guidanceEditing && plan.status === "proposed" && !running &&
+    !starting && !resuming && !cancelling && !cancelSubmitting;
+  const guidanceOverBound = guidanceDraft.length > AGENT_PLAN_LIMITS.guidance;
+  const guidanceChanged = guidanceDraft !== (plan.guidance ?? "");
+  const guidanceBlank = guidanceDraft.trim().length === 0;
+  const canSaveGuidance = plan.status === "proposed" && guidanceChanged && !guidanceOverBound &&
+    !guidanceSaving && !refreshing;
+  const guidanceError = guidanceEditorOpen && guidanceOverBound
+    ? "Shorten guidance to 2,000 characters. Your text is kept."
+    : guidanceFailure;
 
   // The inline confirmation belongs to one plan status; a new plan, a status change or a started
   // cancel closes it. The effect intentionally keys on props it does not read.
@@ -262,6 +325,49 @@ export function PlanProgress({
     restoreCancelFocus.current = false;
     cancelButtonRef.current?.focus();
   }, [cancelConfirming]);
+
+  // A new plan owns a new editor. Opening, closing and failure state do not cross plan ids; the
+  // confirmed plan prop is still the only source of text, never a local patch.
+  useEffect(() => {
+    if (previousGuidancePlanId.current === plan.id) return;
+    previousGuidancePlanId.current = plan.id;
+    setGuidanceEditing(false);
+    setGuidanceSaving(false);
+    setGuidanceDraft(plan.guidance ?? "");
+    setGuidanceFailure(null);
+  }, [plan.guidance, plan.id]);
+
+  // A plan that leaves proposed can no longer receive guidance. The editor closes, the draft is
+  // discarded, focus returns to the heading, and the last refusal stays visible as an alert.
+  useEffect(() => {
+    const before = previousGuidanceStatus.current;
+    previousGuidanceStatus.current = plan.status;
+    if (before !== "proposed" || plan.status === "proposed" || !guidanceEditing) return;
+    setGuidanceEditing(false);
+    setGuidanceSaving(false);
+    setGuidanceDraft(plan.guidance ?? "");
+    guidanceFocus.current = "heading";
+    setGuidanceFocusRequest((current) => current + 1);
+  }, [guidanceEditing, plan.guidance, plan.status]);
+
+  // A focus-request counter makes even a repeated identical refusal focus the field again. The
+  // Edit button is the replacement control after a save or a safe close, and it may appear one
+  // render after the editor closes while the parent clears its refreshing flag.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the counter and offer state are the retry triggers; the body reads refs
+  useEffect(() => {
+    const target = guidanceFocus.current;
+    if (!target) return;
+    if (target === "edit" && !guidanceButtonRef.current) return;
+    guidanceFocus.current = null;
+    if (target === "field") {
+      if (guidanceFieldRef.current) guidanceFieldRef.current.focus();
+      else headingRef.current?.focus();
+    } else if (target === "edit") {
+      guidanceButtonRef.current?.focus();
+    } else {
+      headingRef.current?.focus();
+    }
+  }, [guidanceEditorOffered, guidanceFocusRequest]);
 
   // The card owns the heading as its stable focus target after an action removes or disables the
   // pressed control. Track whether the author's focus was inside the card before that happens.
@@ -370,8 +476,76 @@ export function PlanProgress({
     ? `${pauseFacts(pauseSummary)}${resuming ? " · Resuming…" : ""}`
     : "";
 
+  const openGuidance = (): void => {
+    if (!guidanceEditorOffered) return;
+    setGuidanceDraft(plan.guidance ?? "");
+    setGuidanceFailure(null);
+    setGuidanceEditing(true);
+    guidanceFocus.current = "field";
+    setGuidanceFocusRequest((current) => current + 1);
+  };
+
+  const cancelGuidanceEdit = (): void => {
+    const changed = guidanceDraft !== (plan.guidance ?? "");
+    setGuidanceEditing(false);
+    setGuidanceSaving(false);
+    setGuidanceDraft(plan.guidance ?? "");
+    setGuidanceFailure(null);
+    if (changed) {
+      setAnnouncement(`Guidance edit closed. Revision ${plan.revision} is unchanged.`);
+    }
+    guidanceFocus.current = "edit";
+    setGuidanceFocusRequest((current) => current + 1);
+  };
+
+  const saveGuidance = async (): Promise<void> => {
+    if (!onRefreshGuidance || !canSaveGuidance) return;
+    setGuidanceSaving(true);
+    setGuidanceFailure(null);
+    setAnnouncement("Saving plan guidance. Waiting for the confirmed proposal.");
+    headingRef.current?.focus();
+    try {
+      const outcome = await onRefreshGuidance({
+        id: plan.id,
+        revision: plan.revision,
+        guidance: guidanceDraft
+      });
+      if (outcome?.ok && outcome.plan?.id === plan.id) {
+        const confirmed = outcome.plan;
+        const cleared = confirmed.guidance === undefined || confirmed.guidance.trim().length === 0;
+        setGuidanceEditing(false);
+        setGuidanceDraft(confirmed.guidance ?? "");
+        setGuidanceFailure(null);
+        setAnnouncement(
+          `${cleared ? "Plan guidance cleared." : "Plan guidance saved."} Revision ${confirmed.revision}. Start uses revision ${confirmed.revision}.`
+        );
+        guidanceFocus.current = "edit";
+        setGuidanceFocusRequest((current) => current + 1);
+      } else {
+        const reason = outcome && !outcome.ok
+          ? outcome.reason ?? "The guidance change could not be confirmed. The last confirmed proposal is unchanged."
+          : "The guidance change could not be confirmed. The last confirmed proposal is unchanged.";
+        setGuidanceFailure(reason);
+        setAnnouncement("");
+        guidanceFocus.current = "field";
+        setGuidanceFocusRequest((current) => current + 1);
+      }
+    } catch (error) {
+      setGuidanceFailure(
+        error instanceof Error
+          ? error.message
+          : "The guidance change could not be confirmed. The last confirmed proposal is unchanged."
+      );
+      setAnnouncement("");
+      guidanceFocus.current = "field";
+      setGuidanceFocusRequest((current) => current + 1);
+    } finally {
+      setGuidanceSaving(false);
+    }
+  };
+
   const start = async (): Promise<void> => {
-    if (!onStart || !canStart || starting) return;
+    if (!onStart || !canStart || starting || guidanceEditorOpen) return;
     setStarting(true);
     setFailure(null);
     setAnnouncement("Starting the plan. Waiting for the running acknowledgement.");
@@ -517,6 +691,9 @@ export function PlanProgress({
           This plan cannot be started, resumed or replayed. Completed steps stay; no further step will run.
         </p>
       ) : null}
+      <p data-testid="plan-guidance-block" className="text-xs font-medium text-muted-foreground">
+        Guidance for this plan
+      </p>
       {plan.guidance !== undefined ? (
         <p data-testid="plan-guidance-text" className="whitespace-pre-wrap text-xs text-muted-foreground">
           {plan.guidance}
@@ -524,10 +701,87 @@ export function PlanProgress({
       ) : (
         <p data-testid="plan-guidance-omitted" className="text-xs text-muted-foreground">No plan guidance</p>
       )}
+      <p data-testid="plan-guidance-fixed" className="text-xs text-muted-foreground">
+        {guidanceFixedText(plan.status)}
+      </p>
+      {guidanceEditorOffered ? (
+        <Button
+          ref={guidanceButtonRef}
+          variant="secondary"
+          size="sm"
+          data-testid="plan-guidance-edit"
+          onClick={openGuidance}
+        >
+          Edit guidance
+        </Button>
+      ) : null}
+      {guidanceEditorOpen ? (
+        <div data-testid="plan-guidance-editor" className="space-y-1">
+          <label className="block text-xs text-muted-foreground" htmlFor={guidanceFieldId}>
+            Plan guidance (optional)
+          </label>
+          <textarea
+            ref={guidanceFieldRef}
+            id={guidanceFieldId}
+            value={guidanceDraft}
+            onChange={(event) => setGuidanceDraft(event.target.value)}
+            rows={3}
+            maxLength={AGENT_PLAN_LIMITS.guidance}
+            disabled={guidanceSaving || refreshing}
+            aria-invalid={guidanceOverBound}
+            aria-describedby={`${guidanceCounterId} ${guidanceHelpId}`}
+            data-testid="plan-guidance-field"
+            className="mt-1 block w-full rounded-[var(--corner-sm)] border border-[var(--input)] bg-[var(--card)] px-2 py-1.5 text-sm text-foreground focus-visible:outline-2"
+          />
+          <p id={guidanceCounterId} data-testid="plan-guidance-limit" className="text-xs text-muted-foreground">
+            {guidanceDraft.length.toLocaleString()} / {AGENT_PLAN_LIMITS.guidance.toLocaleString()} characters · Blank clears the plan's guidance
+          </p>
+          <p id={guidanceHelpId} className="text-xs text-muted-foreground">
+            Editing revision {plan.revision}. Saving creates revision {plan.revision + 1}; the plan stays proposed and nothing runs until Start plan.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canSaveGuidance}
+              data-testid="plan-guidance-save"
+              onClick={() => void saveGuidance()}
+            >
+              {guidanceBlank && plan.guidance !== undefined ? "Clear guidance" : "Save guidance"}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={guidanceSaving || refreshing}
+              data-testid="plan-guidance-cancel"
+              onClick={cancelGuidanceEdit}
+            >
+              Cancel edit
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {guidanceError ? (
+        <p role="alert" data-testid="plan-guidance-error" className="text-xs text-[var(--destructive-text)]">
+          {guidanceError}
+        </p>
+      ) : null}
       {notice ? <p role="alert" data-testid="plan-notice" className="text-xs text-[var(--destructive-text)]">{notice}</p> : null}
       {failure ? <p role="alert" data-testid="plan-action-error" className="text-xs text-[var(--destructive-text)]">{failure}</p> : null}
       {resumeFailure ? <p role="alert" data-testid="plan-resume-error" className="text-xs text-[var(--destructive-text)]">{resumeFailure}</p> : null}
       {cancelFailure ? <p role="alert" data-testid="plan-cancel-error" className="text-xs text-[var(--destructive-text)]">{cancelFailure}</p> : null}
+      {canStart ? (
+        guidanceEditorOpen ? (
+          <p data-testid="plan-start-blocked" className="text-xs text-muted-foreground">
+            Save or cancel the guidance edit before starting.
+          </p>
+        ) : null
+      ) : null}
+      {canStart ? (
+        <p data-testid="plan-start-revision" className="text-xs text-muted-foreground">
+          Start uses revision {plan.revision}.
+        </p>
+      ) : null}
       {canStart ? (
         <p className="text-xs text-muted-foreground">
           Start creates a new Edit turn. Your composer choice stays as it is, and destructive actions still ask for approval.
@@ -538,7 +792,7 @@ export function PlanProgress({
           ref={startButtonRef}
           variant="primary"
           size="sm"
-          disabled={starting}
+          disabled={starting || guidanceEditorOpen}
           data-testid="plan-start"
           onClick={() => void start()}
         >

@@ -7,6 +7,8 @@ import {
   type PlanActionOutcome,
   type PlanCancelRef,
   type PlanCancelSummary,
+  type PlanGuidanceOutcome,
+  type PlanGuidanceRef,
   type PlanPauseSummary,
   type PlanResumeRef,
   type PlanStartRef
@@ -60,6 +62,10 @@ interface Props {
   readonly onPause?: () => void;
   readonly onResume?: (ref: PlanResumeRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
   readonly onCancel?: (ref: PlanCancelRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
+  /** The conversation's plan-scoped guidance refresh, shared with the one stored-plan card. */
+  readonly onRefreshGuidance?: (ref: PlanGuidanceRef) => PlanGuidanceOutcome | Promise<PlanGuidanceOutcome>;
+  /** A guidance refresh is in flight. */
+  readonly refreshing?: boolean;
   /** The conversation owns the one plan card; the composer keeps its guard without a second card. */
   readonly showStoredPlan?: boolean;
 }
@@ -99,6 +105,8 @@ export function PlanFirstControl({
   onPause,
   onResume,
   onCancel,
+  onRefreshGuidance,
+  refreshing = false,
   showStoredPlan = true
 }: Props) {
   const headingId = useId();
@@ -336,6 +344,8 @@ export function PlanFirstControl({
                 {...(onPause ? { onPause } : {})}
                 {...(onResume ? { onResume } : {})}
                 {...(onCancel ? { onCancel } : {})}
+                {...(onRefreshGuidance ? { onRefreshGuidance } : {})}
+                refreshing={refreshing}
               />
             </div>
           ) : null}

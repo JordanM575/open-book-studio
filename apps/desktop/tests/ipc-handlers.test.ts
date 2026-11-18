@@ -97,6 +97,17 @@ function onPlatform(value: NodeJS.Platform): void {
 
 const NOW = "2026-11-03T12:00:00.000Z";
 const BOOK = "book_ipc000001";
+const REFRESHED_PLAN = {
+  id: "plan_ipc0001",
+  mode: "edit",
+  status: "proposed",
+  purpose: "Revise the opening",
+  steps: [{ text: "Read the opening", state: "pending" }],
+  revision: 2,
+  parent: { messageId: "msg_ipc0001", turnId: "turn_ipc0001" },
+  createdAt: NOW,
+  updatedAt: NOW
+};
 const CONNECTION = {
   id: "conn_ipc000001",
   provider: "openrouter" as const,
@@ -164,6 +175,13 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
       outcome: "live",
       turnId: "turn_ipc0001"
     })),
+    refreshPlanGuidance: mock(async (
+      _bookId: string,
+      _threadId: string,
+      _planId: string,
+      _revision: number,
+      _guidance: string
+    ) => REFRESHED_PLAN),
     undoLast: mock(async (_bookId: string, _turnId?: string) => ({ restored: 1 })),
     approve: mock(async (_turnId: string, _approvalId: string, _approved: boolean) => null),
     readThread: mock(async (bookId: string, threadId: string) => ({
@@ -321,6 +339,10 @@ describe("ipc boundary", () => {
       [IPC.agent.cancelPlan, { bookId: id, planId: "plan_ipc0001" }],
       [IPC.agent.cancelPlan, { bookId: id, threadId: "thread_ipc0001", planId: "" }],
       [IPC.agent.cancelPlan, { bookId: id, threadId: "thread_ipc0001", planId: "p".repeat(201) }],
+      [IPC.agent.refreshPlanGuidance, {}],
+      [IPC.agent.refreshPlanGuidance, { bookId: id, threadId: "thread_ipc0001", planId: "plan_ipc0001", revision: 1 }],
+      [IPC.agent.refreshPlanGuidance, { bookId: id, threadId: "thread_ipc0001", planId: "   ", revision: 1, guidance: "x" }],
+      [IPC.agent.refreshPlanGuidance, { bookId: id, threadId: "thread_ipc0001", planId: "plan_ipc0001", revision: 0, guidance: "x" }],
       [IPC.agent.undoLast, "turn_1"],
       [IPC.agent.undoLast, { bookId: id, turnId: "" }],
       [IPC.agent.undoLast, { bookId: id, turnId: "t".repeat(81) }],
@@ -908,6 +930,145 @@ describe("the agent", () => {
     expect(agent.undoLast.mock.calls.at(-1)).toEqual([bookId, "turn_ipc0001"]);
     await data(IPC.agent.approve, { turnId: "turn_ipc0001", approvalId: "call_1", approved: false });
     expect(agent.approve).toHaveBeenCalledWith("turn_ipc0001", "call_1", false);
+  });
+
+  test("plan guidance refresh is one strict plan-scoped call and returns the confirmed plan", async () => {
+    const { agent } = await setup();
+    const bookId = BOOK;
+    const threadId = "thread_ipc0001";
+    const planId = "plan_ipc0001";
+    const guidance = "Past tense.";
+
+    const result = await call(IPC.agent.refreshPlanGuidance, {
+      bookId,
+      threadId,
+      planId,
+      revision: 2,
+      guidance
+    });
+
+    expect(result).toEqual({ ok: true, data: REFRESHED_PLAN });
+    expect(agent.refreshPlanGuidance).toHaveBeenCalledTimes(1);
+    expect(agent.refreshPlanGuidance.mock.calls[0]).toEqual([bookId, threadId, planId, 2, guidance]);
+    expect(agent.refreshPlanGuidance.mock.calls[0]).toHaveLength(5);
+  });
+
+  test("plan guidance refresh refuses missing ids, an empty plan id and a missing guidance", async () => {
+    const { agent } = await setup();
+    const bookId = BOOK;
+    const threadId = "thread_ipc0001";
+    const planId = "plan_ipc0001";
+    const cases: unknown[] = [
+      {},
+      { bookId, threadId, planId, revision: 1 },
+      { bookId, planId, revision: 1, guidance: "Past tense." },
+      { bookId, threadId: "", planId, revision: 1, guidance: "Past tense." },
+      { bookId, threadId, planId: "   ", revision: 1, guidance: "Past tense." },
+      { bookId, threadId, planId: "p".repeat(201), revision: 1, guidance: "Past tense." }
+    ];
+
+    for (const payload of cases) {
+      expect(await call(IPC.agent.refreshPlanGuidance, payload)).toMatchObject({
+        ok: false,
+        error: { code: "invalid" }
+      });
+    }
+    expect(agent.refreshPlanGuidance).not.toHaveBeenCalled();
+  });
+
+  test("plan guidance refresh bounds the reviewed revision and accepts the safe maximum", async () => {
+    const { agent } = await setup();
+    const base = {
+      bookId: BOOK,
+      threadId: "thread_ipc0001",
+      planId: "plan_ipc0001",
+      guidance: "Past tense."
+    };
+
+    for (const revision of [0, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(await call(IPC.agent.refreshPlanGuidance, { ...base, revision })).toMatchObject({
+        ok: false,
+        error: { code: "invalid" }
+      });
+    }
+    expect(agent.refreshPlanGuidance).not.toHaveBeenCalled();
+
+    expect(await call(IPC.agent.refreshPlanGuidance, { ...base, revision: 1 })).toMatchObject({ ok: true });
+    expect(agent.refreshPlanGuidance.mock.calls[0]?.[3]).toBe(1);
+    expect(await call(IPC.agent.refreshPlanGuidance, {
+      ...base,
+      revision: Number.MAX_SAFE_INTEGER
+    })).toMatchObject({ ok: true });
+    expect(agent.refreshPlanGuidance.mock.calls[1]?.[3]).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("plan guidance refresh passes the 2,001 refusal through and refuses the transport ceiling", async () => {
+    const { agent } = await setup();
+    const base = {
+      bookId: BOOK,
+      threadId: "thread_ipc0001",
+      planId: "plan_ipc0001",
+      revision: 1
+    };
+
+    expect(await call(IPC.agent.refreshPlanGuidance, { ...base, guidance: 5 })).toMatchObject({
+      ok: false,
+      error: { code: "invalid" }
+    });
+    expect(await call(IPC.agent.refreshPlanGuidance, {
+      ...base,
+      guidance: "g".repeat(50_001)
+    })).toMatchObject({ ok: false, error: { code: "invalid" } });
+    expect(agent.refreshPlanGuidance).not.toHaveBeenCalled();
+
+    const overBound = "g".repeat(2_001);
+    expect(await call(IPC.agent.refreshPlanGuidance, { ...base, guidance: overBound })).toMatchObject({
+      ok: true
+    });
+    expect(agent.refreshPlanGuidance.mock.calls[0]?.[4]).toBe(overBound);
+    expect(agent.refreshPlanGuidance.mock.calls[0]?.[4]).toHaveLength(2_001);
+
+    const atCeiling = "g".repeat(50_000);
+    expect(await call(IPC.agent.refreshPlanGuidance, { ...base, guidance: atCeiling })).toMatchObject({
+      ok: true
+    });
+    expect(agent.refreshPlanGuidance.mock.calls[1]?.[4]).toBe(atCeiling);
+  });
+
+  test("plan guidance refresh refuses authority keys and wraps a throwing agent once", async () => {
+    const { agent } = await setup();
+    const base = {
+      bookId: BOOK,
+      threadId: "thread_ipc0001",
+      planId: "plan_ipc0001",
+      revision: 2,
+      guidance: "Past tense."
+    };
+
+    for (const extra of [
+      { mode: "edit" },
+      { model: { connectionId: "conn_ipc0001", modelId: "model" } },
+      { tools: ["delete_chapter"] },
+      { approvals: [] },
+      { purpose: "Rewrite it" },
+      { steps: ["Read"] }
+    ]) {
+      expect(await call(IPC.agent.refreshPlanGuidance, { ...base, ...extra })).toMatchObject({
+        ok: false,
+        error: { code: "invalid" }
+      });
+    }
+    expect(agent.refreshPlanGuidance).not.toHaveBeenCalled();
+
+    const message = "The plan changed since you opened its guidance. Review the current revision before saving.";
+    agent.refreshPlanGuidance = mock(async () => {
+      throw new ProviderError("invalid-request", message);
+    });
+    expect(await call(IPC.agent.refreshPlanGuidance, base)).toEqual({
+      ok: false,
+      error: { code: "invalid-request", message }
+    });
+    expect(agent.refreshPlanGuidance).toHaveBeenCalledTimes(1);
   });
 
   test("conversations are listed, renamed, branched and removed in the book's thread files", async () => {

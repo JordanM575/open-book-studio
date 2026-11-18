@@ -258,6 +258,13 @@ describe("what the browser build cannot do yet says so plainly", () => {
       await agent.undoLast("book_any"),
       await agent.undoLast("book_any", "turn_any"),
       await agent.approve("book_any", "approval", true),
+      await agent.refreshPlanGuidance({
+        bookId: "book_any",
+        threadId: "thread_any",
+        planId: "plan_any",
+        revision: 1,
+        guidance: "Past tense."
+      }),
       await agent.status("book_any"),
       await agent.setSettings("book_any", {} as never),
       await agent.glassesUrl(),
@@ -273,6 +280,8 @@ describe("what the browser build cannot do yet says so plainly", () => {
     ];
     for (const result of refusals) expect(refusal(result)).toContain("desktop app");
     expect(value(await agent.stop("book_any"))).toBeNull();
+    expect(studio.platform).toBe("web");
+    expect(value(await studio.books.list())).toEqual([]);
   });
 
   test("illustrations and voice refuse with the reason", async () => {

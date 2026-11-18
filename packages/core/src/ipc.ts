@@ -280,6 +280,8 @@ export const IPC = {
     stop: "agent:stop",
     /** Cancel one stored plan terminally, stopping its live turn when this process holds it. */
     cancelPlan: "agent:cancelPlan",
+    /** Refresh one proposed plan's guidance as its next revision. No turn, model or tool call. */
+    refreshPlanGuidance: "agent:refreshPlanGuidance",
     undoLast: "agent:undoLast",
     approve: "agent:approve",
     /** Everything the app shows about a book's agent. */
@@ -562,6 +564,21 @@ export type AgentPlanCancelResult =
   | { outcome: "terminal"; plan: AgentPlan };
 
 /**
+ * The reviewed base revision of one proposed plan's guidance refresh.
+ *
+ * `revision` is never the next revision: the runtime writes exactly `revision + 1`. Guidance is
+ * verbatim; blank or whitespace-only text clears the stored value and more than 2,000 characters
+ * is refused without truncation.
+ */
+export interface AgentPlanGuidanceRefresh {
+  readonly bookId: string;
+  readonly threadId: string;
+  readonly planId: string;
+  readonly revision: number;
+  readonly guidance: string;
+}
+
+/**
  * The one plan-linked turn this main process still owns for a conversation.
  *
  * `stopping` means the turn has an open stop request; a reload shows `Stopping…` and offers no
@@ -826,6 +843,11 @@ export interface StudioApi {
      * event; a proposed, paused or failed-confirm plan is cancelled directly with no turn events.
      */
     cancelPlan(input: { bookId: string; threadId: string; planId: string }): Promise<Result<AgentPlanCancelResult>>;
+    /**
+     * Refresh one proposed plan's guidance as its next revision. The confirmed returned plan is the
+     * only success. No turn, provider request, tool, approval or book/chapter write is made.
+     */
+    refreshPlanGuidance(input: AgentPlanGuidanceRefresh): Promise<Result<AgentPlan>>;
     /**
      * Undo the book's newest agent turn. With `turnId`, only while that turn owns the newest checkpoint:
      * otherwise nothing changes and the error says what is newest. The chat names the turn it offers;

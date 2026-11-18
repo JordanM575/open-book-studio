@@ -38,7 +38,7 @@ import {
 } from "@ai-book-studio/core/agent/messages";
 import { compactHistory } from "@ai-book-studio/core/agent/history";
 import { contextBreakdown, type ContextBreakdown } from "@ai-book-studio/core/agent/context";
-import { agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
+import { AGENT_PLAN_LIMITS, agentPlanBoundsRefusal } from "@ai-book-studio/core/agent/plan-state";
 import type {
   AgentPlanCancelResult,
   AgentPlanExpiry,
@@ -1070,6 +1070,109 @@ export class AgentRuntime {
       );
     }
     return { outcome: "cancelled", plan: stored };
+  }
+
+  /**
+   * Refresh one proposed plan's guidance as its next revision.
+   *
+   * This is a plan-record write, not a turn: it creates no user/assistant message, no checkpoint,
+   * no approval and no model or tool call. It never touches the active-turn map or the host tool
+   * gate. A non-proposed plan, a stale reviewed revision and an over-bound value are refused
+   * before the write; a refusal leaves the last confirmed proposal untouched.
+   */
+  async refreshPlanGuidance(
+    bookId: string,
+    threadId: string,
+    planId: string,
+    revision: number,
+    guidance: string
+  ): Promise<AgentPlan> {
+    const library = this.studio.requireLibrary();
+    const thread = await library.threads.read(bookId, threadId);
+    if (!thread) {
+      throw new ProviderError("not-found", "That conversation no longer exists. Nothing was changed.");
+    }
+    const plan = thread.plans.find((entry) => entry.id === planId);
+    if (!plan) {
+      throw new ProviderError("not-found", "That plan is not in this conversation. Nothing was changed.");
+    }
+    if (plan.status !== "proposed") {
+      throw new ProviderError(
+        "invalid-request",
+        "Only a proposed plan can receive guidance. Nothing was changed."
+      );
+    }
+    if (!Number.isSafeInteger(revision) || revision < 1) {
+      throw new ProviderError("invalid-request", "That plan revision is not valid. Nothing was changed.");
+    }
+    if (revision >= Number.MAX_SAFE_INTEGER) {
+      throw new ProviderError("invalid-request", "This plan cannot be revised further. Nothing was changed.");
+    }
+    if (plan.revision !== revision) {
+      throw new ProviderError(
+        "invalid-request",
+        "The plan changed since you opened its guidance. Review the current revision before saving."
+      );
+    }
+    if (typeof guidance !== "string") {
+      throw new ProviderError("invalid-request", "That guidance is not valid. Nothing was changed.");
+    }
+    if (guidance.length > AGENT_PLAN_LIMITS.guidance) {
+      throw new ProviderError(
+        "invalid-request",
+        "Shorten guidance to 2,000 characters. Your text is kept."
+      );
+    }
+
+    // The durable core refuses a blank string. Blank within the bound means clear, so omit it.
+    const nextGuidance = guidance.trim().length === 0 ? undefined : guidance;
+
+    let saved: AgentThread;
+    try {
+      saved = await library.threads.refreshPlanProposal(bookId, threadId, planId, {
+        revision: revision + 1,
+        ...(nextGuidance === undefined ? {} : { guidance: nextGuidance })
+      });
+    } catch (error) {
+      // A refresh or Start may have won while this request was in flight. A plan-state refusal gets
+      // one read to name the winner; conflict, uncertain and IO errors propagate to the renderer,
+      // which performs its own single display read. This is never a retry of the write.
+      if (error instanceof ThreadStoreError && error.code === "plan-state") {
+        const after = await this.rereadThread(bookId, threadId);
+        const winner = after?.plans.find((entry) => entry.id === planId);
+        if (!winner) {
+          throw new ProviderError("not-found", "That plan is not in this conversation. Nothing was changed.");
+        }
+        if (winner.status !== "proposed") {
+          throw new ProviderError(
+            "invalid-request",
+            "Only a proposed plan can receive guidance. Nothing was changed."
+          );
+        }
+        if (winner.revision !== revision) {
+          throw new ProviderError(
+            "invalid-request",
+            "The plan changed since you opened its guidance. Review the current revision before saving."
+          );
+        }
+      }
+      throw error;
+    }
+
+    const confirmed = saved.plans.find((entry) => entry.id === planId);
+    const expectedGuidance = nextGuidance;
+    if (
+      !confirmed ||
+      confirmed.status !== "proposed" ||
+      confirmed.revision !== revision + 1 ||
+      (confirmed.guidance ?? undefined) !== expectedGuidance
+    ) {
+      throw new ProviderError(
+        "invalid-request",
+        "The guidance change could not be confirmed. The last confirmed proposal is unchanged."
+      );
+    }
+    return confirmed;
   }
 
   /** The stored plan only when it is terminal, for a bounded race classification. */

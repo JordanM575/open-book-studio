@@ -140,6 +140,12 @@ function countingOnCancel(result: { ok: boolean; reason?: string } = { ok: true 
   return mock(async (_ref: unknown) => result);
 }
 
+function countingOnRefreshGuidance(
+  result: { ok: boolean; reason?: string; plan?: AgentPlan } = { ok: true }
+) {
+  return mock(async (_ref: unknown) => result);
+}
+
 function renderPlan(options: {
   plan?: AgentPlan;
   running?: boolean;
@@ -156,17 +162,21 @@ function renderPlan(options: {
   onPause?: ReturnType<typeof countingOnPause>;
   onResume?: ReturnType<typeof countingOnResume>;
   onCancel?: ReturnType<typeof countingOnCancel>;
+  onRefreshGuidance?: ReturnType<typeof countingOnRefreshGuidance>;
+  refreshing?: boolean;
 } = {}) {
   const onStart = options.onStart ?? countingOnStart();
   const onPause = options.onPause ?? countingOnPause();
   const onResume = options.onResume ?? countingOnResume();
   const onCancel = options.onCancel ?? countingOnCancel();
+  const onRefreshGuidance = options.onRefreshGuidance;
   const props = {
     plan: options.plan ?? makePlan(),
     running: options.running ?? false,
     live: options.live ?? false,
     stopping: options.stopping ?? false,
     resuming: options.resuming ?? false,
+    refreshing: options.refreshing ?? false,
     ...(options.pauseSummary !== undefined ? { pauseSummary: options.pauseSummary } : {}),
     ...(options.cancelling !== undefined ? { cancelling: options.cancelling } : {}),
     ...(options.cancelSummary !== undefined ? { cancelSummary: options.cancelSummary } : {}),
@@ -176,7 +186,8 @@ function renderPlan(options: {
     onStart,
     onPause,
     onResume,
-    onCancel
+    onCancel,
+    ...(onRefreshGuidance ? { onRefreshGuidance } : {})
   };
   const view = testing.render(React.createElement(PlanProgress, props));
   return {
@@ -185,6 +196,7 @@ function renderPlan(options: {
     onPause,
     onResume,
     onCancel,
+    onRefreshGuidance,
     rerenderWith(next: Partial<typeof props>) {
       view.rerender(React.createElement(PlanProgress, { ...props, ...next }));
     }
@@ -238,6 +250,7 @@ function renderChat(options: {
   planRuntime?: AgentPlanRuntime | null;
   expiry?: AgentPlanExpiry;
   start?: ReturnType<typeof mock>;
+  refreshPlanGuidance?: ReturnType<typeof mock>;
 } = {}) {
   let stored = options.thread ?? planThread(null);
   const planRuntime = options.planRuntime ?? null;
@@ -247,6 +260,8 @@ function renderChat(options: {
     ok: true,
     data: { turnId: PROPOSAL_TURN, threadId: THREAD, mode: "edit" }
   }));
+  const refreshPlanGuidance = options.refreshPlanGuidance ??
+    mock(async (_input: unknown) => ({ ok: false, error: { code: "invalid-request", message: "not used" } }));
   const read = mock(async () => {
     const first = reads === 0;
     reads += 1;
@@ -280,6 +295,7 @@ function renderChat(options: {
       start,
       stop: mock(async (_turnId: string) => ({ ok: true, data: null })),
       cancelPlan: mock(async (_input: unknown) => ({ ok: true, data: null })),
+      refreshPlanGuidance,
       approve: mock(async () => ({ ok: true, data: null })),
       undoLast: mock(async () => ({ ok: true, data: null })),
       onEvent: mock((handler: (event: AgentEvent) => void) => {
@@ -306,6 +322,7 @@ function renderChat(options: {
   return {
     start,
     read,
+    refreshPlanGuidance,
     view: testing.within(document.body),
     unmount: view.unmount,
     setStored(next: AgentThread) {
@@ -1023,5 +1040,146 @@ describe("plan accessibility", () => {
     const alerts = Array.from(document.querySelectorAll('[role="alert"]'))
       .filter((node) => node.textContent === EXPIRY_WARNING);
     expect(alerts).toHaveLength(1);
+  });
+
+  // G1
+  test("guidance editor focus, one announcer and the exact alerts", async () => {
+    const confirmed = makePlan({ revision: 4, guidance: "Past tense." });
+    const view = renderPlan({
+      plan: makePlan({ revision: 3, guidance: "Keep the names" }),
+      onRefreshGuidance: countingOnRefreshGuidance({ ok: true, plan: confirmed })
+    });
+    const card = testing.within(view.container);
+    const live = card.getByTestId("plan-announcement");
+    const field = () => card.getByTestId("plan-guidance-field");
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    expect(document.activeElement).toBe(field());
+    testing.fireEvent.change(field(), { target: { value: "Past tense." } });
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-guidance-save")));
+    await testing.waitFor(() => {
+      expect(live.textContent).toBe("Plan guidance saved. Revision 4. Start uses revision 4.");
+    });
+    await testing.waitFor(() => {
+      expect(document.activeElement).toBe(card.getByTestId("plan-guidance-edit"));
+    });
+    view.rerenderWith({ plan: confirmed });
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(field(), { target: { value: "Later tense." } });
+    testing.fireEvent.click(card.getByTestId("plan-guidance-cancel"));
+    expect(live.textContent).toBe("Guidance edit closed. Revision 4 is unchanged.");
+    await testing.waitFor(() => {
+      expect(document.activeElement).toBe(card.getByTestId("plan-guidance-edit"));
+    });
+
+    const refusal = "The plan changed since you opened its guidance. Review the current revision before saving.";
+    const refused = renderPlan({
+      plan: makePlan({ revision: 1, guidance: "Keep the names" }),
+      onRefreshGuidance: countingOnRefreshGuidance({ ok: false, reason: refusal })
+    });
+    const refusedCard = testing.within(refused.container);
+    testing.fireEvent.click(refusedCard.getByTestId("plan-guidance-edit"));
+    testing.fireEvent.change(refusedCard.getByTestId("plan-guidance-field"), {
+      target: { value: "Past tense." }
+    });
+    await testing.act(async () => testing.fireEvent.click(refusedCard.getByTestId("plan-guidance-save")));
+    await testing.waitFor(() => {
+      expect(refusedCard.getByTestId("plan-guidance-error").textContent).toBe(refusal);
+    });
+    expect(document.activeElement).toBe(refusedCard.getByTestId("plan-guidance-field"));
+    expect(refusedCard.getByTestId("plan-announcement").textContent).toBe("");
+
+    const cardNode = card.getByTestId("plan-card");
+    const liveRegions = Array.from(cardNode.querySelectorAll('[role="status"], [aria-live]'));
+    expect(liveRegions).toHaveLength(1);
+    expect(liveRegions[0]).toBe(live);
+    const status = card.getByTestId("plan-status");
+    expect(status.getAttribute("role")).toBeNull();
+    expect(status.getAttribute("aria-live")).toBeNull();
+    expect(refusedCard.getByTestId("plan-guidance-error").getAttribute("role")).toBe("alert");
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    const reopenedField = card.getByTestId("plan-guidance-field");
+    for (const node of [reopenedField, card.getByTestId("plan-guidance-save"), card.getByTestId("plan-guidance-cancel")]) {
+      expect(testing.fireEvent.keyDown(node, { key: "Tab" })).toBe(true);
+    }
+  });
+
+  // G2
+  test("only a proposed plan shows the guidance editor; every other status keeps a record", () => {
+    const sentences: Record<Exclude<AgentPlan["status"], "proposed">, string> = {
+      running: "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      "waiting-for-approval": "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      "pause-requested": "Plan guidance is fixed while this plan runs. To change direction, stop it and send a new turn.",
+      paused: "Plan guidance is fixed for this plan. Resume uses it; to change direction, send a new turn.",
+      completed: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      cancelled: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      failed: "The plan has ended. Its guidance is a record of the reviewed proposal.",
+      expired: "The plan has ended. Its guidance is a record of the reviewed proposal."
+    };
+    for (const status of Object.keys(sentences) as Array<keyof typeof sentences>) {
+      const view = renderPlan({
+        plan: makePlan({ status, guidance: "Keep the names" }),
+        onRefreshGuidance: countingOnRefreshGuidance()
+      });
+      const card = testing.within(view.container);
+      for (const testId of [
+        "plan-guidance-edit",
+        "plan-guidance-field",
+        "plan-guidance-save",
+        "plan-guidance-cancel"
+      ]) {
+        expect({ status, testId, found: card.queryByTestId(testId) !== null })
+          .toEqual({ status, testId, found: false });
+      }
+      expect(card.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
+      expect(card.getByTestId("plan-guidance-fixed").textContent).toBe(sentences[status]);
+      expect(card.getByTestId("plan-announcement").textContent).toBe("");
+    }
+  });
+
+  // G3
+  test("one plan card and one model chooser; no generic decision or dialog controls", async () => {
+    const chat = renderChat({
+      thread: planThread(makePlan({ revision: 1, guidance: "Keep the names" })),
+      refreshPlanGuidance: countingOnRefreshGuidance()
+    });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+
+    expect(view.getAllByTestId("plan-region")).toHaveLength(1);
+    expect(view.getAllByTestId("plan-card")).toHaveLength(1);
+    expect(view.getAllByTestId("agent-turn-model")).toHaveLength(1);
+    for (const name of ["Apply", "Reject", "Allow", "Deny"]) {
+      expect(view.queryByRole("button", { name })).toBeNull();
+      expect(card.queryByRole("button", { name })).toBeNull();
+    }
+    expect(card.queryByTestId("agent-turn-model")).toBeNull();
+    expect(card.queryByRole("button", { name: /model/i })).toBeNull();
+    expect(card.queryByRole("dialog")).toBeNull();
+    expect(region.querySelector('[aria-modal="true"]')).toBeNull();
+  });
+
+  // G4
+  test("the Start revision is text, the editor is inert without motion and Start waits", () => {
+    const view = renderPlan({
+      plan: makePlan({ revision: 3, guidance: "Keep the names" }),
+      onRefreshGuidance: countingOnRefreshGuidance()
+    });
+    const card = testing.within(view.container);
+    expect(card.getByTestId("plan-revision").textContent).toBe("Revision 3 · Edit plan");
+    expect(card.getByTestId("plan-start-revision").textContent).toBe("Start uses revision 3.");
+
+    testing.fireEvent.click(card.getByTestId("plan-guidance-edit"));
+    expect(card.getByTestId("plan-start")).toHaveProperty("disabled", true);
+    const editor = card.getByTestId("plan-guidance-editor");
+    const effectPattern = /(?:^|\s)(?:glass|glass-strong|glass-dialog|backdrop-\w+|blur-\w+|animate-\w+)/;
+    for (const node of [card.getByTestId("plan-card"), editor]) {
+      expect(node.className).not.toMatch(effectPattern);
+    }
+    expect(card.getByTestId("plan-guidance-field").className).toContain("focus-visible:outline-2");
   });
 });
