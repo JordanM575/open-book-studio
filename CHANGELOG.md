@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Delivery index reconciliation
+
+- The spec index and agentic coverage record now describe spec 031 as delivered at the source/test level: all T001–T021 tasks are checked, including the proposed-plan guidance refresh, the visible plan lifecycle, pause/resume, cancel, restart expiry, the failure matrix, accessibility and the synthetic author journey. Live provider, real manuscript, device, packaged-build and release acceptance remain separate.
+
 ### Plan task record complete
 
 - T012 is recorded complete after the visible proposed-plan guidance refresh was independently reviewed and merged. All spec 031 tasks T001–T021 are now checked. The record claims source/test delivery only; live provider, real manuscript, device, packaged-build and release acceptance remain separate.
