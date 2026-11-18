@@ -459,7 +459,9 @@ describe("chat composer", () => {
       ).toBeDefined()
     );
     // The skipped chapter still differs from before the turn, so a retry is not offered yet.
-    expect(view.getByText(/This attempt changed 1 chapter\. Undo it before retrying\./)).toBeDefined();
+    expect(view.getByText(/This attempt changed 1 chapter\. Review the affected chapters before retrying\./))
+      .toBeDefined();
+    expect(view.queryByText(/Undo it before retrying\./)).toBeNull();
     expect(view.queryByTestId("agent-retry-request")).toBeNull();
     expect(view.queryByTestId("agent-undo-turn")).toBeNull();
   });
@@ -476,7 +478,11 @@ describe("chat composer", () => {
       undoAvailable: false
     });
 
-    await testing.waitFor(() => expect(view.getByText(/Undo it before retrying\./)).toBeDefined());
+    await testing.waitFor(() =>
+      expect(view.getByText(/This attempt changed 1 chapter\. Review the affected chapters before retrying\./))
+        .toBeDefined()
+    );
+    expect(view.queryByText(/Undo it before retrying\./)).toBeNull();
     expect(view.getByText(/Review the affected chapters before continuing\./)).toBeDefined();
     expect(view.queryByTestId("agent-retry-request")).toBeNull();
     expect(view.queryByTestId("agent-undo-turn")).toBeNull();
