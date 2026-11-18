@@ -2,8 +2,14 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
-import { PLAN_GUIDANCE_LIMIT, type ManuscriptWriter } from "@ai-book-studio/core/agent/proposed-plan";
-import type { AgentMode } from "@ai-book-studio/core/agent/messages";
+import {
+  AGENT_PLAN_LIMITS,
+  agentThreadSchema,
+  type AgentMode,
+  type AgentPlan,
+  type AgentThread
+} from "@ai-book-studio/core/agent/messages";
+import type { AgentEvent } from "@ai-book-studio/core/agent";
 
 let testing!: typeof import("@testing-library/react/pure");
 let PlanFirstControl!: typeof import("@ai-book-studio/app/components/PlanFirstControl").PlanFirstControl;
@@ -20,44 +26,132 @@ afterAll(async () => {
 afterEach(() => testing.cleanup());
 
 /**
- * Plan first is a visible Edit control over the pure proposal contract.
- * Create, refresh, and start intent must not call the supplied writer.
+ * Plan first asks the agent for one proposal, then reviews the stored plan. Start is a separate
+ * explicit turn. These tests read only what the author sees plus stable test ids; no writer is
+ * passed and no plan is fabricated locally.
  */
 
-function countingWriter(): { writer: ManuscriptWriter; write: ReturnType<typeof mock> } {
-  const write = mock((request: unknown): never => {
-    throw new Error(`writer called with ${JSON.stringify(request)}`);
-  });
-  return { writer: { write }, write };
+const AT = "2026-01-01T00:00:00.000Z";
+const BOOK = "book_plan000001";
+const CHAPTER = "ch_plan000001";
+const THREAD = "thread_plan000001";
+const PLAN_ID = "plan_plan000001";
+const PROPOSAL_TURN = "turn_plan000001";
+const START_TURN = "turn_start000001";
+
+type CapturedTurn = { prompt?: unknown; [key: string]: unknown };
+
+function makePlan(options: {
+  status?: AgentPlan["status"];
+  revision?: number;
+  guidance?: string | null;
+  steps?: AgentPlan["steps"];
+} = {}): AgentPlan {
+  const status = options.status ?? "proposed";
+  const terminal = status === "completed" || status === "cancelled" || status === "failed" || status === "expired";
+  const started = status !== "proposed";
+  return {
+    id: PLAN_ID,
+    mode: "edit",
+    status,
+    purpose: "Revise the opening chapter",
+    steps: options.steps ?? [
+      { text: "Read the current opening", state: "pending" },
+      { text: "Revise the door scene", state: "pending" }
+    ],
+    revision: options.revision ?? 3,
+    ...(options.guidance === null
+      ? {}
+      : { guidance: options.guidance ?? "Keep the names" }),
+    parent: { messageId: "msg_plan000002", turnId: PROPOSAL_TURN },
+    createdAt: AT,
+    updatedAt: AT,
+    ...(started ? { startedAt: AT } : {}),
+    ...(terminal ? { terminalAt: AT } : {})
+  };
 }
 
-function renderPlan(options?: {
+function planThread(plan: AgentPlan | null): AgentThread {
+  return agentThreadSchema.parse({
+    schemaVersion: 1,
+    id: THREAD,
+    bookId: BOOK,
+    title: "A plan conversation",
+    createdAt: AT,
+    updatedAt: AT,
+    messages: [
+      {
+        id: "msg_plan000001",
+        role: "user",
+        parts: [{ type: "text", text: "Propose a plan for the opening chapter." }],
+        mode: "edit",
+        createdAt: AT
+      },
+      {
+        id: "msg_plan000002",
+        role: "assistant",
+        parts: [
+          { type: "text", text: "Here is the plan." },
+          { type: "tool-call", id: "call_plan000001", name: "propose_plan", input: {} },
+          { type: "tool-result", id: "call_plan000001", name: "propose_plan", output: { ok: true } }
+        ],
+        mode: "edit",
+        turnId: PROPOSAL_TURN,
+        createdAt: AT
+      }
+    ],
+    plans: plan ? [plan] : [],
+    checkpointTurns: []
+  });
+}
+
+function countingOnPropose(result: { ok: boolean; reason?: string } = { ok: true }) {
+  return mock(async (_request: unknown) => result);
+}
+
+function countingOnStart(result: { ok: boolean; reason?: string } = { ok: true }) {
+  return mock(async (_ref: unknown) => result);
+}
+
+function renderPlan(options: {
   mode?: AgentMode;
   running?: boolean;
-  modelLabel?: string;
-  writer?: ManuscriptWriter;
-}) {
-  const pen = options?.writer ? null : countingWriter();
-  const writer = options?.writer ?? pen?.writer;
-  if (!writer) throw new Error("missing writer");
+  proposing?: boolean;
+  plan?: AgentPlan | null;
+  notice?: string | null;
+  onPropose?: ReturnType<typeof countingOnPropose>;
+  onStart?: ReturnType<typeof countingOnStart>;
+} = {}) {
+  const onPropose = options.onPropose ?? countingOnPropose();
+  const onStart = options.onStart ?? countingOnStart();
   const props = {
-    mode: options?.mode ?? "edit" as AgentMode,
-    running: options?.running ?? false,
-    writer,
-    modelLabel: options?.modelLabel ?? "Model: book default"
+    mode: options.mode ?? "edit" as AgentMode,
+    running: options.running ?? false,
+    proposing: options.proposing ?? false,
+    plan: options.plan ?? null,
+    modelLabel: "Model: book default",
+    onPropose,
+    onStart,
+    ...(options.notice !== undefined ? { notice: options.notice } : {})
   };
   const view = testing.render(React.createElement(PlanFirstControl, props));
   return {
     ...view,
-    write: pen?.write ?? null,
+    onPropose,
+    onStart,
     rerenderWith(next: Partial<typeof props>) {
       view.rerender(React.createElement(PlanFirstControl, { ...props, ...next }));
     }
   };
 }
 
-function fillPlan(view: ReturnType<typeof testing.within>, purpose: string, steps: readonly string[], guidance?: string): void {
-  testing.fireEvent.change(view.getByTestId("plan-purpose"), { target: { value: purpose } });
+function fillPlan(
+  view: ReturnType<typeof testing.within>,
+  request: string,
+  steps: readonly string[],
+  guidance?: string
+): void {
+  testing.fireEvent.change(view.getByTestId("plan-purpose"), { target: { value: request } });
   const first = view.getAllByTestId("plan-step")[0];
   if (!first) throw new Error("missing step");
   testing.fireEvent.change(first, { target: { value: steps[0] ?? "" } });
@@ -72,158 +166,417 @@ function fillPlan(view: ReturnType<typeof testing.within>, purpose: string, step
   }
 }
 
-describe("plan first control", () => {
-  test("proposes, refreshes, and names a start intent without calling the writer", () => {
-    const { write, ...rendered } = renderPlan();
-    const view = testing.within(document.body);
-    fillPlan(view, "Revise the opening chapter", ["Name the chapter", "Revise the opening"], "Keep the names");
-    testing.fireEvent.click(view.getByTestId("plan-propose"));
+function renderChat(options: {
+  thread?: AgentThread;
+  start?: ReturnType<typeof mock>;
+} = {}) {
+  let stored = options.thread ?? planThread(null);
+  let emit: ((event: AgentEvent) => void) | null = null;
+  const start = options.start ?? mock(async (_request: CapturedTurn) => ({
+    ok: true,
+    data: { turnId: START_TURN, threadId: THREAD, mode: "edit" }
+  }));
+  const read = mock(async () => ({ ok: true, data: stored }));
+  const listed = [
+    {
+      id: THREAD,
+      title: stored.title,
+      createdAt: AT,
+      updatedAt: AT,
+      messageCount: stored.messages.length,
+      preview: ""
+    }
+  ];
+  (globalThis as unknown as { window: { studio: unknown } }).window.studio = {
+    platform: "darwin",
+    agent: {
+      threads: {
+        list: mock(async () => ({ ok: true, data: listed })),
+        read,
+        fork: mock(async () => ({ ok: true, data: stored })),
+        remove: mock(async () => ({ ok: true, data: null })),
+        rename: mock(async () => ({ ok: true, data: null }))
+      },
+      start,
+      stop: mock(async () => ({ ok: true, data: null })),
+      approve: mock(async () => ({ ok: true, data: null })),
+      undoLast: mock(async () => ({ ok: true, data: null })),
+      onEvent: mock((handler: (event: AgentEvent) => void) => {
+        emit = handler;
+        return () => {
+          emit = null;
+        };
+      })
+    }
+  };
+  testing.render(React.createElement(ChatPanel, {
+    bookId: BOOK,
+    chapterId: CHAPTER,
+    onClose: () => {},
+    onBeforeSend: async () => {},
+    onChanged: () => {},
+    onReconnect: () => {},
+    onChooseModel: () => {},
+    onChooseTurnModel: () => {},
+    turnModel: null,
+    onTurnModelUsed: () => {},
+    onNotice: () => {}
+  }));
+  return {
+    start,
+    read,
+    view: testing.within(document.body),
+    setStored(next: AgentThread) {
+      stored = next;
+    },
+    fire(event: AgentEvent) {
+      emit?.(event);
+    }
+  };
+}
 
-    const created = testing.within(view.getByTestId("plan-current"));
-    expect(created.getByTestId("plan-revision").textContent).toBe("Revision 1");
-    expect(created.getByTestId("plan-mode").textContent).toBe("Edit");
-    expect(created.getByTestId("plan-model").textContent).toBe("Model: book default");
-    expect(created.getByTestId("plan-purpose-text").textContent).toBe("Revise the opening chapter");
-    expect(created.getAllByTestId("plan-step-text").map((node) => node.textContent)).toEqual([
-      "Name the chapter",
-      "Revise the opening"
+describe("plan first control", () => {
+  test("asks for a proposal with the request, suggestions and one-turn guidance", async () => {
+    const onPropose = countingOnPropose();
+    renderPlan({ onPropose });
+    const view = testing.within(document.body);
+    fillPlan(view, "Revise the opening chapter", ["Read the opening", "Revise the door scene"], "Keep the names");
+
+    expect(view.queryByTestId("plan-current")).toBeNull();
+    expect(view.queryByTestId("plan-start")).toBeNull();
+    expect(view.getByTestId("plan-propose").textContent).toBe("Ask for plan");
+    expect(view.getByTestId("plan-purpose").getAttribute("aria-invalid")).toBe("false");
+
+    await testing.act(async () => testing.fireEvent.click(view.getByTestId("plan-propose")));
+
+    expect(onPropose).toHaveBeenCalledWith({
+      request: "Revise the opening chapter",
+      steps: ["Read the opening", "Revise the door scene"],
+      guidance: "Keep the names"
+    });
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("value", "Revise the opening chapter");
+    expect(view.getByTestId("plan-guidance")).toHaveProperty("value", "Keep the names");
+  });
+
+  test("bounds the request fields without clearing the author's text", () => {
+    const onPropose = countingOnPropose();
+    const { onStart } = renderPlan({ onPropose });
+    const view = testing.within(document.body);
+
+    const longRequest = "r".repeat(AGENT_PLAN_LIMITS.purpose + 1);
+    testing.fireEvent.change(view.getByTestId("plan-purpose"), { target: { value: longRequest } });
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("value", longRequest);
+    expect(view.getByTestId("plan-purpose").getAttribute("aria-invalid")).toBe("true");
+    expect(view.getByTestId("plan-propose")).toHaveProperty("disabled", true);
+    expect(view.getByTestId("plan-refusal").textContent).toContain("Your text is kept");
+
+    testing.fireEvent.change(view.getByTestId("plan-purpose"), { target: { value: "Revise the opening" } });
+    const longStep = "s".repeat(AGENT_PLAN_LIMITS.stepText + 1);
+    testing.fireEvent.change(view.getByTestId("plan-step"), { target: { value: longStep } });
+    expect(view.getByTestId("plan-step")).toHaveProperty("value", longStep);
+    expect(view.getByTestId("plan-propose")).toHaveProperty("disabled", true);
+
+    testing.fireEvent.change(view.getByTestId("plan-step"), { target: { value: "Read the opening" } });
+    const longGuidance = "g".repeat(AGENT_PLAN_LIMITS.guidance + 1);
+    testing.fireEvent.change(view.getByTestId("plan-guidance"), { target: { value: longGuidance } });
+    expect(view.getByTestId("plan-guidance")).toHaveProperty("value", longGuidance);
+    expect(view.getByTestId("plan-guidance").getAttribute("aria-invalid")).toBe("true");
+    expect(view.getByTestId("plan-propose")).toHaveProperty("disabled", true);
+    expect(onPropose).not.toHaveBeenCalled();
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
+  test("disables the request while proposing and keeps the words on failure", async () => {
+    let resolve: ((value: { ok: boolean; reason?: string }) => void) | null = null;
+    const pending = new Promise<{ ok: boolean; reason?: string }>((done) => {
+      resolve = done;
+    });
+    const onPropose = mock(() => pending);
+    renderPlan({ onPropose });
+    const view = testing.within(document.body);
+    fillPlan(view, "Revise the opening chapter", ["Read the opening"]);
+
+    testing.fireEvent.click(view.getByTestId("plan-propose"));
+    expect(view.getByTestId("plan-proposing").textContent).toBe("Proposing a plan…");
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("disabled", true);
+    expect(view.getByTestId("plan-step")).toHaveProperty("disabled", true);
+    expect(view.getByTestId("plan-guidance")).toHaveProperty("disabled", true);
+    expect(view.getByTestId("plan-propose")).toHaveProperty("disabled", true);
+
+    await testing.act(async () => {
+      resolve?.({ ok: false, reason: "The plan could not be proposed. Your request is kept." });
+      await pending;
+    });
+
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("value", "Revise the opening chapter");
+    expect(view.getByTestId("plan-refusal").textContent).toBe("The plan could not be proposed. Your request is kept.");
+    expect(view.queryByTestId("plan-current")).toBeNull();
+  });
+
+  test("shows the stored plan and sends the reviewed identity on Start", async () => {
+    const plan = makePlan();
+    const onStart = countingOnStart();
+    renderPlan({ plan, onStart });
+    const view = testing.within(document.body);
+    const card = testing.within(view.getByTestId("plan-current"));
+
+    expect(card.getByTestId("plan-status").textContent).toBe("Proposed");
+    expect(card.getByTestId("plan-revision").textContent).toBe("Revision 3 · Edit plan");
+    expect(card.getByTestId("plan-model").textContent).toBe("Model: book default");
+    expect(card.getByTestId("plan-purpose-text").textContent).toBe("Revise the opening chapter");
+    expect(card.getAllByTestId("plan-step-text").map((node) => node.textContent)).toEqual([
+      "Read the current opening",
+      "Revise the door scene"
     ]);
-    expect(created.getAllByTestId("plan-step-state").map((node) => node.getAttribute("data-state"))).toEqual([
-      "pending",
-      "pending"
-    ]);
-    expect(created.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
-    expect(created.getByTestId("plan-start")).toBeDefined();
-    expect(view.queryByTestId("plan-previous")).toBeNull();
+    expect(card.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
+    expect(view.getByTestId("plan-first").textContent).not.toContain(plan.id);
+    expect(view.getByTestId("plan-first").textContent).not.toContain(plan.parent.turnId);
     expect(view.queryByRole("button", { name: "Pause" })).toBeNull();
     expect(view.queryByRole("button", { name: "Resume" })).toBeNull();
     expect(view.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Apply" })).toBeNull();
+    expect(view.queryByRole("button", { name: "Reject" })).toBeNull();
 
-    rendered.rerenderWith({ modelLabel: "This turn: other-model" });
-    testing.fireEvent.change(view.getByTestId("plan-guidance"), { target: { value: "Shorter sentences" } });
-    testing.fireEvent.click(view.getByTestId("plan-refresh"));
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-start")));
 
-    const previous = testing.within(view.getByTestId("plan-previous"));
-    const refreshed = testing.within(view.getByTestId("plan-current"));
-    expect(previous.getByTestId("plan-revision").textContent).toBe("Revision 1");
-    expect(previous.getByTestId("plan-guidance-text").textContent).toBe("Keep the names");
-    expect(previous.getByTestId("plan-model").textContent).toBe("Model: book default");
-    expect(previous.getByTestId("plan-purpose-text").textContent).toBe("Revise the opening chapter");
-    expect(previous.queryByTestId("plan-start")).toBeNull();
-    expect(previous.queryByTestId("plan-refresh")).toBeNull();
-    expect(refreshed.getByTestId("plan-revision").textContent).toBe("Revision 2");
-    expect(refreshed.getByTestId("plan-guidance-text").textContent).toBe("Shorter sentences");
-    expect(refreshed.getByTestId("plan-model").textContent).toBe("Model: book default");
-    expect(refreshed.getByTestId("plan-mode").textContent).toBe("Edit");
-    expect(view.getByTestId("plan-turn-model").textContent).toBe("This turn: other-model");
-    expect(view.getAllByTestId("plan-start")).toHaveLength(1);
-
-    testing.fireEvent.click(refreshed.getByTestId("plan-start"));
-    expect(view.getByTestId("plan-intent-turn").textContent).toBe("new");
-    expect(view.getByTestId("plan-intent-proposal").textContent).toBe(refreshed.getByTestId("plan-id").textContent);
-    expect(view.getByTestId("plan-intent-proposal").textContent).toBe(previous.getByTestId("plan-id").textContent);
-    expect(view.getByTestId("plan-intent-revision").textContent).toBe("2");
-    expect(view.getByTestId("plan-intent-approval").textContent).toBe("no");
-    expect(write).not.toHaveBeenCalled();
+    expect(onStart).toHaveBeenCalledWith({ id: plan.id, revision: 3, action: "start" });
   });
 
-  test("omits blank guidance and keeps over-long guidance without a write", () => {
-    const { write } = renderPlan();
+  test("labels every confirmed step state and distinguishes running from approval wait", () => {
+    const labels = makePlan({
+      status: "running",
+      steps: [
+        { text: "Finished work", state: "completed" },
+        { text: "Current work", state: "in-progress" },
+        { text: "Later work", state: "pending" },
+        { text: "Skipped work", state: "not-completed" }
+      ]
+    });
+    const running = renderPlan({ plan: labels, running: true });
     const view = testing.within(document.body);
-    fillPlan(view, "Revise the opening chapter", ["Name the chapter"], " \n\t ");
-    testing.fireEvent.click(view.getByTestId("plan-propose"));
-    const created = testing.within(view.getByTestId("plan-current"));
-    expect(created.getByTestId("plan-guidance-omitted").textContent).toBe("No guidance");
-    expect(view.getByTestId("plan-guidance")).toHaveProperty("value", " \n\t ");
+    const card = testing.within(view.getByTestId("plan-current"));
+    expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent)).toEqual([
+      "Completed",
+      "In progress",
+      "Pending",
+      "Not completed"
+    ]);
+    expect(card.getByTestId("plan-status").textContent).toBe("Running");
+    expect(card.queryByTestId("plan-start")).toBeNull();
 
-    const tooLong = "g".repeat(PLAN_GUIDANCE_LIMIT + 1);
-    testing.fireEvent.change(view.getByTestId("plan-guidance"), { target: { value: tooLong } });
-    testing.fireEvent.click(view.getByTestId("plan-refresh"));
-    expect(view.getByTestId("plan-refusal").textContent).toBe("Shorten guidance to 2,000 characters. Your text is kept.");
-    expect(view.getByTestId("plan-guidance")).toHaveProperty("value", tooLong);
-    expect(tooLong.length).toBe(PLAN_GUIDANCE_LIMIT + 1);
-    expect(created.getByTestId("plan-revision").textContent).toBe("Revision 1");
-    expect(created.queryByTestId("plan-guidance-text")).toBeNull();
-    expect(view.queryByTestId("plan-previous")).toBeNull();
-    expect(view.queryByTestId("plan-start-intent")).toBeNull();
-    expect(write).not.toHaveBeenCalled();
+    running.rerenderWith({ plan: makePlan({ status: "waiting-for-approval", steps: labels.steps }) });
+    const waiting = testing.within(testing.within(document.body).getByTestId("plan-current"));
+    expect(waiting.getByTestId("plan-status").textContent).toBe("Waiting for approval");
+    expect(waiting.queryByTestId("plan-start")).toBeNull();
+    // A running or waiting plan never gains step progress without a confirmed notice.
+    expect(waiting.getAllByTestId("plan-step-state").map((node) => node.textContent)).toEqual([
+      "Completed",
+      "In progress",
+      "Pending",
+      "Not completed"
+    ]);
   });
 
-  test("refuses Discuss and does not refresh a running turn", () => {
-    const discuss = renderPlan({ mode: "discuss" });
+  test("keeps a refused request and shows no local plan", async () => {
+    const onPropose = countingOnPropose({ ok: false, reason: "The plan could not be proposed. Nothing was stored." });
+    renderPlan({ onPropose });
     const view = testing.within(document.body);
-    fillPlan(view, "Revise the opening chapter", ["Name the chapter"], "Keep the names");
-    testing.fireEvent.click(view.getByTestId("plan-propose"));
-    expect(view.getByTestId("plan-refusal").textContent).toBe("Plan first is only available for an Edit turn.");
+    fillPlan(view, "Revise the opening chapter", ["Read the opening"], "Keep the names");
+
+    await testing.act(async () => testing.fireEvent.click(view.getByTestId("plan-propose")));
+
+    expect(view.getByTestId("plan-refusal").textContent).toBe("The plan could not be proposed. Nothing was stored.");
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("value", "Revise the opening chapter");
+    expect(view.getByTestId("plan-step")).toHaveProperty("value", "Read the opening");
+    expect(view.getByTestId("plan-guidance")).toHaveProperty("value", "Keep the names");
     expect(view.queryByTestId("plan-current")).toBeNull();
-    expect(discuss.write).not.toHaveBeenCalled();
-    testing.cleanup();
-
-    const running = renderPlan();
-    const again = testing.within(document.body);
-    fillPlan(again, "Revise the opening chapter", ["Name the chapter"]);
-    testing.fireEvent.click(again.getByTestId("plan-propose"));
-    running.rerenderWith({ running: true, modelLabel: "This turn: other-model" });
-    expect(again.getByTestId("plan-guidance")).toHaveProperty("disabled", true);
-    expect(again.getByTestId("plan-refresh")).toHaveProperty("disabled", true);
-    expect(again.getByTestId("plan-propose")).toHaveProperty("disabled", true);
-    expect(again.getByTestId("plan-start")).toHaveProperty("disabled", true);
-    testing.fireEvent.change(again.getByTestId("plan-guidance"), { target: { value: "Do not apply" } });
-    testing.fireEvent.click(again.getByTestId("plan-refresh"));
-    const current = testing.within(again.getByTestId("plan-current"));
-    expect(current.getByTestId("plan-revision").textContent).toBe("Revision 1");
-    expect(current.getByTestId("plan-guidance-omitted")).toBeDefined();
-    expect(current.getByTestId("plan-model").textContent).toBe("Model: book default");
-    expect(again.queryByTestId("plan-previous")).toBeNull();
-    expect(running.write).not.toHaveBeenCalled();
+    expect(view.queryByTestId("plan-start")).toBeNull();
   });
 
-  test("the composer mounts Plan first only for Edit and does not start a turn", async () => {
-    const start = mock(() => Promise.resolve({ ok: true, data: { turnId: "turn_plan", threadId: "thread_plan" } }));
-    (globalThis as unknown as { window: { studio: unknown } }).window.studio = {
-      platform: "darwin",
-      agent: {
-        threads: {
-          list: mock(() => Promise.resolve({ ok: true, data: [] })),
-          read: mock(() => Promise.resolve({ ok: true, data: null })),
-          fork: mock(() => Promise.resolve({ ok: true, data: null })),
-          remove: mock(() => Promise.resolve({ ok: true, data: null })),
-          rename: mock(() => Promise.resolve({ ok: true, data: null }))
-        },
-        start,
-        stop: mock(() => Promise.resolve({ ok: true, data: null })),
-        approve: mock(() => Promise.resolve({ ok: true, data: null })),
-        undoLast: mock(() => Promise.resolve({ ok: true, data: null })),
-        onEvent: mock(() => () => {})
-      }
-    };
-    testing.render(React.createElement(ChatPanel, {
-      bookId: "book_plan000001",
-      chapterId: "ch_plan000001",
-      onClose: () => {},
-      onBeforeSend: async () => {},
-      onChanged: () => {},
-      onReconnect: () => {},
-      onChooseModel: () => {},
-      onChooseTurnModel: () => {},
-      turnModel: null,
-      onTurnModelUsed: () => {},
-      onNotice: () => {}
+  test("the composer asks for a proposal and only shows the stored plan afterwards", async () => {
+    const start = mock(async (_request: CapturedTurn) => ({
+      ok: true,
+      data: { turnId: PROPOSAL_TURN, threadId: THREAD, mode: "edit" }
     }));
-    const view = testing.within(document.body);
+    const chat = renderChat({ thread: planThread(null), start });
+    const view = chat.view;
+    await view.findByTestId("chat-input");
     expect(view.queryByTestId("plan-first")).toBeNull();
+
     testing.fireEvent.change(view.getByTestId("agent-mode"), { target: { value: "edit" } });
     const plan = testing.within(view.getByTestId("plan-first"));
     expect(plan.getByTestId("plan-turn-model").textContent).toBe("Model: book default");
-    fillPlan(plan, "Revise the opening chapter", ["Name the chapter"], "Keep the names");
+    fillPlan(plan, "Revise the opening chapter", ["Read the opening"], "Keep the names");
     expect(view.getByTestId("agent-guidance")).toHaveProperty("value", "");
-    testing.fireEvent.click(plan.getByTestId("plan-propose"));
-    testing.fireEvent.change(plan.getByTestId("plan-guidance"), { target: { value: "Shorter sentences" } });
-    testing.fireEvent.click(plan.getByTestId("plan-refresh"));
-    testing.fireEvent.click(plan.getByTestId("plan-start"));
-    expect(plan.getByTestId("plan-intent-turn").textContent).toBe("new");
-    expect(plan.getByTestId("plan-intent-approval").textContent).toBe("no");
+
+    await testing.act(async () => testing.fireEvent.click(plan.getByTestId("plan-propose")));
+
+    expect(start).toHaveBeenCalledTimes(1);
+    const request = start.mock.calls[0]?.[0];
+    if (!request) throw new Error("the proposal request was not sent");
+    expect(request).toMatchObject({
+      bookId: BOOK,
+      threadId: THREAD,
+      mode: "edit",
+      planProposal: true,
+      guidance: "Keep the names"
+    });
+    expect(request).not.toHaveProperty("plan");
+    expect(String(request.prompt)).toContain("Revise the opening chapter");
+    expect(String(request.prompt)).toContain("Steps to consider:");
+    expect(String(request.prompt)).toContain("Read the opening");
     expect(view.getByTestId("agent-guidance")).toHaveProperty("value", "");
-    expect(start).not.toHaveBeenCalled();
+    expect(view.getByTestId("plan-purpose")).toHaveProperty("value", "Revise the opening chapter");
+    expect(view.getByTestId("plan-proposing").textContent).toBe("Proposing a plan…");
+    expect(view.getByTestId("agent-mode")).toHaveProperty("value", "edit");
+    expect(view.queryByTestId("plan-region")).toBeNull();
+
+    const storedPlan = makePlan();
+    chat.setStored(planThread(storedPlan));
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan",
+        turnId: PROPOSAL_TURN,
+        planId: PLAN_ID,
+        revision: 1,
+        status: "proposed",
+        change: "proposed"
+      });
+    });
+
+    const region = await view.findByTestId("plan-region");
+    const card = testing.within(region);
+    expect(card.getByTestId("plan-purpose-text").textContent).toBe("Revise the opening chapter");
+    expect(card.getByTestId("plan-status").textContent).toBe("Proposed");
+    expect(view.getByTestId("agent-mode")).toHaveProperty("value", "discuss");
+    expect(view.queryByTestId("plan-first")).toBeNull();
+    expect(view.queryByText("propose_plan")).toBeNull();
+    expect(view.queryByText("plan_step")).toBeNull();
+    expect(document.body.textContent).not.toContain(PLAN_ID);
+  });
+
+  test("Start sends the fixed prompt and empty guidance, then waits for the acknowledgement", async () => {
+    const plan = makePlan();
+    const start = mock(async (_request: CapturedTurn) => ({
+      ok: true,
+      data: {
+        turnId: START_TURN,
+        threadId: THREAD,
+        mode: "edit",
+        plan: { id: PLAN_ID, revision: plan.revision, status: "running" }
+      }
+    }));
+    const chat = renderChat({ thread: planThread(plan), start });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    expect(testing.within(region).getByTestId("plan-status").textContent).toBe("Proposed");
+    expect(testing.within(region).getAllByTestId("plan-step-state").map((node) => node.textContent))
+      .toEqual(["Pending", "Pending"]);
+
+    await testing.act(async () => testing.fireEvent.click(testing.within(region).getByTestId("plan-start")));
+
+    expect(start).toHaveBeenCalledTimes(1);
+    const request = start.mock.calls[0]?.[0];
+    if (!request) throw new Error("the proposal request was not sent");
+    expect(request).toMatchObject({
+      bookId: BOOK,
+      threadId: THREAD,
+      mode: "edit",
+      prompt: "Start the reviewed plan.",
+      plan: { id: PLAN_ID, revision: plan.revision, action: "start" }
+    });
+    expect(request).not.toHaveProperty("guidance");
+    expect(request).not.toHaveProperty("planProposal");
+
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Running");
+    });
+    expect(testing.within(view.getByTestId("plan-region")).queryByTestId("plan-start")).toBeNull();
+    // The acknowledgement carries no step progress, so the steps stay Pending until a notice.
+    expect(testing.within(view.getByTestId("plan-region")).getAllByTestId("plan-step-state")
+      .map((node) => node.textContent)).toEqual(["Pending", "Pending"]);
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-step",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        status: "running",
+        index: 0,
+        state: "in-progress"
+      });
+    });
+    expect(testing.within(view.getByTestId("plan-region")).getAllByTestId("plan-step-state")
+      .map((node) => node.textContent)).toEqual(["In progress", "Pending"]);
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-step",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        status: "running",
+        index: 0,
+        state: "completed"
+      });
+      chat.fire({
+        type: "plan-step",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        status: "running",
+        index: 1,
+        state: "not-completed"
+      });
+    });
+    expect(testing.within(view.getByTestId("plan-region")).getAllByTestId("plan-step-state")
+      .map((node) => node.textContent)).toEqual(["Completed", "Not completed"]);
+
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "step",
+        message: "The plan's progress could not be saved. Nothing was marked complete."
+      });
+    });
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-notice").textContent)
+      .toContain("Nothing was marked complete");
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Running");
+  });
+
+  test("a refused Start removes its optimistic rows and leaves the plan proposed", async () => {
+    const plan = makePlan();
+    const start = mock(async (_request: CapturedTurn) => ({
+      ok: false as const,
+      error: { code: "invalid-request", message: "That plan is not in this conversation. Nothing was started." }
+    }));
+    const chat = renderChat({ thread: planThread(plan), start });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+
+    await testing.act(async () => testing.fireEvent.click(testing.within(region).getByTestId("plan-start")));
+
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(view.queryByText("Start the reviewed plan.")).toBeNull();
+    const after = testing.within(view.getByTestId("plan-region"));
+    expect(after.getByTestId("plan-status").textContent).toBe("Proposed");
+    expect(after.getByTestId("plan-start")).toBeDefined();
+    expect(after.getByTestId("plan-action-error").textContent).toContain("not in this conversation");
+    expect(view.queryByText("Reading and thinking…")).toBeNull();
+  });
+
+  test("a new conversation starts without a stored plan region", async () => {
+    const chat = renderChat({ thread: planThread(makePlan()) });
+    const view = chat.view;
+    await view.findByTestId("plan-region");
+
+    testing.fireEvent.click(view.getByTestId("agent-new-thread"));
+
+    expect(view.queryByTestId("plan-region")).toBeNull();
+    expect(view.queryByTestId("plan-current")).toBeNull();
   });
 });
