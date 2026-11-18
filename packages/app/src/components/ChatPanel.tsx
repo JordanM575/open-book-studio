@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
 import { Cpu, GitBranch, History, Monitor, Pencil, Plus, Trash2, X } from "lucide-react";
-import type { AgentEvent, AgentTurnInput } from "@ai-book-studio/core/agent";
-import { agentModeSchema, type AgentMode } from "@ai-book-studio/core/agent/messages";
-import type { ManuscriptWriter } from "@ai-book-studio/core/agent/proposed-plan";
+import type { AgentEvent, AgentPlanTurnRef, AgentTurnInput } from "@ai-book-studio/core/agent";
+import { agentModeSchema, type AgentMode, type AgentPlan } from "@ai-book-studio/core/agent/messages";
 import type { ThreadSummary } from "@ai-book-studio/core/agent/threads";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
 import { Button } from "@ai-book-studio/ui/button";
@@ -48,7 +47,8 @@ import { Tool, ToolContent, ToolHeader, ToolLine, ToolOutput, Tools } from "@ai-
 import { cn, must } from "../lib/utils";
 import type { HandsFreeAdmission, HandsFreePort, HandsFreeTurn } from "../lib/hands-free";
 import { HandsFreeBar } from "./HandsFreeBar";
-import { PlanFirstControl } from "./PlanFirstControl";
+import { PlanFirstControl, type PlanProposalRequest } from "./PlanFirstControl";
+import { PlanProgress, type PlanActionOutcome, type PlanStartRef } from "./PlanProgress";
 import {
   approvalLabel,
   keptNote,
@@ -91,6 +91,17 @@ function nextId(): string {
   return `m_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * The proposal request is one user message. Ordered suggestions are labelled as suggestions,
+ * never as the durable plan; the stored proposal remains the agent's.
+ */
+function planRequestPrompt(request: PlanProposalRequest): string {
+  const steps = request.steps.map((step, index) => `${index + 1}. ${step}`).join("\n");
+  return steps.length > 0
+    ? `${request.request}\n\nSteps to consider:\n${steps}`
+    : request.request;
+}
+
 /** What a typed or hands-free turn carries into the one checked start path. */
 interface SendOptions {
   readonly mode: AgentMode;
@@ -99,6 +110,12 @@ interface SendOptions {
   readonly model: { connectionId: string; modelId: string } | undefined;
   readonly background: boolean;
   readonly resetComposer: boolean;
+  /** A proposal turn carries no plan content; the runtime stores the reviewed proposal. */
+  readonly planProposal?: boolean;
+  /** Identity-only continuation of a stored plan. */
+  readonly plan?: AgentPlanTurnRef;
+  /** A refused Start stored no user message, so its optimistic local rows are removed. */
+  readonly discardOnFailure?: boolean;
   readonly voiceAdmission?: HandsFreeAdmission;
 }
 
@@ -115,12 +132,8 @@ const APPROVAL_STATUS: Record<Approval["status"], string> = {
 /** Prompts the empty conversation offers. Picking one fills the field; it never sends by itself. */
 const SUGGESTIONS = ["Draft the next scene", "Tighten this paragraph", "Check what happened earlier"];
 
-/** Passed into Plan first so a proposal can be built. The control never calls it. */
-const planWriter: ManuscriptWriter = {
-  write(request: unknown): never {
-    throw new Error(`Plan first does not write (${typeof request}).`);
-  }
-};
+/** Runtime control tools are not book actions, so the plan card is their author-facing record. */
+const PLAN_TOOL_NAMES = new Set(["propose_plan", "plan_step"]);
 
 const TOOL_DOT: Record<ReturnType<typeof toolStatus>, string> = {
   running: "bg-[var(--warning)]",
@@ -178,6 +191,14 @@ export function ChatPanel({
    * Undo always takes the book's newest checkpoint, so only the last of these offers it.
    */
   const [checkpointTurns, setCheckpointTurns] = useState<string[]>([]);
+  /**
+   * The stored plans the thread file returned, oldest first. They are updated only from a
+   * confirmed plan notice, a Start acknowledgement, or a later thread read; never from a local
+   * draft or an optimistic message.
+   */
+  const [plans, setPlans] = useState<AgentPlan[]>([]);
+  const [planAction, setPlanAction] = useState<"propose" | "start" | null>(null);
+  const [planNotice, setPlanNotice] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -190,6 +211,8 @@ export function ChatPanel({
   const retryRequestsRef = useRef(new Map<string, AgentTurnInput>());
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const loadToken = useRef(0);
+  const planReadToken = useRef(0);
+  const plansRef = useRef<AgentPlan[]>([]);
   const noticeRef = useRef(onNotice);
   const threadIdRef = useRef<string | null>(threadId);
   const voiceView = useRef({ epoch: 0, mounted: false, bookId, chapterId, threadId, openThreadId });
@@ -222,13 +245,38 @@ export function ChatPanel({
     setMessages((current) => current.map((message) => (message.id === id ? patch(message) : message)));
   }, []);
 
+  /** Write one stored plan list to the screen and to the event handler's synchronous view. */
+  const applyPlans = useCallback((next: AgentPlan[]) => {
+    plansRef.current = next;
+    setPlans(next);
+  }, []);
+
+  /** Re-read the conversation after a confirmed plan notice or a terminal turn. */
+  const refreshStoredPlans = useCallback(async (): Promise<void> => {
+    const id = threadIdRef.current;
+    if (!id) return;
+    const token = ++planReadToken.current;
+    try {
+      const thread = await must(window.studio.agent.threads.read(bookId, id));
+      if (token !== planReadToken.current) return;
+      if (thread) applyPlans(thread.plans ?? []);
+    } catch (error) {
+      if (token === planReadToken.current) noticeRef.current(error);
+    }
+  }, [applyPlans, bookId]);
+
   // Load the requested conversation, or else the newest stored one for this book. A send cancels
   // this read so it cannot overwrite a turn the author already started.
   useEffect(() => {
     const token = ++loadToken.current;
+    planReadToken.current += 1;
     setThreadId(null);
     setMessages([]);
     setCheckpointTurns([]);
+    setPlans([]);
+    plansRef.current = [];
+    setPlanAction(null);
+    setPlanNotice(null);
     setMode("discuss");
     setGuidance("");
     void (async () => {
@@ -239,8 +287,10 @@ export function ChatPanel({
         if (!thread || token !== loadToken.current) return;
         const checkpointTurn = thread.checkpointTurns.at(-1);
         setThreadId(thread.id);
+        threadIdRef.current = thread.id;
         setCheckpointTurns(thread.checkpointTurns);
         setMessages(thread.messages.map((message) => toChatMessage(message, checkpointTurn)));
+        applyPlans(thread.plans ?? []);
       } catch (error) {
         if (token === loadToken.current) noticeRef.current(error);
       }
@@ -248,14 +298,19 @@ export function ChatPanel({
     return () => {
       loadToken.current += 1;
     };
-  }, [bookId, openThreadId]);
+  }, [applyPlans, bookId, openThreadId]);
 
   const startNew = (): void => {
     if (running) return;
     loadToken.current += 1;
+    planReadToken.current += 1;
     setThreadId(null);
+    threadIdRef.current = null;
     setMessages([]);
     setCheckpointTurns([]);
+    applyPlans([]);
+    setPlanAction(null);
+    setPlanNotice(null);
     setInput("");
     setMode("discuss");
     setGuidance("");
@@ -284,9 +339,14 @@ export function ChatPanel({
       const thread = await must(window.studio.agent.threads.read(bookId, id));
       if (!thread) return;
       const checkpointTurn = thread.checkpointTurns.at(-1);
+      planReadToken.current += 1;
       setThreadId(thread.id);
+      threadIdRef.current = thread.id;
       setCheckpointTurns(thread.checkpointTurns);
       setMessages(thread.messages.map((message) => toChatMessage(message, checkpointTurn)));
+      applyPlans(thread.plans ?? []);
+      setPlanAction(null);
+      setPlanNotice(null);
       setHistoryOpen(false);
     } catch (error) {
       onNotice(error);
@@ -323,8 +383,12 @@ export function ChatPanel({
       setThreads((current) => current.filter((thread) => thread.id !== target.id));
       if (threadId === target.id) {
         setThreadId(null);
+        threadIdRef.current = null;
         setMessages([]);
         setCheckpointTurns([]);
+        applyPlans([]);
+        setPlanAction(null);
+        setPlanNotice(null);
       }
       setDeleteTarget(null);
     } catch (error) {
@@ -337,9 +401,14 @@ export function ChatPanel({
     try {
       const created = await must(window.studio.agent.threads.fork(bookId, threadId, message.turnId));
       const checkpointTurn = created.checkpointTurns.at(-1);
+      planReadToken.current += 1;
       setThreadId(created.id);
+      threadIdRef.current = created.id;
       setCheckpointTurns(created.checkpointTurns);
       setMessages(created.messages.map((entry) => toChatMessage(entry, checkpointTurn)));
+      applyPlans(created.plans ?? []);
+      setPlanAction(null);
+      setPlanNotice(null);
       setHistoryOpen(false);
     } catch (error) {
       onNotice(error);
@@ -350,7 +419,10 @@ export function ChatPanel({
     assistantId: string,
     request: AgentTurnInput,
     voice?: { admission: HandsFreeAdmission; userMessageId: string }
-  ): Promise<{ ok: true; threadId: string } | { ok: false; reason: string }> => {
+  ): Promise<
+    | { ok: true; threadId: string; plan?: { id: string; revision: number; status: "running" } }
+    | { ok: false; reason: string; code?: string }
+  > => {
     const voiceViewEpoch = voiceView.current.epoch;
     assistantRef.current = assistantId;
     turnRef.current = null;
@@ -399,14 +471,23 @@ export function ChatPanel({
         // Dispatch already happened: return its real receipt, without rebinding a changed panel
         // to the old book/thread. Stop listening alone does not change this view identity.
         if (voiceView.current.mounted) { setRunning(false); setWaiting(false); }
-        return { ok: true, threadId: started.data.threadId };
+        return {
+          ok: true,
+          threadId: started.data.threadId,
+          ...(started.data.plan ? { plan: started.data.plan } : {})
+        };
       }
       turnRef.current = started.data.turnId;
       setThreadId(started.data.threadId);
+      threadIdRef.current = started.data.threadId;
       retryRequestsRef.current.set(assistantId, { ...request, threadId: started.data.threadId });
       if (request.model) onTurnModelUsed();
       setWaiting(false);
-      return { ok: true, threadId: started.data.threadId };
+      return {
+        ok: true,
+        threadId: started.data.threadId,
+        ...(started.data.plan ? { plan: started.data.plan } : {})
+      };
     } catch (error) {
       const retryable = !voice || dispatched;
       if (!retryable) retryRequestsRef.current.delete(assistantId);
@@ -423,7 +504,7 @@ export function ChatPanel({
       setRunning(false);
       setWaiting(false);
       onNotice(error);
-      return { ok: false, reason: message };
+      return { ok: false, reason: message, ...(code ? { code } : {}) };
     }
   };
 
@@ -441,6 +522,12 @@ export function ChatPanel({
       if ((event.type === "done" || event.type === "stopped" || event.type === "error") && event.changed && event.undoAvailable) {
         const turnId = event.turnId;
         setCheckpointTurns((current) => (current.includes(turnId) ? current : [...current, turnId]));
+      }
+      // A terminal turn is the moment to re-read stored plans: a plan write that failed reports
+      // through `plan-error`, and the thread file still owns the last confirmed state.
+      if (event.type === "done" || event.type === "stopped" || event.type === "error") {
+        setPlanAction(null);
+        void refreshStoredPlans();
       }
       if (event.type === "stopping") {
         stoppingRef.current = event.turnId;
@@ -493,6 +580,52 @@ export function ChatPanel({
           note: "Waiting for your approval."
         }));
         setWaiting(false);
+      } else if (event.type === "plan") {
+        setPlanAction(null);
+        setPlanNotice(null);
+        // Status and revision here are a confirmed store write. Purpose and steps still come
+        // from the thread read below, so a terminal change can close later steps honestly.
+        setPlans((current) => {
+          const next = current.map((plan) =>
+            plan.id === event.planId
+              ? { ...plan, revision: event.revision, status: event.status }
+              : plan
+          );
+          plansRef.current = next;
+          return next;
+        });
+        if (event.change === "proposed") {
+          // The proposal is stored. The composer returns to its new-turn Discuss default;
+          // the plan region keeps the reviewed plan available.
+          setMode("discuss");
+          setGuidance("");
+          setBackground(false);
+        }
+        // Purpose, steps, status and revision are the stored thread's; a notice only says a
+        // confirmed write happened.
+        void refreshStoredPlans();
+      } else if (event.type === "plan-step") {
+        setPlanAction(null);
+        setPlanNotice(null);
+        setPlans((current) => {
+          const next = current.map((plan) =>
+            plan.id === event.planId
+              ? {
+                  ...plan,
+                  revision: event.revision,
+                  status: event.status,
+                  steps: plan.steps.map((step, index) =>
+                    index === event.index ? { ...step, state: event.state } : step
+                  )
+                }
+              : plan
+          );
+          plansRef.current = next;
+          return next;
+        });
+      } else if (event.type === "plan-error") {
+        // No state changed. Keep the last confirmed plan and show the fixed sentence.
+        setPlanNotice(event.message);
       } else if (event.type === "done") {
         patchAssistant(event.turnId, (message) => ({
           ...message,
@@ -563,17 +696,25 @@ export function ChatPanel({
       }
     });
     return unsubscribe;
-  }, [onChanged, onConflictCopy, patchAssistant]);
+  }, [onChanged, onConflictCopy, patchAssistant, refreshStoredPlans]);
 
   /**
    * The one checked turn-start path. A typed message and a confirmed hands-free turn both come
    * through here, so there is no second send path and no second provider call.
    */
-  const sendPrompt = async (raw: string, options: SendOptions): Promise<{ ok: boolean; reason?: string }> => {
+  const sendPrompt = async (
+    raw: string,
+    options: SendOptions
+  ): Promise<
+    | { ok: true; plan?: { id: string; revision: number; status: "running" } }
+    | { ok: false; reason: string; code?: string }
+  > => {
     const prompt = raw.trim();
     if (!prompt) return { ok: false, reason: "There are no words to send." };
     if (running) return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
-    if (guidanceTooLong) return { ok: false, reason: "Shorten the guidance before sending." };
+    if (options.guidance !== undefined && options.guidance.length > 2_000) {
+      return { ok: false, reason: "Shorten guidance to 2,000 characters before sending." };
+    }
     const user: PanelMessage = {
       id: nextId(),
       role: "user",
@@ -595,6 +736,8 @@ export function ChatPanel({
       mode: options.mode,
       ...(options.guidance ? { guidance: options.guidance } : {}),
       ...(options.threadId ? { threadId: options.threadId } : {}),
+      ...(options.planProposal ? { planProposal: true } : {}),
+      ...(options.plan ? { plan: options.plan } : {}),
       history,
       ...(options.background ? { background: true } : {}),
       ...(options.model ? { model: options.model } : {})
@@ -609,7 +752,16 @@ export function ChatPanel({
     setMessages((current) => [...current, user, assistant]);
     const outcome = await startAttempt(assistant.id, request, options.voiceAdmission
       ? { admission: options.voiceAdmission, userMessageId: user.id } : undefined);
-    return outcome.ok ? { ok: true } : { ok: false, reason: outcome.reason };
+    if (!outcome.ok) {
+      if (options.discardOnFailure) {
+        // A refused Start is decided before any user message is stored, so the local rows are
+        // not a record of the conversation.
+        retryRequestsRef.current.delete(assistant.id);
+        setMessages((current) => current.filter((message) => message.id !== user.id && message.id !== assistant.id));
+      }
+      return { ok: false, reason: outcome.reason, ...(outcome.code ? { code: outcome.code } : {}) };
+    }
+    return { ok: true, ...(outcome.plan ? { plan: outcome.plan } : {}) };
   };
 
   const send = async (event?: FormEvent): Promise<void> => {
@@ -643,6 +795,84 @@ export function ChatPanel({
       resetComposer: false,
       voiceAdmission: admission
     });
+  };
+
+  /** Ask once for a read-only Edit proposal. The stored plan, not this request, is reviewed. */
+  const proposePlan = async (request: PlanProposalRequest): Promise<PlanActionOutcome> => {
+    if (running) {
+      return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
+    }
+    setPlanAction("propose");
+    setPlanNotice(null);
+    const outcome = await sendPrompt(planRequestPrompt(request), {
+      mode: "edit",
+      threadId: threadId ?? undefined,
+      guidance: request.guidance,
+      model: turnModel ?? undefined,
+      background,
+      resetComposer: false,
+      planProposal: true
+    });
+    if (!outcome.ok) {
+      setPlanAction(null);
+      return { ok: false, reason: outcome.reason };
+    }
+    // The proposal notice (or its terminal failure) clears this once the turn is over.
+    return { ok: true };
+  };
+
+  /**
+   * Start the reviewed plan as one explicit Edit turn. The ref is identity only; the fixed
+   * prompt carries no plan text and no guidance, and the stored plan owns both.
+   */
+  const startPlan = async (ref: PlanStartRef): Promise<PlanActionOutcome> => {
+    if (running) {
+      return { ok: false, reason: "The conversation is already answering. Wait for it to finish." };
+    }
+    const id = threadIdRef.current;
+    if (!id) {
+      return { ok: false, reason: "Open the plan's conversation before starting it. Nothing was started." };
+    }
+    const stored = plansRef.current.find((plan) => plan.id === ref.id);
+    if (!stored) {
+      return { ok: false, reason: "That plan is not in this conversation. Nothing was started." };
+    }
+    if (stored.revision !== ref.revision) {
+      return { ok: false, reason: "The plan changed since you reviewed it. Review the current revision before starting." };
+    }
+    if (stored.status !== "proposed") {
+      return { ok: false, reason: "That plan cannot be started. Only a proposed plan can start." };
+    }
+    setPlanAction("start");
+    setPlanNotice(null);
+    const outcome = await sendPrompt("Start the reviewed plan.", {
+      mode: "edit",
+      threadId: id,
+      guidance: undefined,
+      model: turnModel ?? undefined,
+      background,
+      resetComposer: false,
+      plan: { id: ref.id, revision: ref.revision, action: "start" },
+      discardOnFailure: true
+    });
+    setPlanAction(null);
+    if (!outcome.ok) {
+      return { ok: false, reason: outcome.reason };
+    }
+    if (outcome.plan) {
+      // The only running signal is the confirmed turn-start acknowledgement; Start emits no notice.
+      const acknowledged = outcome.plan;
+      setPlans((current) => {
+        const next = current.map((plan) =>
+          plan.id === acknowledged.id
+            ? { ...plan, revision: acknowledged.revision, status: acknowledged.status }
+            : plan
+        );
+        plansRef.current = next;
+        return next;
+      });
+    }
+    return { ok: true };
   };
 
   const approve = async (message: Message, approval: Approval, approved: boolean, pressed: HTMLElement): Promise<void> => {
@@ -754,6 +984,22 @@ export function ChatPanel({
     message.approvals?.some((approval) => approval.status === "pending")
   );
 
+  // The last stored plan is the one the author is reviewing or running. Older terminal plans
+  // remain in the thread file but do not need a second card in the conversation.
+  const currentPlan = plans.at(-1) ?? null;
+  const modelLabel = turnModel ? `This turn: ${modelDisplayName(turnModel.modelId)}` : "Model: book default";
+  const planRegion = currentPlan ? (
+    <div data-testid="plan-region" key={currentPlan.id} className="px-1 pb-2">
+      <PlanProgress
+        plan={currentPlan}
+        running={running}
+        modelLabel={modelLabel}
+        notice={planNotice}
+        onStart={startPlan}
+      />
+    </div>
+  ) : null;
+
   return (
     <aside
       className={cn("glass flex w-[clamp(320px,30vw,400px)] shrink-0 flex-col overflow-hidden rounded-[var(--corner-xl)]", className)}
@@ -847,6 +1093,9 @@ export function ChatPanel({
               Boolean(message.turnId) &&
               !message.failed &&
               !message.approvals?.some((approval) => approval.status === "pending");
+            // `plan_step` and `propose_plan` are runtime control tools, not author-facing book
+            // actions. The plan region is their record, so their ordinary rows stay hidden.
+            const visibleTools = message.tools.filter((tool) => !PLAN_TOOL_NAMES.has(tool.name));
             return (
               <ConversationItem
                 key={message.id}
@@ -878,9 +1127,9 @@ export function ChatPanel({
                             <p className="whitespace-pre-wrap">{message.guidance}</p>
                           </details>
                         ) : null}
-                        {message.tools.length > 0 ? (
+                        {visibleTools.length > 0 ? (
                           <Tools className="mb-2">
-                            {message.tools.map((tool, toolIndex) => {
+                            {visibleTools.map((tool, toolIndex) => {
                               const detail = toolDetailText(tool);
                               const status = toolStatus(tool);
                               const kept = keptNote(tool);
@@ -1103,9 +1352,13 @@ export function ChatPanel({
                     </CheckpointTrigger>
                   </Checkpoint>
                 ) : null}
+                {currentPlan && message.id === currentPlan.parent.messageId ? planRegion : null}
               </ConversationItem>
             );
           })}
+          {currentPlan && !messages.some((message) => message.id === currentPlan.parent.messageId)
+            ? planRegion
+            : null}
         </ConversationContent>
         <ConversationScrollButton />
       </Conversation>
@@ -1156,8 +1409,12 @@ export function ChatPanel({
             <PlanFirstControl
               mode={mode}
               running={running}
-              writer={planWriter}
-              modelLabel={turnModel ? `This turn: ${modelDisplayName(turnModel.modelId)}` : "Model: book default"}
+              proposing={planAction === "propose"}
+              plan={currentPlan}
+              notice={planNotice}
+              modelLabel={modelLabel}
+              onPropose={proposePlan}
+              onStart={startPlan}
             />
           </div>
         ) : null}

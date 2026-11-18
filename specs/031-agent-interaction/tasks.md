@@ -159,8 +159,12 @@ authorized; no task requires a live provider, credential, paid service, real man
   successful observed tool result and zero failures, otherwise `not-completed`. Approval request
   and settled writes precede publishing and resuming, completion requires every step completed and
   the complete write applied, and a plan write failure ends as `plan-state` rather than completed.
-  Pause, resume ownership, cancel and expiry remain T015-T017. The plan control, plan card and
-  composer wiring remain a follow-up slice. The existing 20-step model loop cap remains; a longer
+  Pause, resume ownership, cancel and expiry remain T015-T017. Renderer slice: Plan first sends one
+  read-only Edit proposal request and reviews the stored plan from the conversation; Start sends the
+  identity-only ref with the fixed prompt and no guidance, the plan card shows confirmed step labels
+  and status, a refused Start removes its optimistic local rows, and the proposal and step control
+  tools stay out of the author-facing tool list. The composer request fields, plan card and plan
+  region no longer depend on a local proposal. The existing 20-step model loop cap remains; a longer
   plan fails honestly rather than completing in one turn, and raising it or continuing across turns
   stays with later lifecycle work. This task stays open.
 - [ ] T015 Add Pause and Resume according to T002. A requested pause is not shown as complete until
