@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { buildThreadDocument, readThreadDocument, ThreadDocumentError } from "../src/agent/thread-document";
+import {
+  buildThreadDocument,
+  readThreadDocument,
+  ThreadDocumentError,
+  type ThreadDocumentErrorCode
+} from "../src/agent/thread-document";
 import type { AgentThread } from "../src/agent/messages";
 
 const encoder = new TextEncoder();
 const CREATED = "2026-10-25T00:00:00.000Z";
+const STARTED = "2026-11-01T00:00:00.000Z";
 const NOW = "2026-11-08T12:00:00.000Z";
 
 function base(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -184,8 +190,146 @@ test("a new document starts at schema 1 with the supplied timestamp", () => {
     createdAt: CREATED,
     updatedAt: CREATED,
     messages: [],
+    plans: [],
     checkpointTurns: []
   };
   const built = buildThreadDocument(null, typed, NOW);
   expect(JSON.parse(built.text).updatedAt).toBe(NOW);
+});
+
+const PLAN_PARENT = {
+  id: "msg_plan0001",
+  role: "assistant",
+  parts: [{ type: "text", text: "Here is the plan." }],
+  mode: "edit",
+  turnId: "turn_plan0001",
+  createdAt: CREATED
+};
+
+function rawPlan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "plan-1",
+    mode: "edit",
+    status: "proposed",
+    purpose: "Revise the opening",
+    steps: [{ text: "Read the opening", state: "pending" }],
+    revision: 1,
+    parent: { messageId: "msg_plan0001", turnId: "turn_plan0001" },
+    createdAt: CREATED,
+    updatedAt: CREATED,
+    ...overrides
+  };
+}
+
+function terminalRawPlan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return rawPlan({
+    status: "cancelled",
+    steps: [{ text: "Read the opening", state: "not-completed" }],
+    startedAt: STARTED,
+    terminalAt: NOW,
+    updatedAt: NOW,
+    ...overrides
+  });
+}
+
+function planned(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return base({
+    messages: [PLAN_PARENT],
+    plans: [rawPlan()],
+    ...overrides
+  });
+}
+
+function expectRefusal(raw: Record<string, unknown>, code: ThreadDocumentErrorCode): void {
+  const input = bytes(raw);
+  const before = [...input];
+  try {
+    readThreadDocument({ bytes: input, sha256: "h" });
+    throw new Error("expected the document to be refused");
+  } catch (error) {
+    expect(error).toBeInstanceOf(ThreadDocumentError);
+    expect((error as ThreadDocumentError).code).toBe(code);
+  }
+  // A read never rewrites or clears the bytes it refused.
+  expect([...input]).toEqual(before);
+}
+
+describe("plan documents", () => {
+  test("keeps a valid plan and every unknown plan field through a rename", () => {
+    const raw = planned({
+      futureTopLevel: "keep this too",
+      plans: [
+        rawPlan({
+          futurePlanField: { keep: true },
+          steps: [{ text: "Read the opening", state: "pending", futureStepField: "step extra" }],
+          parent: {
+            messageId: "msg_plan0001",
+            turnId: "turn_plan0001",
+            futureParentField: "parent extra"
+          }
+        })
+      ]
+    });
+    const previous = document(raw);
+    expect(previous.thread.plans[0]?.status).toBe("proposed");
+    const built = buildThreadDocument(previous, { ...previous.thread, title: "Renamed" }, NOW);
+    expect(built.unchanged).toBe(false);
+    const out = JSON.parse(built.text) as Record<string, unknown>;
+    expect(out.title).toBe("Renamed");
+    expect(out.futureTopLevel).toBe("keep this too");
+    const plans = out.plans as Array<Record<string, unknown>>;
+    expect(plans[0]?.futurePlanField).toEqual({ keep: true });
+    expect((plans[0]?.steps as Array<Record<string, unknown>>)[0]?.futureStepField).toBe("step extra");
+    expect((plans[0]?.parent as Record<string, unknown>).futureParentField).toBe("parent extra");
+  });
+
+  test("an unchanged plan document is a no-op that keeps the stored bytes", () => {
+    const previous = document(planned());
+    const built = buildThreadDocument(previous, previous.thread, NOW);
+    expect(built.unchanged).toBe(true);
+    expect(built.text).toBe(previous.text);
+    expect(built.bytes).toBe(previous.bytes);
+  });
+
+  test("reports an unknown stored status or step state as unsupported and leaves the bytes", () => {
+    for (const raw of [
+      planned({ plans: [rawPlan({ status: "paused-future" })] }),
+      planned({ plans: [rawPlan({ status: "started" })] }),
+      planned({ plans: [rawPlan({ steps: [{ text: "Read", state: "skipped" }] })] })
+    ]) {
+      expectRefusal(raw, "unsupported");
+    }
+  });
+
+  test("reports a malformed plan as corrupt and leaves the bytes", () => {
+    const twoOpen = [
+      rawPlan(),
+      rawPlan({ id: "plan-2", purpose: "Another plan" })
+    ];
+    const missingTerminalAt = terminalRawPlan();
+    delete missingTerminalAt.terminalAt;
+    for (const raw of [
+      planned({ messages: [] }),
+      planned({ messages: [{ ...PLAN_PARENT, role: "user" }] }),
+      planned({ plans: [rawPlan(), rawPlan()] }),
+      planned({ plans: twoOpen }),
+      planned({ plans: [missingTerminalAt] }),
+      planned({ plans: [terminalRawPlan({ steps: [{ text: "Read", state: "pending" }] })] })
+    ]) {
+      expectRefusal(raw, "corrupt");
+    }
+  });
+
+  test("a terminal plan is retained next to a new proposal", () => {
+    const previous = document(
+      planned({ plans: [terminalRawPlan(), rawPlan({ id: "plan-2" })] })
+    );
+    expect(previous.thread.plans.map((plan) => plan.status)).toEqual(["cancelled", "proposed"]);
+    const built = buildThreadDocument(previous, { ...previous.thread, title: "After" }, NOW);
+    const out = JSON.parse(built.text) as Record<string, unknown>;
+    expect((out.plans as Array<Record<string, unknown>>).map((plan) => plan.status)).toEqual([
+      "cancelled",
+      "proposed"
+    ]);
+  });
 });

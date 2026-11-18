@@ -1446,6 +1446,7 @@ as a chapter and is not part of `library.json`; a missing or stale catalog never
 | `createdAt`, `updatedAt` | ISO 8601 | `updatedAt` changes when the conversation content changes. A save that changes nothing is not rewritten and keeps the stored timestamp. |
 | `messages` | array | Each has `id`, `role`, `parts`, optional `model`, `mode` and `usage`, and `createdAt`. New user submissions and assistant outcomes record their fixed turn `mode` (`discuss` or `edit`); older messages have none and are shown as unrecorded, never inferred from the current composer. |
 | `checkpointTurns` | string[] | Turn ids whose checkpoints belong to this conversation, newest last: each turn that changed the book and saved its checkpoint, including one stopped while it waited for approval and one that failed before it stored a reply. Undo takes the book's newest checkpoint, so the chat offers it only on the last of these, and names that turn: if another change now owns the newest checkpoint, nothing is undone (see [Agent turn checkpoints](#agent-turn-checkpoints)). An undo removes its turn from every conversation that lists it. A branch copies its source's list when it keeps the newest of these turns, and starts with none otherwise. |
+| `plans` | array | Bounded plan history, oldest first, at most 50 per conversation. Each plan has `id` (1–200), `mode: "edit"`, `status`, `purpose` (1–2,000), ordered `steps` (`text` 1–2,000, `state`; 1–50 steps), `revision` (integer 1 or more), optional `guidance` (1–2,000), `parent` (`messageId`, `turnId`), `createdAt`, `updatedAt`, and optional `startedAt`/`terminalAt`. The stored statuses are `proposed`, `running`, `waiting-for-approval`, `pause-requested`, `paused`, `completed`, `cancelled`, `failed` and `expired`; `started` is not stored. Step states are `pending`, `in-progress`, `completed` and `not-completed`; a skipped step is `not-completed`. At most one plan is unfinished. Terminal plans are retained and immutable, and a terminal plan closes its unfinished steps to `not-completed`. A missing `plans` is empty. A malformed plan is reported as corrupt, and an unknown stored status or step state as unsupported; either way the file is left untouched. A fork starts with no plans. |
 
 Message parts are `text`, `reasoning`, `tool-call`, `tool-result`, `source`, `file`, `error` and
 `guidance`. Tool calls and results keep their ids, so a resumed conversation can be inspected
@@ -1456,6 +1457,15 @@ deletion, split or merge that found its chapter changed since it was proposed al
 path of the conflict copy that holds its text (see [Saving and conflicts](#saving-and-conflicts)). A `guidance` part carries one turn of author instructions (1–2,000
 characters, never truncated) with the submitted user message; it applies to that turn only.
 The schema lives in `packages/core/src/agent/messages.ts`.
+
+Plans are not message parts: a plan outlives the turn that proposed it, so it lives on the
+conversation beside `messages` and `checkpointTurns`. The parent is the Edit assistant message that
+proposed it, matched by `parent.messageId` and its stored `parent.turnId`; a later Start, Resume,
+pause or cancel turn refers to the plan by id and does not become its parent. At most one plan may
+be unfinished. A terminal plan is never reopened, replaced or removed, and every terminal
+transition closes its remaining pending or in-progress steps to `not-completed`; a completed plan
+must have at least one completed step. `plans` is additive on `schemaVersion: 1`: a thread without
+it has no plans, an older build keeps it as unknown plain data, and a fork starts with none.
 
 Stored error explanations are limited to 2,000 UTF-16 code units. Longer provider details carry an
 explicit shortening marker; retry-wait explanations and checkpoint-loss warnings are retained.

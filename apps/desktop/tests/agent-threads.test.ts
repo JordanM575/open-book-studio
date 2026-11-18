@@ -8,9 +8,11 @@ import {
   messageText,
   serializeAgentThread,
   type AgentMessage,
+  type AgentPlanEvent,
+  type AgentPlanStatus,
   type AgentThread
 } from "@ai-book-studio/core/agent/messages";
-import { ThreadStore, ThreadStoreError } from "@ai-book-studio/core/agent/threads";
+import { ThreadStore, ThreadStoreError, type NewAgentPlan } from "@ai-book-studio/core/agent/threads";
 import { libraryPathFromArchivePath, toLibraryFilePath } from "@ai-book-studio/core/library/path";
 import { conflictsPath, threadsPath } from "@ai-book-studio/core/library/paths";
 import { LibraryService } from "@ai-book-studio/core/library/service";
@@ -634,5 +636,543 @@ describe("unsupported numbers cannot corrupt a conversation (review P2)", () => 
       createdAt: thread.createdAt
     }))).rejects.toBeTruthy();
     expect(await readFile(path, "utf8")).toBe(before);
+  });
+});
+
+const PLAN_PARENT_ID = "msg_plan0001";
+const PLAN_TURN_ID = "turn_plan0001";
+const PLAN_CREATED = "2026-01-01T00:00:00.000Z";
+const PLAN_STARTED = "2026-01-02T00:00:00.000Z";
+const PLAN_NOW = "2026-01-03T00:00:00.000Z";
+
+function planParentMessage(overrides: Record<string, unknown> = {}): AgentMessage {
+  return agentMessageSchema.parse({
+    id: PLAN_PARENT_ID,
+    role: "assistant",
+    parts: [{ type: "text", text: "Here is the plan." }],
+    mode: "edit",
+    turnId: PLAN_TURN_ID,
+    createdAt: new Date().toISOString(),
+    ...overrides
+  });
+}
+
+function newPlan(overrides: Partial<NewAgentPlan> = {}): NewAgentPlan {
+  return {
+    id: "plan-1",
+    purpose: "Revise the opening",
+    steps: ["Read the opening", "Rewrite the door"],
+    parent: { messageId: PLAN_PARENT_ID, turnId: PLAN_TURN_ID },
+    ...overrides
+  };
+}
+
+function rawPlanFor(
+  status: AgentPlanStatus,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const terminal = status === "completed" || status === "cancelled" || status === "failed" || status === "expired";
+  const steps =
+    status === "completed"
+      ? [{ text: "Read the opening", state: "completed" }]
+      : terminal
+        ? [{ text: "Read the opening", state: "not-completed" }]
+        : status === "proposed"
+          ? [{ text: "Read the opening", state: "pending" }]
+          : [
+              { text: "Read the opening", state: "completed" },
+              { text: "Rewrite the door", state: "pending" }
+            ];
+  const startedAt = status === "proposed" || status === "expired" ? undefined : PLAN_STARTED;
+  const terminalAt = terminal ? PLAN_NOW : undefined;
+  return {
+    id: "plan-1",
+    mode: "edit",
+    status,
+    purpose: "Revise the opening",
+    steps,
+    revision: 1,
+    parent: { messageId: PLAN_PARENT_ID, turnId: PLAN_TURN_ID },
+    createdAt: PLAN_CREATED,
+    updatedAt: terminalAt ?? startedAt ?? PLAN_CREATED,
+    ...(startedAt ? { startedAt } : {}),
+    ...(terminalAt ? { terminalAt } : {}),
+    ...overrides
+  };
+}
+
+function rawPlanParent(createdAt: string): Record<string, unknown> {
+  return {
+    id: PLAN_PARENT_ID,
+    role: "assistant",
+    parts: [{ type: "text", text: "Here is the plan." }],
+    mode: "edit",
+    turnId: PLAN_TURN_ID,
+    createdAt
+  };
+}
+
+async function seedPlanFile(
+  plans: Record<string, unknown>[],
+  messages?: Record<string, unknown>[]
+): Promise<string> {
+  const thread = await store.create(BOOK, "Seeded plan");
+  const path = threadPath(thread.id);
+  const raw = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  raw.messages = messages ?? [rawPlanParent(thread.createdAt)];
+  raw.plans = plans;
+  await writeFile(path, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  return thread.id;
+}
+
+function seedThreadWithPlan(
+  status: AgentPlanStatus,
+  overrides: Record<string, unknown> = {}
+): Promise<string> {
+  return seedPlanFile([rawPlanFor(status, overrides)]);
+}
+
+async function bytesOf(threadId: string): Promise<string> {
+  return readFile(threadPath(threadId), "utf8");
+}
+
+describe("plan state through the thread store", () => {
+  test("stores a proposed plan with its Edit proposal turn", async () => {
+    const thread = await store.create(BOOK, "Plan round-trip");
+    await store.appendMessage(BOOK, thread.id, planParentMessage());
+    const withPlan = await store.addPlan(BOOK, thread.id, newPlan({ guidance: "   " }));
+
+    expect(withPlan.plans).toHaveLength(1);
+    const raw = JSON.parse(await bytesOf(thread.id)) as Record<string, unknown>;
+    const stored = (raw.plans as Array<Record<string, unknown>>)[0];
+    expect(stored).toMatchObject({
+      id: "plan-1",
+      mode: "edit",
+      status: "proposed",
+      purpose: "Revise the opening",
+      revision: 1,
+      parent: { messageId: PLAN_PARENT_ID, turnId: PLAN_TURN_ID }
+    });
+    expect((stored?.steps as Array<Record<string, unknown>>).map((step) => step.state)).toEqual([
+      "pending",
+      "pending"
+    ]);
+    expect(stored?.guidance).toBeUndefined();
+    expect(stored?.startedAt).toBeUndefined();
+    expect(stored?.terminalAt).toBeUndefined();
+    expect(stored?.createdAt).toBeTruthy();
+    expect(stored?.updatedAt).toBeTruthy();
+
+    const snapshot = await store.readSnapshot(BOOK, thread.id);
+    expect(snapshot?.thread.plans[0]?.id).toBe("plan-1");
+    expect((await store.read(BOOK, thread.id))?.plans[0]?.steps).toHaveLength(2);
+  });
+
+  test("moves a plan through Start, progress, approval, pause, resume and completion", async () => {
+    const thread = await store.create(BOOK, "Plan lifecycle");
+    await store.appendMessage(BOOK, thread.id, planParentMessage());
+    await store.addPlan(BOOK, thread.id, newPlan());
+    let previous = await bytesOf(thread.id);
+
+    const started = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "start",
+      revision: 1
+    });
+    expect(started.outcome).toBe("applied");
+    expect(started.thread.plans[0]?.status).toBe("running");
+    expect(started.thread.plans[0]?.startedAt).toBeTruthy();
+    expect(await bytesOf(thread.id)).not.toBe(previous);
+    previous = await bytesOf(thread.id);
+
+    const progress = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "step",
+      revision: 1,
+      index: 0,
+      state: "in-progress"
+    });
+    expect(progress.thread.plans[0]?.steps[0]?.state).toBe("in-progress");
+    expect(await bytesOf(thread.id)).not.toBe(previous);
+    previous = await bytesOf(thread.id);
+
+    const finishedStep = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "step",
+      revision: 1,
+      index: 0,
+      state: "completed"
+    });
+    expect(finishedStep.thread.plans[0]?.steps[0]?.state).toBe("completed");
+
+    const waiting = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "request-approval"
+    });
+    expect(waiting.thread.plans[0]?.status).toBe("waiting-for-approval");
+    const settled = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "approval-settled"
+    });
+    expect(settled.thread.plans[0]?.status).toBe("running");
+
+    const requesting = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "request-pause"
+    });
+    expect(requesting.thread.plans[0]?.status).toBe("pause-requested");
+    const paused = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "confirm-pause"
+    });
+    expect(paused.thread.plans[0]?.status).toBe("paused");
+
+    const resumed = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "resume"
+    });
+    expect(resumed.thread.plans[0]?.status).toBe("running");
+    expect(resumed.thread.plans[0]?.startedAt).toBe(started.thread.plans[0]?.startedAt);
+    expect(resumed.thread.plans[0]?.revision).toBe(1);
+
+    const completed = await store.applyPlanEvent(BOOK, thread.id, "plan-1", {
+      type: "complete"
+    });
+    expect(completed.thread.plans[0]?.status).toBe("completed");
+    expect(completed.thread.plans[0]?.terminalAt).toBeTruthy();
+    expect(completed.thread.plans[0]?.steps.map((step) => step.state)).toEqual([
+      "completed",
+      "not-completed"
+    ]);
+
+    const terminalRecord = JSON.parse(await bytesOf(thread.id)).plans[0];
+    const second = await store.addPlan(
+      BOOK,
+      thread.id,
+      newPlan({ id: "plan-2", purpose: "A second pass" })
+    );
+    expect(second.plans).toHaveLength(2);
+    const raw = JSON.parse(await bytesOf(thread.id)) as Record<string, unknown>;
+    const plans = raw.plans as Array<Record<string, unknown>>;
+    expect(plans[0]).toEqual(terminalRecord);
+    expect(plans[1]).toMatchObject({ id: "plan-2", status: "proposed", revision: 1 });
+  });
+
+  test("refuses impossible transitions and leaves the file byte-identical", async () => {
+    const cases: Array<{ status: AgentPlanStatus; event: AgentPlanEvent; overrides?: Record<string, unknown> }> = [
+      { status: "waiting-for-approval", event: { type: "start", revision: 1 } },
+      { status: "paused", event: { type: "start", revision: 1 } },
+      { status: "completed", event: { type: "start", revision: 1 } },
+      { status: "cancelled", event: { type: "start", revision: 1 } },
+      { status: "failed", event: { type: "start", revision: 1 } },
+      { status: "expired", event: { type: "start", revision: 1 } },
+      { status: "proposed", event: { type: "complete" } },
+      { status: "paused", event: { type: "complete" } },
+      { status: "proposed", event: { type: "fail" } },
+      { status: "paused", event: { type: "fail" } },
+      { status: "completed", event: { type: "cancel" } },
+      { status: "failed", event: { type: "cancel" } },
+      { status: "expired", event: { type: "cancel" } },
+      { status: "proposed", event: { type: "resume" } },
+      { status: "running", event: { type: "confirm-pause" } },
+      { status: "waiting-for-approval", event: { type: "confirm-pause" } },
+      { status: "proposed", event: { type: "step", revision: 1, index: 0, state: "in-progress" } },
+      { status: "waiting-for-approval", event: { type: "step", revision: 1, index: 0, state: "completed" } },
+      { status: "paused", event: { type: "step", revision: 1, index: 0, state: "completed" } },
+      { status: "proposed", event: { type: "start", revision: 2 } },
+      { status: "running", event: { type: "step", revision: 2, index: 1, state: "in-progress" } },
+      { status: "running", event: { type: "step", revision: 1, index: 9, state: "in-progress" } },
+      { status: "running", event: { type: "step", revision: 1, index: 0, state: "in-progress" } },
+      {
+        status: "running",
+        event: { type: "complete" },
+        overrides: {
+          steps: [
+            { text: "Read the opening", state: "pending" },
+            { text: "Rewrite the door", state: "pending" }
+          ]
+        }
+      }
+    ];
+
+    for (const entry of cases) {
+      const threadId = await seedThreadWithPlan(entry.status, entry.overrides);
+      const before = await bytesOf(threadId);
+      await expect(
+        store.applyPlanEvent(BOOK, threadId, "plan-1", entry.event)
+      ).rejects.toMatchObject({ code: "plan-state" });
+      expect(await bytesOf(threadId)).toBe(before);
+    }
+  });
+
+  test("a duplicate or already-settled event writes nothing", async () => {
+    const cases: Array<{
+      status: AgentPlanStatus;
+      event: AgentPlanEvent;
+      overrides?: Record<string, unknown>;
+    }> = [
+      { status: "running", event: { type: "start", revision: 1 } },
+      { status: "running", event: { type: "resume" } },
+      { status: "pause-requested", event: { type: "request-pause" } },
+      { status: "paused", event: { type: "confirm-pause" } },
+      { status: "running", event: { type: "approval-settled" } },
+      { status: "cancelled", event: { type: "cancel" } },
+      { status: "completed", event: { type: "complete" } },
+      { status: "failed", event: { type: "fail" } },
+      { status: "completed", event: { type: "expire" } },
+      { status: "expired", event: { type: "expire" } }
+    ];
+
+    for (const entry of cases) {
+      const threadId = await seedThreadWithPlan(entry.status, entry.overrides);
+      const before = await bytesOf(threadId);
+      const stored = await store.read(BOOK, threadId);
+      if (!stored) throw new Error("missing stored thread");
+      const result = await store.applyPlanEvent(BOOK, threadId, "plan-1", entry.event);
+      expect(result.outcome).toBe("unchanged");
+      expect(await bytesOf(threadId)).toBe(before);
+      expect(result.thread.updatedAt).toBe(stored.updatedAt);
+    }
+
+    // A same-state step event is a duplicate confirmed outcome, not a step change.
+    const sameState = await seedThreadWithPlan("running", {
+      steps: [
+        { text: "Read the opening", state: "in-progress" },
+        { text: "Rewrite the door", state: "pending" }
+      ]
+    });
+    const sameBefore = await bytesOf(sameState);
+    const sameResult = await store.applyPlanEvent(BOOK, sameState, "plan-1", {
+      type: "step",
+      revision: 1,
+      index: 0,
+      state: "in-progress"
+    });
+    expect(sameResult.outcome).toBe("unchanged");
+    expect(await bytesOf(sameState)).toBe(sameBefore);
+  });
+
+  test("binds every plan to its stored Edit proposal turn", async () => {
+    const missing = await store.create(BOOK, "Missing parent");
+    const missingBefore = await bytesOf(missing.id);
+    await expect(store.addPlan(BOOK, missing.id, newPlan())).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(missing.id)).toBe(missingBefore);
+
+    const userParent = await store.create(BOOK, "User parent");
+    await store.appendMessage(
+      BOOK,
+      userParent.id,
+      agentMessageSchema.parse({
+        id: PLAN_PARENT_ID,
+        role: "user",
+        mode: "edit",
+        turnId: PLAN_TURN_ID,
+        parts: [{ type: "text", text: "Propose a plan." }],
+        createdAt: new Date().toISOString()
+      })
+    );
+    const userBefore = await bytesOf(userParent.id);
+    await expect(store.addPlan(BOOK, userParent.id, newPlan())).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(userParent.id)).toBe(userBefore);
+
+    const noTurn = await store.create(BOOK, "No turn");
+    await store.appendMessage(
+      BOOK,
+      noTurn.id,
+      agentMessageSchema.parse({
+        id: PLAN_PARENT_ID,
+        role: "assistant",
+        mode: "edit",
+        parts: [{ type: "text", text: "Here is the plan." }],
+        createdAt: new Date().toISOString()
+      })
+    );
+    const noTurnBefore = await bytesOf(noTurn.id);
+    await expect(store.addPlan(BOOK, noTurn.id, newPlan())).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(noTurn.id)).toBe(noTurnBefore);
+
+    const discuss = await store.create(BOOK, "Discuss parent");
+    await store.appendMessage(
+      BOOK,
+      discuss.id,
+      agentMessageSchema.parse({
+        id: PLAN_PARENT_ID,
+        role: "assistant",
+        mode: "discuss",
+        turnId: PLAN_TURN_ID,
+        parts: [{ type: "text", text: "Let's talk it through." }],
+        createdAt: new Date().toISOString()
+      })
+    );
+    const discussBefore = await bytesOf(discuss.id);
+    await expect(store.addPlan(BOOK, discuss.id, newPlan())).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(discuss.id)).toBe(discussBefore);
+  });
+
+  test("a direct save cannot detach a plan from its parent turn", async () => {
+    const thread = await store.create(BOOK, "Parent binding");
+    await store.appendMessage(BOOK, thread.id, planParentMessage());
+    await store.addPlan(BOOK, thread.id, newPlan());
+    const snapshot = await store.readSnapshot(BOOK, thread.id);
+    if (!snapshot) throw new Error("missing snapshot");
+    const before = await bytesOf(thread.id);
+
+    const changedTurn = structuredClone(snapshot.thread);
+    changedTurn.messages[0] = { ...changedTurn.messages[0]!, turnId: "turn_other01" };
+    await expect(store.save(changedTurn, { baseHash: snapshot.baseHash })).rejects.toBeTruthy();
+    expect(await bytesOf(thread.id)).toBe(before);
+
+    const changedMode = structuredClone(snapshot.thread);
+    delete changedMode.messages[0]!.mode;
+    await expect(store.save(changedMode, { baseHash: snapshot.baseHash })).rejects.toBeTruthy();
+    expect(await bytesOf(thread.id)).toBe(before);
+  });
+
+  test("refuses a second live plan, a duplicate id and a fifty-first plan", async () => {
+    const live = await store.create(BOOK, "One live plan");
+    await store.appendMessage(BOOK, live.id, planParentMessage());
+    await store.addPlan(BOOK, live.id, newPlan());
+    const liveBefore = await bytesOf(live.id);
+    await expect(
+      store.addPlan(BOOK, live.id, newPlan({ id: "plan-2" }))
+    ).rejects.toMatchObject({ code: "plan-state" });
+    expect(await bytesOf(live.id)).toBe(liveBefore);
+
+    const duplicate = await seedThreadWithPlan("cancelled", { id: "plan-1" });
+    const duplicateBefore = await bytesOf(duplicate);
+    await expect(store.addPlan(BOOK, duplicate, newPlan({ id: "plan-1" }))).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(duplicate)).toBe(duplicateBefore);
+
+    const full = await seedPlanFile(
+      Array.from({ length: 50 }, (_, index) =>
+        rawPlanFor("cancelled", { id: `plan-${index}`, purpose: `Plan ${index}` })
+      )
+    );
+    const fullBefore = await bytesOf(full);
+    await expect(store.addPlan(BOOK, full, newPlan({ id: "plan-50" }))).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(full)).toBe(fullBefore);
+  });
+
+  test("a direct save cannot change or remove a terminal plan", async () => {
+    const threadId = await seedThreadWithPlan("completed");
+    const snapshot = await store.readSnapshot(BOOK, threadId);
+    if (!snapshot) throw new Error("missing snapshot");
+    const before = await bytesOf(threadId);
+
+    const changed = structuredClone(snapshot.thread);
+    changed.plans[0] = { ...changed.plans[0]!, purpose: "A different purpose" };
+    await expect(store.save(changed, { baseHash: snapshot.baseHash })).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(threadId)).toBe(before);
+
+    const changedStep = structuredClone(snapshot.thread);
+    changedStep.plans[0] = {
+      ...changedStep.plans[0]!,
+      steps: [{ ...changedStep.plans[0]!.steps[0]!, text: "A different step" }]
+    };
+    await expect(store.save(changedStep, { baseHash: snapshot.baseHash })).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(threadId)).toBe(before);
+
+    const removed = structuredClone(snapshot.thread);
+    removed.plans = [];
+    await expect(store.save(removed, { baseHash: snapshot.baseHash })).rejects.toMatchObject({
+      code: "plan-state"
+    });
+    expect(await bytesOf(threadId)).toBe(before);
+  });
+
+  test("reports a corrupt or unsupported plan without touching the file", async () => {
+    const corrupt = await seedPlanFile(
+      [rawPlanFor("proposed")],
+      [{ ...rawPlanParent(PLAN_CREATED), role: "user" }]
+    );
+    const corruptBytes = await bytesOf(corrupt);
+    await expect(store.read(BOOK, corrupt)).rejects.toMatchObject({ code: "corrupt" });
+    expect((await store.list(BOOK)).some((entry) => entry.id === corrupt)).toBe(false);
+    expect(await bytesOf(corrupt)).toBe(corruptBytes);
+
+    const terminal = rawPlanFor("cancelled");
+    delete terminal.terminalAt;
+    const missingEnd = await seedPlanFile([terminal]);
+    const missingEndBytes = await bytesOf(missingEnd);
+    await expect(store.read(BOOK, missingEnd)).rejects.toMatchObject({ code: "corrupt" });
+    expect(await bytesOf(missingEnd)).toBe(missingEndBytes);
+
+    const unsupported = await seedPlanFile([rawPlanFor("proposed", { status: "paused-future" })]);
+    const unsupportedBytes = await bytesOf(unsupported);
+    await expect(store.read(BOOK, unsupported)).rejects.toMatchObject({ code: "unsupported" });
+    expect((await store.list(BOOK)).some((entry) => entry.id === unsupported)).toBe(false);
+    expect(await bytesOf(unsupported)).toBe(unsupportedBytes);
+  });
+
+  test("a branch starts with no plans", async () => {
+    const sourceId = await seedPlanFile([rawPlanFor("cancelled"), rawPlanFor("proposed", { id: "plan-2" })]);
+    const branch = await store.fork(BOOK, sourceId, PLAN_TURN_ID);
+    expect(branch.id).not.toBe(sourceId);
+    expect(branch.plans).toEqual([]);
+    expect((await store.read(BOOK, branch.id))?.plans).toEqual([]);
+    expect((await store.read(BOOK, sourceId))?.plans).toHaveLength(2);
+  });
+
+  test("unknown plan, step and parent fields survive a rename and a transition", async () => {
+    const threadId = await seedPlanFile([
+      rawPlanFor("proposed", {
+        futurePlanField: "keep the plan",
+        steps: [
+          { text: "Read the opening", state: "pending", futureStepField: "keep the step" },
+          { text: "Rewrite the door", state: "pending" }
+        ],
+        parent: {
+          messageId: PLAN_PARENT_ID,
+          turnId: PLAN_TURN_ID,
+          futureParentField: "keep the parent"
+        }
+      })
+    ]);
+
+    await store.rename(BOOK, threadId, "Renamed plan");
+    const renamed = JSON.parse(await bytesOf(threadId)) as Record<string, unknown>;
+    expect((renamed.plans as Array<Record<string, unknown>>)[0]?.futurePlanField).toBe(
+      "keep the plan"
+    );
+
+    await store.applyPlanEvent(BOOK, threadId, "plan-1", { type: "start", revision: 1 });
+    const moved = JSON.parse(await bytesOf(threadId)) as Record<string, unknown>;
+    const plan = (moved.plans as Array<Record<string, unknown>>)[0];
+    expect(plan?.status).toBe("running");
+    expect(plan?.futurePlanField).toBe("keep the plan");
+    expect(((plan?.steps as Array<Record<string, unknown>>)[0])?.futureStepField).toBe(
+      "keep the step"
+    );
+    expect((plan?.parent as Record<string, unknown>).futureParentField).toBe("keep the parent");
+  });
+
+  test("refreshPlanProposal persists the next revision and keeps the parent", async () => {
+    const thread = await store.create(BOOK, "Refresh");
+    await store.appendMessage(BOOK, thread.id, planParentMessage());
+    await store.addPlan(BOOK, thread.id, newPlan({ guidance: "Keep the tense." }));
+    const refreshed = await store.refreshPlanProposal(BOOK, thread.id, "plan-1", {
+      revision: 2,
+      guidance: "Past tense."
+    });
+    expect(refreshed.plans[0]?.revision).toBe(2);
+    expect(refreshed.plans[0]?.guidance).toBe("Past tense.");
+    expect(refreshed.plans[0]?.status).toBe("proposed");
+    expect(refreshed.plans[0]?.parent).toEqual({
+      messageId: PLAN_PARENT_ID,
+      turnId: PLAN_TURN_ID
+    });
+    const before = await bytesOf(thread.id);
+    await expect(
+      store.refreshPlanProposal(BOOK, thread.id, "plan-1", { revision: 2, guidance: "Again." })
+    ).rejects.toMatchObject({ code: "plan-state" });
+    expect(await bytesOf(thread.id)).toBe(before);
   });
 });
