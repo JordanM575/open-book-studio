@@ -165,7 +165,11 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
       turnId: "turn_ipc0001"
     })),
     undoLast: mock(async (_bookId: string, _turnId?: string) => ({ restored: 1 })),
-    approve: mock(async (_turnId: string, _approvalId: string, _approved: boolean) => null)
+    approve: mock(async (_turnId: string, _approvalId: string, _approved: boolean) => null),
+    readThread: mock(async (bookId: string, threadId: string) => ({
+      thread: await library.threads.read(bookId, threadId),
+      planRuntime: null
+    }))
   };
   const voice = {
     connections: mock(async () => [CONNECTION]),
@@ -907,7 +911,7 @@ describe("the agent", () => {
   });
 
   test("conversations are listed, renamed, branched and removed in the book's thread files", async () => {
-    const { library } = await setup();
+    const { agent, library } = await setup();
     const { bookId } = await book(library);
     const messages = [
       agentMessageSchema.parse({ id: "msg_ipc0001", role: "user", turnId: "turn_ipc0001", parts: [{ type: "text", text: "Read it." }], createdAt: NOW }),
@@ -916,7 +920,11 @@ describe("the agent", () => {
     const thread = await library.threads.create(bookId, "Opening", messages);
 
     expect(await data(IPC.agent.threads.list, bookId)).toEqual([expect.objectContaining({ id: thread.id, title: "Opening" })]);
-    expect(await data(IPC.agent.threads.read, { bookId, threadId: thread.id })).toEqual(expect.objectContaining({ id: thread.id }));
+    expect(await data(IPC.agent.threads.read, { bookId, threadId: thread.id })).toEqual({
+      thread: expect.objectContaining({ id: thread.id }),
+      planRuntime: null
+    });
+    expect(agent.readThread).toHaveBeenCalledWith(bookId, thread.id);
     expect(await data(IPC.agent.threads.rename, { bookId, threadId: thread.id, title: " The opening " })).toEqual(
       expect.objectContaining({ title: "The opening" })
     );

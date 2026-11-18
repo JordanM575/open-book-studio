@@ -39,6 +39,8 @@ interface Props {
   readonly plan: AgentPlan | null;
   /** A confirmed plan-write error, shown without changing the last confirmed state. */
   readonly notice?: string | null;
+  /** This process could not mark the open plan expired; Start and Resume stay off. */
+  readonly stale?: boolean;
   /** The model the proposal and Start turns will use. This control offers no model chooser. */
   readonly modelLabel: string;
   readonly onPropose: (request: PlanProposalRequest) => PlanActionOutcome | Promise<PlanActionOutcome>;
@@ -82,6 +84,7 @@ export function PlanFirstControl({
   proposing = false,
   plan,
   notice,
+  stale = false,
   modelLabel,
   onPropose,
   onStart,
@@ -163,7 +166,13 @@ export function PlanFirstControl({
       ) : running ? (
         <p role="status">A turn is running. Plan controls stay off until it stops.</p>
       ) : openPlan ? (
-        <p role="status" data-testid="plan-open">Start the stored plan before asking for another.</p>
+        stale ? (
+          <p role="status" data-testid="plan-open">
+            {notice ?? "This plan's runtime is no longer available, but the plan could not be marked expired. It remains at its last confirmed state. Nothing was replayed."}
+          </p>
+        ) : (
+          <p role="status" data-testid="plan-open">Start the stored plan before asking for another.</p>
+        )
       ) : null}
       {mode === "edit" ? (
         <>
@@ -274,6 +283,7 @@ export function PlanFirstControl({
                 cancelSummary={cancelSummary}
                 modelLabel={modelLabel}
                 notice={notice}
+                stale={stale}
                 onStart={onStart}
                 {...(onPause ? { onPause } : {})}
                 {...(onResume ? { onResume } : {})}

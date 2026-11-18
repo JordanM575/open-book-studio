@@ -168,7 +168,7 @@ async function mountWorkspace({ root, library, store, bookId }: Setup): Promise<
       undoLast: mock(async () => ok({ restored: 0, skipped: 0 })),
       threads: {
         list: async () => ok([]),
-        read: async () => ok(null),
+        read: async () => ok({ thread: null, planRuntime: null }),
         fork: mock(async () => ok(null)),
         remove: mock(async () => ok(null)),
         rename: mock(async () => ok(null))

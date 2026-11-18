@@ -68,7 +68,7 @@ function renderPanel({ turns = [TURN], seed, reread, undos = [] }: PanelOptions 
     agent: {
       threads: {
         list: mock(() => Promise.resolve({ ok: true, data: listed })),
-        read: mock(() => Promise.resolve({ ok: true, data: (reads++ > 0 && reread) || seed || null })),
+        read: mock(() => Promise.resolve({ ok: true, data: { thread: (reads++ > 0 && reread) || seed || null, planRuntime: null } })),
         fork: mock(() => Promise.resolve({ ok: true, data: null })),
         remove: mock(() => Promise.resolve({ ok: true, data: null })),
         rename: mock(() => Promise.resolve({ ok: true, data: null }))

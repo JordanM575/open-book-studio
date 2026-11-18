@@ -94,7 +94,7 @@ function renderComposer(
     agent: {
       threads: {
         list: mock(() => Promise.resolve({ ok: true, data: listed })),
-        read: mock(() => Promise.resolve({ ok: true, data: seed ?? emptyThread() })),
+        read: mock(() => Promise.resolve({ ok: true, data: { thread: seed ?? emptyThread(), planRuntime: null } })),
         fork: mock(() => Promise.resolve({ ok: true, data: emptyThread() })),
         remove: mock(() => Promise.resolve({ ok: true, data: null })),
         rename: mock(() => Promise.resolve({ ok: true, data: null }))

@@ -166,7 +166,7 @@ async function mountWorkspace({ undo, ambient = null, saveDelayMs = 0 }: MountOp
       undoLast,
       threads: {
         list: async () => ok([]),
-        read: async () => ok(null),
+        read: async () => ok({ thread: null, planRuntime: null }),
         fork: mock(async () => ok(null)),
         remove: mock(async () => ok(null)),
         rename: mock(async () => ok(null))

@@ -52,6 +52,7 @@ beforeEach(async () => {
     defaultConnectionId: credential.id,
     defaultModelId: "test-model"
   });
+  seededPlans.clear();
 });
 
 afterEach(async () => {
@@ -773,7 +774,23 @@ async function seedPausePlan(steps: string[]): Promise<string> {
     steps,
     parent: { messageId: PAUSE_PLAN_PARENT, turnId: PAUSE_PLAN_TURN }
   });
+  seededPlans.set(thread.id, PAUSE_PLAN_ID);
   return thread.id;
+}
+
+/** Fixture plans seeded directly through the store, so this test's runtime can own them. */
+const seededPlans = new Map<string, string>();
+
+/**
+ * Record a fixture plan as owned by this test's runtime, exactly as the product proposal/start
+ * path would, so the T017 sweep does not treat the fixture as a plan from a lost runtime.
+ */
+function ownSeededPlans(runtime: AgentRuntime): void {
+  for (const [threadId, planId] of seededPlans) {
+    (runtime as unknown as { ownedPlans: Set<string> }).ownedPlans.add(
+      JSON.stringify([book.id, threadId, planId])
+    );
+  }
 }
 
 function pausePlanInput(threadId: string): AgentTurnInput {
@@ -858,6 +875,7 @@ describe("T015 plan pause boundary", () => {
     const events: AgentEvent[] = [];
     const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event),
       () => planAppendModel(chapter.id));
+    ownSeededPlans(runtime);
     const started = await runtime.start(pausePlanInput(threadId));
     await entered.promise;
     await expect(runtime.stop(started.turnId)).resolves.toBeNull();
@@ -879,6 +897,7 @@ describe("T015 plan pause boundary", () => {
     const events: AgentEvent[] = [];
     const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event),
       () => planAppendModel(chapter.id));
+    ownSeededPlans(runtime);
     const started = await runtime.start(pausePlanInput(threadId));
     await entered.promise;
     await runtime.stop(started.turnId);
@@ -917,6 +936,7 @@ describe("T015 plan pause boundary", () => {
     });
     const events: AgentEvent[] = [];
     const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event), () => model);
+    ownSeededPlans(runtime);
     const entered = gate();
     const held = gate();
     const read = library.readChapter.bind(library);
@@ -960,6 +980,7 @@ describe("T015 plan pause boundary", () => {
     });
     const events: AgentEvent[] = [];
     const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event), () => model);
+    ownSeededPlans(runtime);
     const store = library.threads;
     const original = store.applyPlanEvent;
     const entered = gate();

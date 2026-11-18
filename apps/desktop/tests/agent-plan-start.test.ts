@@ -24,6 +24,8 @@ let bookId: string;
 let chapterId: string;
 let providerReads: number;
 let callId: number;
+/** Fixture plans seeded directly through the store, so this test's runtime can own them. */
+const seededPlans = new Map<string, string>();
 
 const PLAN_ID = "plan-start-1";
 const PLAN_PARENT_ID = "msg_planstart01";
@@ -46,6 +48,7 @@ beforeEach(async () => {
   await library.updateBook(bookId, { defaultConnectionId: "conn_synthetic", defaultModelId: "synthetic-model" });
   providerReads = 0;
   callId = 0;
+  seededPlans.clear();
 });
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
@@ -113,6 +116,14 @@ function runtimeFor(model: MockLanguageModelV4) {
     () => { factoryCalls++; return model; },
     () => {}
   );
+  // A fixture plan is seeded directly through the store. Record it as owned by this test's
+  // runtime, exactly as the product proposal/start path would, so the T017 sweep does not treat
+  // the fixture as a plan from a lost runtime.
+  for (const [threadId, planId] of seededPlans) {
+    (runtime as unknown as { ownedPlans: Set<string> }).ownedPlans.add(
+      JSON.stringify([bookId, threadId, planId])
+    );
+  }
   return { runtime, events, factoryCalls: () => factoryCalls };
 }
 
@@ -180,6 +191,7 @@ async function seedPlan(steps: string[]): Promise<string> {
     steps,
     parent: { messageId: PLAN_PARENT_ID, turnId: PLAN_TURN_ID }
   });
+  seededPlans.set(thread.id, PLAN_ID);
   return thread.id;
 }
 

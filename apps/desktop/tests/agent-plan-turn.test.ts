@@ -28,6 +28,8 @@ let library: Library;
 let bookId: string;
 let chapterId: string;
 let providerReads: number;
+/** Fixture plans seeded directly through the store, so this test's runtime can own them. */
+const seededPlans = new Map<string, string>();
 
 const PLAN_ID = "plan-1";
 const PLAN_PARENT_ID = "msg_plan0001";
@@ -48,6 +50,7 @@ beforeEach(async () => {
   chapterId = (await library.createChapter(bookId, { title: "Light", content: "A synthetic lantern shone.\n" })).id;
   await library.updateBook(bookId, { defaultConnectionId: "conn_synthetic", defaultModelId: "synthetic-model" });
   providerReads = 0;
+  seededPlans.clear();
 });
 afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
@@ -105,7 +108,17 @@ function runtimeFor(model: MockLanguageModelV4) {
     () => { factoryCalls++; return model; },
     () => {}
   );
+  // A fixture plan is seeded directly through the store. Record it as owned by this test's
+  // runtime, exactly as the product proposal/start path would, so the T017 sweep does not treat
+  // the fixture as a plan from a lost runtime.
+  for (const [threadId, planId] of seededPlans) ownSeededPlan(runtime, threadId, planId);
   return { runtime, events, factoryCalls: () => factoryCalls };
+}
+
+function ownSeededPlan(runtime: AgentRuntime, threadId: string, planId = PLAN_ID): void {
+  (runtime as unknown as { ownedPlans: Set<string> }).ownedPlans.add(
+    JSON.stringify([bookId, threadId, planId])
+  );
 }
 
 async function finish(runtime: AgentRuntime, input: AgentTurnInput) {
@@ -227,6 +240,7 @@ async function seedPlan(options: {
       createdAt: new Date().toISOString()
     }));
   }
+  seededPlans.set(thread.id, PLAN_ID);
   return thread.id;
 }
 
@@ -404,6 +418,7 @@ describe("plan turn pre-flight", () => {
       "expired"
     ] as const) {
       const threadId = await threadWithStatus(status);
+      ownSeededPlan(runtime, threadId);
       const messagesBefore = (await library.threads.read(bookId, threadId))?.messages.length;
       expect((await refusalOf(runtime.start(planInput(threadId, "start")))).refusal).toBe("plan-not-startable");
       const thread = await library.threads.read(bookId, threadId);
@@ -427,6 +442,7 @@ describe("plan turn pre-flight", () => {
       "expired"
     ] as const) {
       const threadId = await threadWithStatus(status);
+      ownSeededPlan(runtime, threadId);
       expect((await refusalOf(runtime.start(planInput(threadId, "resume")))).refusal).toBe("plan-not-resumable");
       expect(planOf(await library.threads.read(bookId, threadId))?.status).toBe(status);
     }

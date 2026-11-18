@@ -88,6 +88,11 @@ interface Props {
   readonly modelLabel?: string;
   /** A confirmed plan-write error, shown without changing the last confirmed state. */
   readonly notice?: string | null | undefined;
+  /**
+   * This process could not mark the stored plan expired. Start and Resume stay off while it is
+   * unresolved, and Cancel remains available only where the direct path already allows it.
+   */
+  readonly stale?: boolean;
   /** Omitted in a read-only review surface. */
   readonly onStart?: (ref: PlanStartRef) => PlanActionOutcome | Promise<PlanActionOutcome>;
   /** Pause the live plan turn through the existing Stop path. */
@@ -136,6 +141,7 @@ export function PlanProgress({
   cancelSummary,
   modelLabel,
   notice,
+  stale = false,
   onStart,
   onPause,
   onResume,
@@ -149,7 +155,7 @@ export function PlanProgress({
   const [cancelSubmitting, setCancelSubmitting] = useState(false);
   const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const restoreCancelFocus = useRef(false);
-  const canStart = plan.status === "proposed" && !running && Boolean(onStart);
+  const canStart = plan.status === "proposed" && !running && Boolean(onStart) && !stale;
   // Pause stays mounted while its stop is open, disabled, so focus and the state stay announced.
   // The request-pause notice changes the stored status to `pause-requested`; the open stop keeps
   // the control mounted until the terminal event.
@@ -157,7 +163,7 @@ export function PlanProgress({
     (plan.status === "running" || plan.status === "waiting-for-approval" ||
       (stopping && plan.status === "pause-requested"));
   const canPause = pauseOffered && !stopping && !starting && !resuming && !cancelling;
-  const resumeAvailable = Boolean(onResume) && plan.status === "paused" && !running && !stopping;
+  const resumeAvailable = Boolean(onResume) && plan.status === "paused" && !running && !stopping && !stale;
   const resumeOffered = resumeAvailable && !resuming;
   const canResume = resumeOffered && !starting && !cancelling;
   const paused = plan.status === "paused";
@@ -293,6 +299,11 @@ export function PlanProgress({
       {cancelled ? (
         <p data-testid="plan-cancel-note" className="text-xs text-muted-foreground">
           Completed steps stay. Cancel does not undo them.
+        </p>
+      ) : null}
+      {plan.status === "expired" ? (
+        <p data-testid="plan-expired-note" className="text-xs text-muted-foreground">
+          This plan cannot be started, resumed or replayed. Completed steps stay; no further step will run.
         </p>
       ) : null}
       {plan.guidance !== undefined ? (
