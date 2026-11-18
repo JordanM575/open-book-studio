@@ -185,7 +185,8 @@ const MAX_STEPS = 20;
 const PERSISTENCE_WARNINGS = {
   approval: "The approval could not be saved. Its action was not started.",
   conversation: "The conversation outcome could not be fully saved. Changes to the book remain.",
-  usage: "The turn's usage could not be saved. Local usage and spend history may be incomplete."
+  usage: "The turn's usage could not be saved. Local usage and spend history may be incomplete.",
+  planPause: "The plan's pause could not be saved. The plan remains at its last confirmed state."
 } as const;
 
 function recordPersistenceError(state: TurnState, kind: keyof typeof PERSISTENCE_WARNINGS): void {
@@ -661,7 +662,8 @@ export class AgentRuntime {
           turnId,
           plan: runningPlan,
           publish: (notice) => this.publish(notice),
-          // An author stop never writes plan state; ordinary completion may still close steps.
+          // Ordinary step and outcome writes stop with the author's stop. The request-pause and
+          // confirm-pause writes use their own explicit pause path in this controller.
           canWrite: () => !controller.signal.aborted
         });
       }
@@ -830,7 +832,12 @@ export class AgentRuntime {
     expirePendingApprovals(turn.state);
     const firstStop = !turn.controller.signal.aborted;
     turn.controller.abort();
-    if (firstStop) this.publish({ type: "stopping", turnId });
+    if (firstStop) {
+      this.publish({ type: "stopping", turnId });
+      // Exactly one request-pause write per stop. It never rejects; the terminal stopped event
+      // still waits for settlement, the checkpoint and the confirm attempt.
+      void turn.state.plan?.requestPause();
+    }
     pending?.resume(null);
     return null;
   }
@@ -1296,6 +1303,10 @@ export class AgentRuntime {
         await writeMessage([...assistantParts(state.reasoning, state.toolParts, state.text, stopped), ...state.approvals], {
           checkpoint: state.changes.length > 0 && undoAvailable
         });
+        // The pause is confirmed only after the in-flight work, checkpoint and stopped message are
+        // written. A failed confirm never claims Paused and leaves the last confirmed state.
+        const pause = state.plan ? await state.plan.confirmPause() : null;
+        if (pause && !pause.ok) recordPersistenceError(state, "planPause");
         this.terminal(turnId, state, { type: "stopped", turnId, changed: state.changes.length, undoAvailable });
       } else {
         // A plan-write failure is already reported as `plan-error` by the controller. Its fixed
@@ -1338,6 +1349,10 @@ export class AgentRuntime {
           await writeMessage([...assistantParts(state.reasoning, state.toolParts, state.text, stopped), ...state.approvals], {
             checkpoint: state.changes.length > 0 && undoAvailable
           });
+          // Same confirm-and-warning sequence as the early abort path: after the stopped message,
+          // before the one terminal event.
+          const pause = state.plan ? await state.plan.confirmPause() : null;
+          if (pause && !pause.ok) recordPersistenceError(state, "planPause");
         }
         this.terminal(turnId, state, {
           type: controller.signal.aborted ? "stopped" : "error",

@@ -4,7 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV4 } from "ai/test";
-import type { AgentEvent } from "@ai-book-studio/core/agent";
+import type { AgentEvent, AgentTurnInput } from "@ai-book-studio/core/agent";
+import {
+  agentMessageSchema,
+  type AgentMessage,
+  type AgentPlan,
+  type AgentPlanStepState
+} from "@ai-book-studio/core/agent/messages";
+import type { AgentPlanEvent } from "@ai-book-studio/core/agent/plan-state";
+import { ThreadStoreError } from "@ai-book-studio/core/agent/threads";
 import type { StoredCredential } from "@ai-book-studio/core/providers/types";
 import type { BookMeta } from "@ai-book-studio/core/schema";
 import type { ProviderService } from "../src/main/providers";
@@ -732,5 +740,262 @@ describe("D178 definitive stop boundary", () => {
     expect(terminals(events)).toHaveLength(0);
     await expect(runtime.start({ mode: "edit", bookId: book.id, prompt: "Another" })).rejects.toThrow(/still stopping/);
     expect((await library.readChapter(book.id, chapter.id)).content).toBe("The old opening.\n");
+  });
+});
+
+/**
+ * T015 rows 11-13b: the plan turn's pause boundary. These extend the stop premises above to
+ * plan-linked turns: the stop return is not acknowledgment, no later tool or step write starts,
+ * a hung call manufactures no terminal, and a failed state write can never yield Paused.
+ */
+
+const PAUSE_PLAN_ID = "plan_pause_premise_1";
+const PAUSE_PLAN_PARENT = "msg_pausepremise01";
+const PAUSE_PLAN_TURN = "turn_pausepremise01";
+
+function pausePlanParent(): AgentMessage {
+  return agentMessageSchema.parse({
+    id: PAUSE_PLAN_PARENT,
+    role: "assistant",
+    parts: [{ type: "text", text: "Here is the plan." }],
+    mode: "edit",
+    turnId: PAUSE_PLAN_TURN,
+    createdAt: "2026-10-25T00:00:00.000Z"
+  });
+}
+
+async function seedPausePlan(steps: string[]): Promise<string> {
+  const thread = await library.threads.create(book.id, "Pause boundary");
+  await library.threads.appendMessage(book.id, thread.id, pausePlanParent());
+  await library.threads.addPlan(book.id, thread.id, {
+    id: PAUSE_PLAN_ID,
+    purpose: "Revise the opening",
+    steps,
+    parent: { messageId: PAUSE_PLAN_PARENT, turnId: PAUSE_PLAN_TURN }
+  });
+  return thread.id;
+}
+
+function pausePlanInput(threadId: string): AgentTurnInput {
+  return {
+    bookId: book.id,
+    threadId,
+    mode: "edit",
+    prompt: "Start the reviewed plan.",
+    plan: { id: PAUSE_PLAN_ID, revision: 1, action: "start" }
+  };
+}
+
+async function pausePlanOf(threadId: string): Promise<AgentPlan | null> {
+  const thread = await library.threads.read(book.id, threadId);
+  return thread?.plans.find((plan) => plan.id === PAUSE_PLAN_ID) ?? null;
+}
+
+function pausePlanStates(plan: AgentPlan): AgentPlanStepState[] {
+  return plan.steps.map((entry) => entry.state);
+}
+
+function oneTool(name: string, input: unknown, id: number) {
+  return {
+    stream: simulateReadableStream({
+      chunks: [
+        { type: "stream-start" as const, warnings: [] },
+        { type: "tool-call" as const, toolCallId: `pause-call-${id}`, toolName: name, input: JSON.stringify(input) },
+        { type: "finish" as const, finishReason: { unified: "tool-calls" as const, raw: undefined }, usage: USAGE }
+      ]
+    })
+  };
+}
+
+function planAppendModel(chapterId: string): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
+    doStream: [
+      oneTool("plan_step", { step: 1 }, 1),
+      oneTool("append_to_chapter", { chapterId, text: "Late passage." }, 2),
+      {
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "stream-start", warnings: [] },
+            { type: "text-start", id: "text-1" },
+            { type: "text-delta", id: "text-1", delta: "Finished." },
+            { type: "text-end", id: "text-1" },
+            { type: "finish", finishReason: { unified: "stop", raw: undefined }, logprobs: undefined, usage: USAGE }
+          ]
+        })
+      }
+    ]
+  });
+}
+
+function waitForPlanChange(events: AgentEvent[], turnId: string, change: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`The ${change} notice did not arrive.`)), 5_000);
+    void (async () => {
+      for (let waited = 0; waited < 5_000; waited += 25) {
+        const found = events.some((event) =>
+          event.type === "plan" && event.turnId === turnId && event.change === change);
+        if (found) {
+          clearTimeout(timer);
+          resolve();
+          return;
+        }
+        await new Promise((pause) => setTimeout(pause, 25));
+      }
+      clearTimeout(timer);
+      reject(new Error(`The ${change} notice did not arrive.`));
+    })();
+  });
+}
+
+describe("T015 plan pause boundary", () => {
+  test("stop returning null is not acknowledgment on a plan turn", async () => {
+    const chapter = await library.createChapter(book.id, { title: "Plan gate", content: "The old opening.\n" });
+    const threadId = await seedPausePlan(["Replace the opening"]);
+    const entered = gate();
+    const held = gate();
+    const save = library.saveChapter.bind(library);
+    library.saveChapter = async (...args) => { entered.release(); await held.promise; return save(...args); };
+    const events: AgentEvent[] = [];
+    const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event),
+      () => planAppendModel(chapter.id));
+    const started = await runtime.start(pausePlanInput(threadId));
+    await entered.promise;
+    await expect(runtime.stop(started.turnId)).resolves.toBeNull();
+    await waitForPlanChange(events, started.turnId, "request-pause");
+    expect(runtime.isWorking(book.id)).toBe(true);
+    expect(terminals(events)).toHaveLength(0);
+    expect((await pausePlanOf(threadId))?.status).toBe("pause-requested");
+    expect(events.some((event) => event.type === "plan" && event.change === "confirm-pause")).toBe(false);
+    held.release();
+    expect(await waitForStopped(events, started.turnId)).toMatchObject({ changed: 1, undoAvailable: true });
+    expect((await pausePlanOf(threadId))?.status).toBe("paused");
+  });
+
+  test("a never-settling plan call manufactures no terminal and no Paused claim", async () => {
+    const chapter = await library.createChapter(book.id, { title: "Plan hung", content: "The old opening.\n" });
+    const threadId = await seedPausePlan(["Replace the opening"]);
+    const entered = gate();
+    library.saveChapter = async () => { entered.release(); return new Promise(() => {}); };
+    const events: AgentEvent[] = [];
+    const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event),
+      () => planAppendModel(chapter.id));
+    const started = await runtime.start(pausePlanInput(threadId));
+    await entered.promise;
+    await runtime.stop(started.turnId);
+    await waitForPlanChange(events, started.turnId, "request-pause");
+    await new Promise((pause) => setTimeout(pause, 25));
+    expect(events.some((event) => event.type === "plan" && event.change === "confirm-pause")).toBe(false);
+    expect(terminals(events)).toHaveLength(0);
+    expect((await pausePlanOf(threadId))?.status).toBe("pause-requested");
+    expect(runtime.isWorking(book.id)).toBe(true);
+    await new Promise((pause) => setTimeout(pause, 5_050));
+    expect(events.some((event) => event.type === "plan" && event.change === "confirm-pause")).toBe(false);
+    expect(terminals(events)).toHaveLength(0);
+    expect(runtime.isWorking(book.id)).toBe(true);
+    await expect(runtime.start({ mode: "edit", bookId: book.id, prompt: "Another" })).rejects.toThrow(/still stopping/);
+  }, 10_000);
+
+  test("no step write happens during settlement after the stop gate", async () => {
+    const chapter = await library.createChapter(book.id, { title: "Plan settlement", content: "The old opening.\n" });
+    const threadId = await seedPausePlan(["Read the opening"]);
+    const model = new MockLanguageModelV4({
+      doStream: [
+        oneTool("plan_step", { step: 1 }, 1),
+        oneTool("chapter_stats", { chapterId: chapter.id }, 2),
+        {
+          stream: simulateReadableStream({
+            chunks: [
+              { type: "stream-start", warnings: [] },
+              { type: "text-start", id: "text-1" },
+              { type: "text-delta", id: "text-1", delta: "Read." },
+              { type: "text-end", id: "text-1" },
+              { type: "finish", finishReason: { unified: "stop", raw: undefined }, logprobs: undefined, usage: USAGE }
+            ]
+          })
+        }
+      ]
+    });
+    const events: AgentEvent[] = [];
+    const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event), () => model);
+    const entered = gate();
+    const held = gate();
+    const read = library.readChapter.bind(library);
+    library.readChapter = async (...args) => { entered.release(); await held.promise; return read(...args); };
+    let stoppingSeen = false;
+    runtime.onEvent((event) => { if (event.type === "stopping") stoppingSeen = true; });
+    const store = library.threads;
+    const original = store.applyPlanEvent;
+    let stepWritesAfterStop = 0;
+    store.applyPlanEvent = async (book, thread, plan, event: AgentPlanEvent) => {
+      if (stoppingSeen && event.type === "step") stepWritesAfterStop++;
+      return original.call(store, book, thread, plan, event);
+    };
+    try {
+      const started = await runtime.start(pausePlanInput(threadId));
+      await entered.promise;
+      await runtime.stop(started.turnId);
+      expect(terminals(events)).toHaveLength(0);
+      held.release();
+      await waitForStopped(events, started.turnId);
+      expect(stepWritesAfterStop).toBe(0);
+      const plan = await pausePlanOf(threadId);
+      expect(plan?.status).toBe("paused");
+      expect(pausePlanStates(plan!)).toEqual(["in-progress"]);
+    } finally {
+      held.release();
+      store.applyPlanEvent = original;
+    }
+  });
+
+  test("a failed in-flight step close blocks confirm and never yields Paused", async () => {
+    const chapter = await library.createChapter(book.id, { title: "Plan close", content: "The old opening.\n" });
+    const threadId = await seedPausePlan(["Read the opening", "Rewrite the door"]);
+    const model = new MockLanguageModelV4({
+      doStream: [
+        oneTool("plan_step", { step: 1 }, 1),
+        oneTool("chapter_stats", { chapterId: chapter.id }, 2),
+        oneTool("plan_step", { step: 2 }, 3),
+        oneTool("chapter_stats", { chapterId: chapter.id }, 4)
+      ]
+    });
+    const events: AgentEvent[] = [];
+    const runtime = new AgentRuntime(studioFor(), providersFor(), (event) => events.push(event), () => model);
+    const store = library.threads;
+    const original = store.applyPlanEvent;
+    const entered = gate();
+    const held = gate();
+    let confirmCalls = 0;
+    let failCalls = 0;
+    store.applyPlanEvent = async (book, thread, plan, event: AgentPlanEvent) => {
+      if (event.type === "step" && event.state === "completed") {
+        entered.release();
+        await held.promise;
+        throw new ThreadStoreError("io", "Synthetic in-flight step close failure");
+      }
+      if (event.type === "confirm-pause") confirmCalls++;
+      if (event.type === "fail") {
+        failCalls++;
+        throw new ThreadStoreError("io", "Synthetic fail write failure");
+      }
+      return original.call(store, book, thread, plan, event);
+    };
+    try {
+      const started = await runtime.start(pausePlanInput(threadId));
+      await entered.promise;
+      await runtime.stop(started.turnId);
+      held.release();
+      const stopped = await waitForStopped(events, started.turnId);
+      expect(events.some((event) => event.type === "plan-error" && event.change === "step")).toBe(true);
+      expect(events.some((event) => event.type === "plan" && event.change === "confirm-pause")).toBe(false);
+      expect(events.some((event) => event.type === "plan-error" && event.change === "confirm-pause")).toBe(false);
+      expect(confirmCalls).toBe(0);
+      expect(failCalls).toBe(0);
+      expect(stopped.persistenceError).toContain("The plan's pause could not be saved. The plan remains at its last confirmed state.");
+      const plan = await pausePlanOf(threadId);
+      expect(plan?.status).toBe("pause-requested");
+      expect(pausePlanStates(plan!)).toEqual(["in-progress", "pending"]);
+    } finally {
+      store.applyPlanEvent = original;
+    }
   });
 });

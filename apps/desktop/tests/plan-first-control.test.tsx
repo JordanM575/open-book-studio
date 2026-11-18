@@ -113,17 +113,33 @@ function countingOnStart(result: { ok: boolean; reason?: string } = { ok: true }
   return mock(async (_ref: unknown) => result);
 }
 
+function countingOnPause() {
+  return mock((_event?: unknown) => {});
+}
+
+function countingOnResume(result: { ok: boolean; reason?: string } = { ok: true }) {
+  return mock(async (_ref: unknown) => result);
+}
+
 function renderPlan(options: {
   mode?: AgentMode;
   running?: boolean;
   proposing?: boolean;
   plan?: AgentPlan | null;
   notice?: string | null;
+  live?: boolean;
+  stopping?: boolean;
+  resuming?: boolean;
+  pauseSummary?: { changed: number; undoAvailable?: boolean } | null;
   onPropose?: ReturnType<typeof countingOnPropose>;
   onStart?: ReturnType<typeof countingOnStart>;
+  onPause?: ReturnType<typeof countingOnPause>;
+  onResume?: ReturnType<typeof countingOnResume>;
 } = {}) {
   const onPropose = options.onPropose ?? countingOnPropose();
   const onStart = options.onStart ?? countingOnStart();
+  const onPause = options.onPause ?? countingOnPause();
+  const onResume = options.onResume ?? countingOnResume();
   const props = {
     mode: options.mode ?? "edit" as AgentMode,
     running: options.running ?? false,
@@ -132,17 +148,29 @@ function renderPlan(options: {
     modelLabel: "Model: book default",
     onPropose,
     onStart,
-    ...(options.notice !== undefined ? { notice: options.notice } : {})
+    onPause,
+    onResume,
+    live: options.live ?? false,
+    stopping: options.stopping ?? false,
+    resuming: options.resuming ?? false,
+    ...(options.notice !== undefined ? { notice: options.notice } : {}),
+    ...(options.pauseSummary !== undefined ? { pauseSummary: options.pauseSummary } : {})
   };
   const view = testing.render(React.createElement(PlanFirstControl, props));
   return {
     ...view,
     onPropose,
     onStart,
+    onPause,
+    onResume,
     rerenderWith(next: Partial<typeof props>) {
       view.rerender(React.createElement(PlanFirstControl, { ...props, ...next }));
     }
   };
+}
+
+function cardOf(view: { container: HTMLElement }) {
+  return testing.within(testing.within(view.container).getByTestId("plan-current"));
 }
 
 function fillPlan(
@@ -176,6 +204,7 @@ function renderChat(options: {
     ok: true,
     data: { turnId: START_TURN, threadId: THREAD, mode: "edit" }
   }));
+  const stop = mock(async (_turnId: string) => ({ ok: true, data: null }));
   const read = mock(async () => ({ ok: true, data: stored }));
   const listed = [
     {
@@ -198,7 +227,7 @@ function renderChat(options: {
         rename: mock(async () => ({ ok: true, data: null }))
       },
       start,
-      stop: mock(async () => ({ ok: true, data: null })),
+      stop,
       approve: mock(async () => ({ ok: true, data: null })),
       undoLast: mock(async () => ({ ok: true, data: null })),
       onEvent: mock((handler: (event: AgentEvent) => void) => {
@@ -224,6 +253,7 @@ function renderChat(options: {
   }));
   return {
     start,
+    stop,
     read,
     view: testing.within(document.body),
     setStored(next: AgentThread) {
@@ -353,8 +383,7 @@ describe("plan first control", () => {
       ]
     });
     const running = renderPlan({ plan: labels, running: true });
-    const view = testing.within(document.body);
-    const card = testing.within(view.getByTestId("plan-current"));
+    const card = cardOf(running);
     expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent)).toEqual([
       "Completed",
       "In progress",
@@ -578,5 +607,294 @@ describe("plan first control", () => {
 
     expect(view.queryByTestId("plan-region")).toBeNull();
     expect(view.queryByTestId("plan-current")).toBeNull();
+  });
+});
+
+describe("plan pause and resume controls", () => {
+  test("offers Pause only on a live running or waiting plan", () => {
+    const onPause = countingOnPause();
+    const running = renderPlan({ plan: makePlan({ status: "running" }), running: true, live: true, onPause });
+    const runningCard = cardOf(running);
+    expect(runningCard.getByTestId("plan-status").textContent).toBe("Running");
+    expect(runningCard.getByTestId("plan-pause")).toBeDefined();
+    expect(runningCard.queryByTestId("plan-resume")).toBeNull();
+    expect(runningCard.queryByTestId("plan-start")).toBeNull();
+
+    const waiting = renderPlan({
+      plan: makePlan({ status: "waiting-for-approval" }),
+      running: true,
+      live: true,
+      onPause
+    });
+    const waitingCard = cardOf(waiting);
+    expect(waitingCard.getByTestId("plan-status").textContent).toBe("Waiting for approval");
+    expect(waitingCard.getByTestId("plan-pause")).toBeDefined();
+
+    waiting.rerenderWith({ live: false });
+    expect(cardOf(waiting).queryByTestId("plan-pause")).toBeNull();
+  });
+
+  test("keeps Pause mounted and disabled with the Stopping name while the stop is open", () => {
+    const view = renderPlan({
+      plan: makePlan({ status: "running" }),
+      running: true,
+      live: true,
+      stopping: true,
+      onPause: countingOnPause()
+    });
+    const card = cardOf(view);
+    expect(card.getByTestId("plan-status").textContent).toBe("Stopping…");
+    const pause = card.getByTestId("plan-pause");
+    expect(pause).toHaveProperty("disabled", true);
+    expect(pause.getAttribute("aria-label")).toBe("Stopping… Waiting for in-flight work to settle.");
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+
+    // The request-pause notice moves the stored status to pause-requested; the open stop keeps
+    // the control mounted and disabled until the terminal event.
+    view.rerenderWith({ plan: makePlan({ status: "pause-requested" }) });
+    expect(card.getByTestId("plan-status").textContent).toBe("Stopping…");
+    expect(card.getByTestId("plan-pause")).toHaveProperty("disabled", true);
+  });
+
+  test("shows Paused with the stopped facts and sends the reviewed resume identity", async () => {
+    const plan = makePlan({
+      status: "paused",
+      steps: [
+        { text: "Read the current opening", state: "in-progress" },
+        { text: "Revise the door scene", state: "pending" }
+      ]
+    });
+    const onResume = countingOnResume();
+    const view = renderPlan({
+      plan,
+      running: false,
+      pauseSummary: { changed: 1, undoAvailable: true },
+      onResume
+    });
+    const card = cardOf(view);
+    expect(card.getByTestId("plan-status").textContent).toBe("Paused · 1 chapter changed · undo available");
+    expect(card.getAllByTestId("plan-step-state").map((node) => node.textContent))
+      .toEqual(["In progress", "Pending"]);
+    expect(card.getByTestId("plan-resume")).toBeDefined();
+    expect(card.queryByTestId("plan-pause")).toBeNull();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+    expect(testing.within(view.container).getByTestId("plan-current").textContent).toContain("nothing is pre-approved");
+
+    await testing.act(async () => testing.fireEvent.click(card.getByTestId("plan-resume")));
+    expect(onResume).toHaveBeenCalledWith({ id: plan.id, revision: plan.revision, action: "resume" });
+
+    view.rerenderWith({ resuming: true });
+    const resumingCard = cardOf(view);
+    expect(resumingCard.getByTestId("plan-status").textContent)
+      .toBe("Paused · 1 chapter changed · undo available · Resuming…");
+    expect(resumingCard.queryByTestId("plan-resume")).toBeNull();
+    expect(resumingCard.queryByTestId("plan-pause")).toBeNull();
+  });
+
+  test("reports a pause request that was never confirmed and offers no Resume", () => {
+    const view = renderPlan({
+      plan: makePlan({ status: "pause-requested" }),
+      notice: "The plan's pause could not be confirmed. The plan remains at its last confirmed state."
+    });
+    const card = cardOf(view);
+    expect(card.getByTestId("plan-status").textContent).toBe("Pause not confirmed");
+    expect(card.getByTestId("plan-notice").textContent).toContain("could not be confirmed");
+    expect(card.queryByTestId("plan-pause")).toBeNull();
+    expect(card.queryByTestId("plan-resume")).toBeNull();
+    expect(card.queryByTestId("plan-start")).toBeNull();
+  });
+
+  test("offers Start on proposed and no action on any terminal plan", () => {
+    const proposed = renderPlan({ plan: makePlan({ status: "proposed" }) });
+    const proposedCard = cardOf(proposed);
+    expect(proposedCard.getByTestId("plan-start")).toBeDefined();
+    expect(proposedCard.queryByTestId("plan-pause")).toBeNull();
+    expect(proposedCard.queryByTestId("plan-resume")).toBeNull();
+
+    for (const status of ["completed", "failed", "cancelled", "expired"] as const) {
+      const view = renderPlan({ plan: makePlan({ status }) });
+      const card = cardOf(view);
+      for (const testId of ["plan-start", "plan-pause", "plan-resume", "plan-cancel"]) {
+        expect(card.queryByTestId(testId)).toBeNull();
+      }
+      expect(card.queryByRole("button", { name: /cancel/i })).toBeNull();
+    }
+  });
+
+  test("offers no Cancel control on a live or paused plan", () => {
+    const running = renderPlan({
+      plan: makePlan({ status: "running" }),
+      running: true,
+      live: true,
+      onPause: countingOnPause()
+    });
+    const runningCard = cardOf(running);
+    expect(runningCard.queryByTestId("plan-cancel")).toBeNull();
+    expect(runningCard.queryByRole("button", { name: /cancel/i })).toBeNull();
+
+    const paused = renderPlan({ plan: makePlan({ status: "paused" }), onResume: countingOnResume() });
+    const pausedCard = cardOf(paused);
+    expect(pausedCard.queryByTestId("plan-cancel")).toBeNull();
+    expect(pausedCard.queryByRole("button", { name: /cancel/i })).toBeNull();
+  });
+
+  test("Pause waits for stopped, then Resume sends one new Edit turn", async () => {
+    const plan = makePlan({ status: "proposed" });
+    const start = mock(async (_request: CapturedTurn) => ({
+      ok: true,
+      data: {
+        turnId: START_TURN,
+        threadId: THREAD,
+        mode: "edit",
+        plan: { id: PLAN_ID, revision: plan.revision, status: "running" }
+      }
+    }));
+    const chat = renderChat({ thread: planThread(plan), start });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    expect(testing.within(region).queryByTestId("plan-pause")).toBeNull();
+
+    await testing.act(async () => testing.fireEvent.click(testing.within(region).getByTestId("plan-start")));
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Running");
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause")).toBeDefined();
+    });
+    expect(view.getByTestId("chat-stop").textContent).toContain("Stop");
+    expect(view.getByTestId("chat-stop").textContent).not.toContain("Cancel");
+
+    await testing.act(async () => {
+      testing.fireEvent.click(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause"));
+    });
+    expect(chat.stop).toHaveBeenCalledTimes(1);
+    expect(chat.stop.mock.calls[0]?.[0]).toBe(START_TURN);
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Stopping…");
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause")).toHaveProperty("disabled", true);
+
+    // The confirmed request-pause notice moves the stored status to pause-requested. The open stop
+    // keeps Pause mounted and disabled, and the card still says Stopping.
+    chat.setStored(planThread(makePlan({ status: "pause-requested", revision: plan.revision })));
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        status: "pause-requested",
+        change: "request-pause"
+      });
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Stopping…");
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause")).toHaveProperty("disabled", true);
+    });
+
+    // A confirm-pause notice is not the author-visible boundary: no Paused, no stored-plan read.
+    const readsBeforeConfirm = chat.read.mock.calls.length;
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        status: "paused",
+        change: "confirm-pause"
+      });
+    });
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Stopping…");
+    expect(chat.read.mock.calls.length).toBe(readsBeforeConfirm);
+
+    chat.setStored(planThread(makePlan({ status: "paused", revision: plan.revision })));
+    await testing.act(async () => {
+      chat.fire({ type: "stopped", turnId: START_TURN, changed: 1, undoAvailable: true });
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent)
+        .toBe("Paused · 1 chapter changed · undo available");
+    });
+    const pausedCard = testing.within(view.getByTestId("plan-region"));
+    expect(pausedCard.getByTestId("plan-resume")).toBeDefined();
+    expect(pausedCard.queryByTestId("plan-pause")).toBeNull();
+
+    await testing.act(async () => {
+      testing.fireEvent.click(testing.within(view.getByTestId("plan-region")).getByTestId("plan-resume"));
+    });
+    expect(start).toHaveBeenCalledTimes(2);
+    const resumeRequest = start.mock.calls[1]?.[0];
+    if (!resumeRequest) throw new Error("the resume request was not sent");
+    expect(resumeRequest).toMatchObject({
+      bookId: BOOK,
+      threadId: THREAD,
+      mode: "edit",
+      prompt: "Resume the reviewed plan.",
+      plan: { id: PLAN_ID, revision: plan.revision, action: "resume" }
+    });
+    expect(resumeRequest).not.toHaveProperty("guidance");
+    expect(resumeRequest).not.toHaveProperty("planProposal");
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Running");
+    });
+    expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause")).toBeDefined();
+  });
+
+  test("a failed confirm shows Pause not confirmed after stopped and never Paused", async () => {
+    const plan = makePlan({ status: "proposed" });
+    const start = mock(async (_request: CapturedTurn) => ({
+      ok: true,
+      data: {
+        turnId: START_TURN,
+        threadId: THREAD,
+        mode: "edit",
+        plan: { id: PLAN_ID, revision: plan.revision, status: "running" }
+      }
+    }));
+    const chat = renderChat({ thread: planThread(plan), start });
+    const view = chat.view;
+    await view.findByTestId("plan-region");
+    await testing.act(async () => {
+      testing.fireEvent.click(testing.within(view.getByTestId("plan-region")).getByTestId("plan-start"));
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause")).toBeDefined();
+    });
+    await testing.act(async () => {
+      testing.fireEvent.click(testing.within(view.getByTestId("plan-region")).getByTestId("plan-pause"));
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent).toBe("Stopping…");
+    });
+
+    const notice = "The plan's pause could not be confirmed. The plan remains at its last confirmed state.";
+    chat.setStored(planThread(makePlan({ status: "pause-requested", revision: plan.revision })));
+    await testing.act(async () => {
+      chat.fire({
+        type: "plan-error",
+        turnId: START_TURN,
+        planId: PLAN_ID,
+        revision: plan.revision,
+        change: "confirm-pause",
+        message: notice
+      });
+      chat.fire({ type: "stopped", turnId: START_TURN, changed: 0 });
+    });
+    await testing.waitFor(() => {
+      expect(testing.within(view.getByTestId("plan-region")).getByTestId("plan-status").textContent)
+        .toBe("Pause not confirmed");
+    });
+    const stoppedCard = testing.within(view.getByTestId("plan-region"));
+    expect(stoppedCard.getByTestId("plan-notice").textContent).toBe(notice);
+    expect(stoppedCard.queryByTestId("plan-pause")).toBeNull();
+    expect(stoppedCard.queryByTestId("plan-resume")).toBeNull();
+  });
+
+  test("a stored paused plan offers Resume without a live turn", async () => {
+    const chat = renderChat({ thread: planThread(makePlan({ status: "paused" })) });
+    const view = chat.view;
+    const region = await view.findByTestId("plan-region");
+    expect(testing.within(region).getByTestId("plan-status").textContent).toBe("Paused");
+    expect(testing.within(region).getByTestId("plan-resume")).toBeDefined();
+    expect(testing.within(region).queryByTestId("plan-pause")).toBeNull();
+    expect(testing.within(region).queryByTestId("plan-start")).toBeNull();
+    expect(testing.within(region).queryByRole("button", { name: /cancel/i })).toBeNull();
   });
 });

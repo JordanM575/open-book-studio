@@ -44,6 +44,10 @@ const COMPLETE_WRITE_MESSAGE = "The plan could not be marked complete. Nothing w
 const FAIL_WRITE_MESSAGE = "The plan could not be marked failed. Its last confirmed state remains.";
 
 const STEP_WRITE_MESSAGE = "The plan step could not be saved. Nothing was marked complete.";
+const PAUSE_REQUEST_WRITE_MESSAGE =
+  "The plan's pause could not be saved. The plan remains at its last confirmed state.";
+const PAUSE_CONFIRM_WRITE_MESSAGE =
+  "The plan's pause could not be confirmed. The plan remains at its last confirmed state.";
 
 export type PlanStepResult =
   | { ok: true; step: number; total: number; text: string; purpose?: string }
@@ -52,6 +56,12 @@ export type PlanStepResult =
 export type PlanWriteResult = { ok: true } | { ok: false; message: string };
 
 export type PlanTurnEnd = { ok: true } | { ok: false; message: string };
+
+/** The one request-pause write a stop may start. A terminal plan is `finished`, never paused. */
+export type PlanPauseRequest = "finished" | "confirmed" | "failed";
+
+/** The one confirm-pause attempt after the run settles. */
+export type PlanPauseConfirmation = { ok: true; confirmed: boolean } | { ok: false };
 
 /** A plan write failed in a path where the turn must end with the fixed plan-state error. */
 export class PlanWriteError extends Error {
@@ -106,6 +116,10 @@ function fallbackFor(event: AgentPlanEvent): string {
       return APPROVAL_WAIT_WRITE_MESSAGE;
     case "approval-settled":
       return APPROVAL_SETTLED_WRITE_MESSAGE;
+    case "request-pause":
+      return PAUSE_REQUEST_WRITE_MESSAGE;
+    case "confirm-pause":
+      return PAUSE_CONFIRM_WRITE_MESSAGE;
     case "complete":
       return COMPLETE_WRITE_MESSAGE;
     case "fail":
@@ -123,6 +137,11 @@ export class PlanProgress {
   private blocked = false;
   private terminal = false;
   private stateError = false;
+  /** One request-pause write per stop. It never rejects and never retries. */
+  private pauseRequest: Promise<PlanPauseRequest> | null = null;
+  /** One confirm-pause attempt after settlement, even if a caller asks twice. */
+  private pauseConfirmation: Promise<PlanPauseConfirmation> | null = null;
+  private pauseFailed = false;
 
   constructor(private readonly options: PlanProgressOptions) {
     this.plan = options.plan;
@@ -136,10 +155,15 @@ export class PlanProgress {
     return this.plan.revision;
   }
 
+  /** Whether the stored plan already holds a pause request or a confirmed pause. */
+  private get pauseHeld(): boolean {
+    return this.plan.status === "pause-requested" || this.plan.status === "paused";
+  }
+
   /** Refuse an ordinary tool when it cannot be attributed to a reviewed step. */
   gateRefusal(): string | null {
     if (this.terminal) return PLAN_TOOL_REFUSALS.planFinished;
-    if (this.blocked) return PLAN_TOOL_REFUSALS.planBlocked;
+    if (this.blocked || this.pauseHeld) return PLAN_TOOL_REFUSALS.planBlocked;
     if (this.activeIndex === null) return PLAN_TOOL_REFUSALS.noActiveStep;
     return null;
   }
@@ -153,7 +177,7 @@ export class PlanProgress {
     if (!parsed.success) return { ok: false, message: PLAN_TOOL_REFUSALS.outOfPlan };
     const step = parsed.data.step;
     if (this.terminal) return { ok: false, message: PLAN_TOOL_REFUSALS.planFinished };
-    if (this.blocked) return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
+    if (this.blocked || this.pauseHeld) return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
     if (step > this.plan.steps.length) return { ok: false, message: PLAN_TOOL_REFUSALS.outOfPlan };
     if (!this.options.canWrite()) return { ok: false, message: PLAN_TOOL_REFUSALS.planBlocked };
 
@@ -266,6 +290,103 @@ export class PlanProgress {
     }
     if (write.outcome === "applied") this.publishPlan("approval-settled");
     return { ok: true };
+  }
+
+  /**
+   * Start the one request-pause write a stop owns. This path bypasses `canWrite` because the
+   * controller is already aborted when it runs. It never retries or rejects: a terminal plan is
+   * `finished`, and any other failure is reported once and left at the last confirmed state.
+   */
+  requestPause(): Promise<PlanPauseRequest> {
+    this.pauseRequest ??= this.writePauseRequest();
+    return this.pauseRequest;
+  }
+
+  private async writePauseRequest(): Promise<PlanPauseRequest> {
+    if (this.terminal) return "finished";
+    const write = await this.applyPause({ type: "request-pause" });
+    if (write.outcome === "applied") {
+      this.publishPlan("request-pause");
+      return "confirmed";
+    }
+    if (write.outcome === "unchanged") return "confirmed";
+    // One bounded re-read classifies a completion that won the stop race. It is not a retry: a
+    // terminal plan is finished and must never be relabelled by a pause error.
+    if (await this.readStoredPlan() === "terminal") return "finished";
+    this.pauseFailed = true;
+    this.errorNotice("request-pause", write.message ?? PAUSE_REQUEST_WRITE_MESSAGE);
+    return "failed";
+  }
+
+  /**
+   * Confirm the pause after the settlement barrier, checkpoint and stopped message. A request
+   * that failed or a controller with a failed plan write attempts nothing and reports not ok.
+   */
+  confirmPause(): Promise<PlanPauseConfirmation> {
+    this.pauseConfirmation ??= this.writePauseConfirmation();
+    return this.pauseConfirmation;
+  }
+
+  private async writePauseConfirmation(): Promise<PlanPauseConfirmation> {
+    const request = this.pauseRequest;
+    if (!request) return { ok: true, confirmed: false };
+    if (this.pauseFailed) return { ok: false };
+    const requested = await request;
+    if (requested === "finished") return { ok: true, confirmed: false };
+    if (requested === "failed") return { ok: false };
+    if (this.stateError) return { ok: false };
+    if (this.terminal) return { ok: true, confirmed: false };
+    const write = await this.applyPause({ type: "confirm-pause" });
+    if (write.outcome === "applied") {
+      this.publishPlan("confirm-pause");
+      return { ok: true, confirmed: true };
+    }
+    if (write.outcome === "unchanged") return { ok: true, confirmed: true };
+    // A refused terminal plan (or an earlier pause that is already stored) is not a failure. The
+    // re-read is bounded and is never a second write.
+    if (await this.readStoredPlan() === "terminal") return { ok: true, confirmed: false };
+    if (this.plan.status === "paused") return { ok: true, confirmed: true };
+    this.errorNotice("confirm-pause", write.message ?? PAUSE_CONFIRM_WRITE_MESSAGE);
+    return { ok: false };
+  }
+
+  /** The pause writes are the only plan writes allowed after the stop gate closes. */
+  private async applyPause(event: AgentPlanEvent): Promise<StepWrite> {
+    try {
+      const applied = await this.options.store.applyPlanEvent(
+        this.options.bookId,
+        this.options.threadId,
+        this.plan.id,
+        event
+      );
+      const stored = applied.thread.plans.find((entry) => entry.id === this.plan.id);
+      if (stored) this.plan = stored;
+      if (this.plan.status === "completed" || this.plan.status === "cancelled" ||
+        this.plan.status === "failed" || this.plan.status === "expired") {
+        this.terminal = true;
+      }
+      return { outcome: applied.outcome };
+    } catch (error) {
+      return { outcome: "failed", message: writeFailureMessage(error, fallbackFor(event)) };
+    }
+  }
+
+  /** Classify the store after a failed pause write without writing or retrying anything. */
+  private async readStoredPlan(): Promise<"terminal" | "open" | "unknown"> {
+    try {
+      const thread = await this.options.store.read(this.options.bookId, this.options.threadId);
+      const stored = thread?.plans.find((entry) => entry.id === this.plan.id);
+      if (!stored) return "unknown";
+      this.plan = stored;
+      if (stored.status === "completed" || stored.status === "cancelled" ||
+        stored.status === "failed" || stored.status === "expired") {
+        this.terminal = true;
+        return "terminal";
+      }
+      return "open";
+    } catch {
+      return "unknown";
+    }
   }
 
   /**
