@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Reader review focus and provider errors
+- Opening the Reader review now moves focus to the Structured reader review heading after the panel mounts, and the focus test asserts the active element instead of page text. AI SDK transport failures are normalized through the shared provider-error mapping, so context, refusal, rate and permission failures no longer collapse to a generic provider failure.
+
 ### Reader review task record
 - 039 T003 is recorded complete after independent exact-head review ACCEPT and merge `03622b6`: the disclosed volatile selected-source prepare/start, accepted U-039-04 bounds, known/unknown price, provider-published terms, 011/022 consent, provider-named single-use Start, zero-send cancel and one-call/no-retry path. Focused nine-file 149 pass, core review 383 pass, saved-review 26 pass; node typecheck clean and web only the pre-existing `WorkspaceView` diagnostic. Non-blocking follow-ups remain for opening focus, AI SDK response contract/tools serialization, error normalization, a standalone cancel-preparation control and proactive staleness. T004–T006, T008–T009 and T010–T019 remain open.
 

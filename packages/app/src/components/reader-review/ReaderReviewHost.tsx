@@ -94,8 +94,10 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
   }, [open, props.bookId]);
 
   useEffect(() => {
-    if (open) document.querySelector<HTMLElement>("[data-reader-review-heading]")?.focus();
-  }, [open]);
+    if (!open) return;
+    if (surface !== "ready" && surface !== "unsupported") return;
+    document.querySelector<HTMLElement>("[data-reader-review-heading]")?.focus();
+  }, [open, surface]);
 
   const disclosureRevision = JSON.stringify([props.bookId, lens, selected, prompt]);
   useEffect(() => {

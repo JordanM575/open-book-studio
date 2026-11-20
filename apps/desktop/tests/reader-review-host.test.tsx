@@ -88,6 +88,8 @@ describe("mounted reader review entry and selected-source picker", () => {
     expect(view.prepare).not.toHaveBeenCalled();
     expect(view.start).not.toHaveBeenCalled();
     await openAndWait(view);
+    const heading = body().getByRole("heading", { name: "Structured reader review" });
+    expect(document.activeElement).toBe(heading);
     expect(document.activeElement?.textContent).toContain("Structured reader review");
     expect(body().getByText(/Chapter 1: The arrival/)).toBeTruthy();
     expect(body().getByText(/Saved version 3 · 1,478 words/)).toBeTruthy();

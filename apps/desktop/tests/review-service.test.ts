@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { APICallError } from "ai";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -299,7 +300,10 @@ describe("volatile selected-source reader service", () => {
   test.each([
     ["provider", new ProviderError("rate-limit", "PRIVATE_PROVIDER_BODY"), "provider"],
     ["refused", new ProviderError("refusal", "PRIVATE_PROVIDER_BODY"), "refused"],
-    ["context", new ProviderError("context", "PRIVATE_PROVIDER_BODY"), "overflow"]
+    ["context", new ProviderError("context", "PRIVATE_PROVIDER_BODY"), "overflow"],
+    ["api offline", new APICallError({ message: "fetch failed", url: "https://example.test", requestBodyValues: {}, isRetryable: false }), "provider"],
+    ["api refused", new APICallError({ message: "Content policy", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "content policy violation", isRetryable: false }), "refused"],
+    ["api context", new APICallError({ message: "Context length exceeded", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "maximum context length", isRetryable: false }), "overflow"]
   ] as const)("a %s transport failure ends incomplete with one call", async (_name, error, expected) => {
     const f = await fixture();
     const result = await prepared(f);
