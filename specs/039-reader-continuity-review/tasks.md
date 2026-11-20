@@ -1,12 +1,14 @@
 # Tasks: structured reader and continuity review
 
 D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
-mounted journey. W10 implements T002's leaf contracts and focused synthetic tests; no whole runtime/UI
-task is completed. T010 retains the independent correction gate. The policy amendment completed T007.
+mounted journey. W10 delivers T003's disclosed volatile selected-source prepare/start with focused
+synthetic tests; T004–T006, T008–T009 and T010–T019 remain. T010 retains the independent correction
+gate. The policy amendment completed T007.
 
 - [ ] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
 - [x] T002 Apply accepted D-193 / ADR 0018 for U-039-01/02; define and test finding, profile/version and run contracts. W10: new `review/profiles.ts`, `wire-schema.ts`, `findings.ts` and `scoped-readers.test.ts`; pure, volatile contracts only.
-- [ ] T003 Apply accepted U-039-04 / D-193 bounds; build disclosed selected-source snapshots, pre-start known/unknown price and data-use/training terms, mandatory 011/022 consent gates, and provider-named start with zero-send cancel/missing-consent tests.
+- [x] T003 Apply accepted U-039-04 / D-193 bounds; build disclosed selected-source snapshots, pre-start known/unknown price and data-use/training terms, mandatory 011/022 consent gates, and provider-named start with zero-send cancel/missing-consent tests.
+  Completed 2026-11-20: one bounded `readerReview:request` surface (support, prepare, start, stop, cancelPrepare), exact saved version/SHA-256/UTF-16 snapshots, the 4-book/64-item/65,536-source/131,072-combined/262,144-request/262,144-output bounds, known or unknown price with no dollar-cap claim, provider-published data-use/training terms, the 011 plan/connection gate, 022 default-off book consent, provider-named single-use Start, zero-send cancel and one transport call with no retry. Focused nine-file suite 149 pass, core review 383 pass, saved-review 26 pass; node typecheck clean, web only the pre-existing `WorkspaceView` union diagnostic. Independent exact-head review ACCEPT and merge `03622b6`. Remaining non-blocking follow-ups: opening focus does not land on the heading, the AI SDK transport drops `responseContract` and the empty tools list, AI SDK errors are not normalized, there is no standalone cancel-preparation control, and staleness is enforced at Start. T004–T006, T008–T009 and T010–T019 remain open.
 - [ ] T004 Add schema and quotation validation, citation navigation and stale/unavailable states.
 - [ ] T005 Add volatile profile attribution and explicit rerun comparison without replacing prior results.
 - [ ] T006 Add explicit multi-book manuscript scope and, only after 030 contracts, optional planning sources.
