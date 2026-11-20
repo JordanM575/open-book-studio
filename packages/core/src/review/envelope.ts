@@ -139,6 +139,54 @@ export function reviewDisclosure(envelope: ReviewEnvelope): ReviewEnvelope {
   return envelope;
 }
 
+export interface ReviewResourceUsage {
+  readonly books: number;
+  readonly items: number;
+  readonly sourceBytes: number;
+  readonly combinedBytes: number;
+  readonly requestBytes: number;
+  readonly limits: {
+    readonly books: number;
+    readonly items: number;
+    readonly sourceBytes: number;
+    readonly contentBytes: number;
+    readonly requestBytes: number;
+    readonly outputBytes: number;
+  };
+}
+
+/** Exact disclosed resource inventory for one validated envelope; UTF-8 bytes, never token estimates. */
+export function reviewResourceUsage(envelopeInput: ReviewEnvelope): ReviewResourceUsage {
+  requireContract(validatedEnvelopes.has(envelopeInput), "unvalidated-envelope");
+  const envelope = envelopeInput;
+  let items = 0;
+  let sourceBytes = 0;
+  for (const source of envelope.sources) {
+    if (source.kind === "chapter") {
+      items += source.segments.length;
+      sourceBytes += source.segments.reduce((total, segment) => total + utf8Bytes(segment.text), 0);
+    } else {
+      items++;
+      sourceBytes += utf8Bytes(source.text);
+    }
+  }
+  const profile = envelope.profile;
+  const profileBytes = profile ? utf8Bytes(profile.name + profile.purpose + profile.guidance + profile.focus.join("")) : 0;
+  const feedbackBytes = envelope.priorFeedback.reduce((total, feedback) => total + utf8Bytes(feedback.text), 0);
+  return freeze({
+    books: envelope.books.length,
+    items,
+    sourceBytes,
+    combinedBytes: sourceBytes + utf8Bytes(envelope.prompt) + profileBytes + feedbackBytes,
+    requestBytes: utf8Bytes(serializeProviderRequest(envelope)),
+    limits: {
+      books: REVIEW_LIMITS.books, items: REVIEW_LIMITS.items, sourceBytes: REVIEW_LIMITS.sourceBytes,
+      contentBytes: REVIEW_LIMITS.contentBytes, requestBytes: REVIEW_LIMITS.requestBytes,
+      outputBytes: REVIEW_LIMITS.outputBytes
+    }
+  });
+}
+
 /** Provider-neutral request. The adapter must also check its FINAL wire serialization after wrapping. */
 export function serializeProviderRequest(envelope: ReviewEnvelope): string {
   const request = canonicalJson({

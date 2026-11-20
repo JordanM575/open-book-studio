@@ -34,6 +34,8 @@
     "tests/review-worker.test.ts",
     "tests/support/review-normalization.worker.ts",
     "tests/reader-review.test.tsx",
+    "tests/reader-review-host.test.tsx",
+    "tests/reader-review-journey.test.tsx",
     "tests/saved-review-ui.test.tsx",
     "tests/continuation-checkin-presenter.test.tsx",
     "tests/continuation-checkin-measurement.test.tsx",

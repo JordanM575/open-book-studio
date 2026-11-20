@@ -29,8 +29,12 @@ async function envelope(requestId = "request-1", overrides: Partial<EnvelopeInpu
   return buildReviewEnvelope({ ...input(), kind: "reader-review", profile: await builtinReaderProfile("alpha"), requestId, ...overrides });
 }
 function prepared(value: ReviewEnvelope): PreparedReaderReview {
-  return { envelope: value, terms: value.books.map((book) => ({ bookId: book.bookId, termsRevision: book.termsRevision,
-    dataUse: "Synthetic data-use terms: sent to the named provider.", training: "Synthetic training terms: no training for this destination." })) };
+  return { envelope: value,
+    terms: value.books.map((book) => ({ bookId: book.bookId, termsRevision: book.termsRevision,
+      dataUse: "Synthetic data-use terms: sent to the named provider.", training: "Synthetic training terms: no training for this destination." })),
+    connection: { id: value.destination.connectionId, label: "Synthetic work account",
+      providerName: value.destination.provider, modelName: value.destination.model },
+    priceFacts: { kind: "metered", inputPerMillion: 1.25, cachedInputPerMillion: 0.125, outputPerMillion: 10, asOf: stamp } };
 }
 async function run(value: ReviewEnvelope, evidence: unknown[] = [citation()], interpretation = "The scene may feel abrupt."): Promise<ReaderRun> {
   return buildReaderRun({ envelope: value, runId: value.requestId, startedAt: stamp, completedAt: stamp,
@@ -41,7 +45,8 @@ async function run(value: ReviewEnvelope, evidence: unknown[] = [citation()], in
 function render(value: ReviewEnvelope, overrides: Partial<ReaderReviewProps> = {}) {
   const onPrepare = mock(async (): Promise<PreparationOutcome> => ({ kind: "ready", prepared: prepared(value) }));
   const onStart = mock(async (): Promise<StartOutcome> => ({ kind: "completed", run: await run(value) }));
-  const onStop = mock(async (_request: Parameters<ReaderReviewProps["onStop"]>[0]) => {});
+  const onStop = mock(async (_request: Parameters<ReaderReviewProps["onStop"]>[0]) =>
+    _request.requestId ? "stopped" as const : "not-started" as const);
   const onNavigate = mock(async () => "selected" as const);
   const onClose = mock(() => {});
   let props: ReaderReviewProps = { open: true, bookId: saved.bookId, viewKey: "view-1", disclosureRevision: "facts-1",
@@ -84,7 +89,7 @@ describe("reviewed disclosure and cancellation regressions", () => {
     const props: ReaderReviewProps = { open: true, bookId: saved.bookId, viewKey: "accessor-view", disclosureRevision: "facts-1",
       supported: true, currentSources: sources, editor,
       onPrepare: async () => ({ kind: "ready", prepared: prepared(value) }),
-      onStart: async () => ({ kind: "completed", run: completed }), onStop: async () => {}, onNavigate, onClose: () => {} };
+      onStart: async () => ({ kind: "completed", run: completed }), onStop: async () => "stopped" as const, onNavigate, onClose: () => {} };
     const view = testing.render(<StrictMode><ReaderReviewPanel {...props} /></StrictMode>);
     await complete();
     expect(reads).toBe(0);
@@ -144,7 +149,7 @@ describe("reviewed disclosure and cancellation regressions", () => {
   test.each(["facts", "support"])("%s invalidation retains pending and failed stop through repeated passive changes", async (kind) => {
     const value = await envelope();
     const pending = deferred<StartOutcome>();
-    const stopResult = deferred<void>();
+    const stopResult = deferred<"unconfirmed">();
     const onStart = mock((_request: Parameters<ReaderReviewProps["onStart"]>[0]) => pending.promise);
     const onStop = mock(() => stopResult.promise);
     const view = render(value, { onStart, onStop });
@@ -167,7 +172,7 @@ describe("reviewed disclosure and cancellation regressions", () => {
     const first = await envelope();
     const second = await envelope("request-2");
     const oldStart = deferred<StartOutcome>();
-    const oldStop = deferred<void>();
+    const oldStop = deferred<"stopped">();
     const newStart = deferred<StartOutcome>();
     const view = render(first, { onStart: () => oldStart.promise, onStop: () => oldStop.promise });
     await disclose(); click("Start with Synthetic provider");
@@ -266,7 +271,7 @@ describe("reader disclosure and explicit authority", () => {
     await disclose();
     const data = prepared(second);
     const mutable = data.terms.map((term) => ({ ...term }));
-    view.update({ onPrepare: async () => ({ kind: "ready", prepared: { envelope: second, terms: mutable } }) });
+    view.update({ onPrepare: async () => ({ kind: "ready", prepared: { ...data, terms: mutable } }) });
     click("Refresh disclosure");
     await testing.waitFor(() => expect(statusText()).toContain("Disclosure ready"));
     const term = mutable[0];
@@ -382,7 +387,8 @@ describe("cancellation and disclosure lifetime races", () => {
     expect(statusText()).toContain("No provider request started");
     expect(body().queryByRole("button", { name: /Start with/ })).toBeNull();
     expect(view.onStart).not.toHaveBeenCalled();
-    expect(view.onStop).not.toHaveBeenCalled();
+    expect(view.onStop).toHaveBeenCalledTimes(1);
+    expect(view.onStop.mock.calls[0]?.[0]).toEqual({ requestId: null });
   });
 
   test("a changed source clears disclosure; restoring it cannot revive authorization", async () => {
@@ -448,7 +454,7 @@ describe("cancellation and disclosure lifetime races", () => {
   test("stop failure is honest and cannot overwrite a subsequent preparation", async () => {
     const value = await envelope();
     const pending = deferred<StartOutcome>();
-    const stopResult = deferred<void>();
+    const stopResult = deferred<"unconfirmed">();
     const view = render(value, { onStart: () => pending.promise, onStop: () => stopResult.promise });
     await disclose();
     click("Start with Synthetic provider");
@@ -457,7 +463,7 @@ describe("cancellation and disclosure lifetime races", () => {
     expect(statusText()).toContain("Stop could not be confirmed");
     view.update({ onPrepare: async () => ({ kind: "blocked", reason: "consent" }) });
     click("Prepare review");
-    await testing.waitFor(() => expect(statusText()).toContain("Required book consent is missing"));
+    await testing.waitFor(() => expect(statusText()).toContain("This model may use the selected text for training"));
   });
 });
 
@@ -649,5 +655,61 @@ describe("results, exact historical evidence and explicit reruns", () => {
       if (originalStudio) Object.defineProperty(window, "studio", originalStudio);
       else Reflect.deleteProperty(window, "studio");
     }
+  });
+});
+
+describe("provider-named start and truthful stop states", () => {
+  test.each([
+    ["stopped", "Review stopped · Incomplete"],
+    ["not-started", "Preparation cancelled · No provider request started."],
+    ["unconfirmed", "Stop could not be confirmed · Incomplete"]
+  ] as const)("onStop %s is displayed truthfully without recalling sent text", async (result, copy) => {
+    const value = await envelope();
+    const pending = deferred<StartOutcome>();
+    const onStart = mock(() => pending.promise);
+    const onStop = mock(async () => result);
+    render(value, { onStart, onStop });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toContain("Review in progress"));
+    click("Stop review");
+    await testing.waitFor(() => expect(statusText()).toContain(copy));
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  test("a host-stopped outcome is not a completed run", async () => {
+    const value = await envelope();
+    render(value, { onStart: async () => ({ kind: "stopped" }) });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toContain("Review stopped · Incomplete"));
+    expect(body().queryByRole("article")).toBeNull();
+  });
+
+  test("bounded overflow details appear beside the exact refusal and failure copy", async () => {
+    const value = await envelope();
+    const prepareView = render(value, { onPrepare: async () => ({ kind: "blocked", reason: "scope-too-large",
+      detail: "The selected source text is over 65,536 bytes." }) });
+    click("Prepare review");
+    await testing.waitFor(() => expect(statusText()).toContain("Nothing was shortened or sent."));
+    expect(statusText()).toContain("The selected source text is over 65,536 bytes.");
+    prepareView.unmount();
+
+    render(value, { onStart: async () => ({ kind: "blocked", reason: "changed",
+      detail: "Prepare a fresh disclosure and inspect it before starting." }) });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toContain("disclosure changed"));
+    expect(statusText()).toContain("Prepare a fresh disclosure and inspect it before starting.");
+  });
+
+  test("the Start button names the provider and is disabled when the host marks preparation disabled", async () => {
+    const value = await envelope();
+    const preparedView = render(value);
+    await disclose();
+    expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy();
+    preparedView.update({ prepareDisabled: true });
+    expect((body().getByRole("button", { name: "Refresh disclosure" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

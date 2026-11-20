@@ -1,12 +1,14 @@
 # Structured reader review leaf
 
 `ReaderReviewPanel` is an isolated, one-book, volatile spec 039 UI under D-193 / corrected ADR 0018.
-Its execution is not connected to Workspace or a production provider runtime. Optional explicit
-Save review now uses an injected validated review-record API and a pre-bound Library/view scope;
-there are no implicit writes or ThreadStore calls. Saved-record inspection is mounted separately
-in Workspace and does not invent a reader executor.
-Import the component from `@ai-book-studio/app/components/reader-review/ReaderReviewPanel`.
-The colocated `contracts.ts` defines its callback types. Core imports use the `review/*` leaf exports.
+`ReaderReviewHost` mounts it in the Workspace behind the author's explicit "Open reader review"
+action; no provider path starts on mount or on a rerender. Optional explicit Save review uses an
+injected validated review-record API and a pre-bound Library/view scope; there are no implicit
+writes or ThreadStore calls. Saved-record inspection is mounted separately in Workspace and does not
+invent a reader executor.
+Import the component from `@ai-book-studio/app/components/reader-review/ReaderReviewPanel`; the
+Workspace entry is `ReaderReviewHost` in the same folder. The colocated `contracts.ts` defines its
+callback types. Core imports use the `review/*` leaf exports.
 
 ## Inputs and lifetime
 
@@ -141,3 +143,29 @@ Focused synthetic API/Library, mounted browser and actual desktop wrapper/preloa
 this connected disposition/trash/restore slice. Connected generation, safe Markdown export,
 archive/continuation acceptance, provider quality, native keyboard/theme accessibility and release
 acceptance remain separate gates. 039 T014/T015 and 038 T022 remain unchecked.
+
+## Mounted selected-source prepare/start (039 T003)
+
+`ReaderReviewHost` owns the Workspace entry, Alpha/Beta lens and saved-chapter picker. It checks
+support before reading the chapter list, loads only through the existing book read channel, and
+passes whole saved chapters as exact half-open UTF-16 ranges to the one `readerReview:request`
+surface. Unreadable chapters are named from `chapterReadIssues` and cannot be selected. There is no
+select-all, implicit current chapter, title/path lookup, outline/Bible/SKILLS read or library scan.
+
+The host's Prepare adapter calls `readerReview:request` once, re-validates the returned envelope
+through the core parser, and calls `acceptPreparation` before the leaf displays it. Start sends only
+the request id and scope digest. Cancel preparation and Close call `cancelPrepare`; Stop calls the
+single-use request `stop`. The leaf displays only the host's bounded refusal, detail, failure and
+stop result. It never claims a refund, a rollback or recall of text already sent.
+
+The desktop main process derives 011 connection/plan/model readiness and 022 default-off book
+consent from existing provider facts, freezes the same envelope used for disclosure and provider
+serialization, and keeps the pending request in memory only. Start re-reads the same saved chapters,
+re-checks the pinned destination, capabilities, terms, consent and exact revisions, consumes the
+request and makes one transport call with no retry, repair, fallback or model change. A changed
+source, destination, consent or digest returns blocked with zero sends. No report, profile,
+conversation, campaign, checkpoint or manuscript writer is reachable from this path.
+
+Browser and other unsupported hosts expose `unsupportedReaderReviewApi`: support is false and every
+operation refuses before a private read. T004–T006, T008–T009 and T010–T019 remain separate work;
+039 T003 stays unchecked until independent exact-head review and merge.

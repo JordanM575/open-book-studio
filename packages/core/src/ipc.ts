@@ -33,6 +33,7 @@ import type { BookMatter, SaveMatterResult } from "./matter";
 import type { VoicePreferences } from "./providers/voice-preferences";
 import { planningChannels, type PlanningApi } from "./library/planning-api";
 import { reviewRecordChannel, type ReviewRecordApi } from "./library/review-record-api";
+import { readerReviewChannel, type ReaderReviewApi } from "./review/reader-api";
 import type {
   ContinuationCheckinCadenceRequest, ContinuationCheckinInput
 } from "./review/campaign-continuation-checkin";
@@ -138,6 +139,8 @@ export type { AgentThread, ThreadSummary };
 import type { LegacyImportReport } from "./legacy";
 
 export const IPC = {
+  /** Disclosed selected-source reader review prepare/start/stop (039 T003). */
+  readerReview: { request: readerReviewChannel },
   reviewRecords: { request: reviewRecordChannel },
   planning: planningChannels,
   app: {
@@ -613,6 +616,8 @@ export interface AgentThreadRead {
 export interface StudioApi {
   /** Absent on unsupported hosts; controls refuse before opening a draft. */
   planning?: PlanningApi;
+  /** The one bounded, volatile reader-review prepare/start surface (039 T003). */
+  readerReview?: ReaderReviewApi;
   reviewRecords?: ReviewRecordApi;
   app: {
     info(): Promise<Result<BuildMetadata>>;
