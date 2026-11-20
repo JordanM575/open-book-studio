@@ -1,6 +1,6 @@
 # Structured reader and continuity review
 
-**Status:** In progress — D-193 and D-197–D-199 accepted; isolated candidates need correction and host integration
+**Status:** In progress — D-193 and D-197–D-199 accepted; T003 delivers the disclosed volatile selected-source prepare/start. T004–T006, T008–T009 and T010–T019 remain.
 **Number:** 039
 **Requirement:** REQ-REVIEW-003, REQ-REVIEW-004
 **Depends on:** 034 saved-source evidence contracts; 037 scoped read-only provider review;
