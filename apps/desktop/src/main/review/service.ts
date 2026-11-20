@@ -1,6 +1,8 @@
+import { APICallError } from "ai";
 import type { BookDetail } from "@ai-book-studio/core/schema";
 import type { Catalogue } from "@ai-book-studio/core/providers/models";
-import type { ConnectionSummary, StoredCredential } from "@ai-book-studio/core/providers/types";
+import { normalizeProviderError } from "@ai-book-studio/core/providers/errors";
+import type { ConnectionSummary, ProviderId, StoredCredential } from "@ai-book-studio/core/providers/types";
 import { ProviderError } from "@ai-book-studio/core/providers/types";
 import { ReviewContractError } from "@ai-book-studio/core/review/contract";
 import {
@@ -81,13 +83,21 @@ function startRefusal(reasons: readonly string[], connectionAvailable: boolean):
   return "changed";
 }
 
-function failure(error: unknown, signal: AbortSignal): ReaderReviewFailure | null {
+function failure(error: unknown, signal: AbortSignal, provider: ProviderId): ReaderReviewFailure | null {
   if (signal.aborted) return null;
-  if (error instanceof ProviderError) {
-    if (error.code === "refusal") return "refused";
-    if (error.code === "context") return "overflow";
-    return "provider";
-  }
+  const normalized = error instanceof ProviderError
+    ? error
+    : APICallError.isInstance(error)
+      ? normalizeProviderError({
+          provider,
+          message: error.message,
+          ...(error.statusCode !== undefined ? { status: error.statusCode } : {}),
+          ...(error.responseBody ? { body: error.responseBody } : {})
+        })
+      : null;
+  if (!normalized) return "provider";
+  if (normalized.code === "refusal") return "refused";
+  if (normalized.code === "context") return "overflow";
   return "provider";
 }
 
@@ -338,7 +348,7 @@ export class ReaderReviewService implements ReaderReviewServiceContract {
         output = (await this.transport.run({ envelope: pending.envelope, credential, signal: active.controller.signal })).output;
       } catch (error) {
         if (!stillActive() || !active) return { kind: "stopped" };
-        const reason = failure(error, active.controller.signal);
+        const reason = failure(error, active.controller.signal, credential.provider);
         return reason ? { kind: "failed", reason } : { kind: "stopped" };
       }
       if (!stillActive()) return { kind: "stopped" };
