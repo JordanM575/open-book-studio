@@ -2,6 +2,7 @@ import { useCallback, useId, useLayoutEffect, useRef, useState } from "react";
 import { assertReviewData } from "@ai-book-studio/core/review/contract";
 import { sourceCurrency } from "@ai-book-studio/core/review/envelope";
 import type { Citation, ReaderRun } from "@ai-book-studio/core/review/findings";
+import type { ReaderReviewStopResult } from "@ai-book-studio/core/review/reader-api";
 import { Button } from "@ai-book-studio/ui/button";
 import {
   acceptPreparation, acceptRun, failureMessage, refusalCopy, refusalMessage,
@@ -14,7 +15,12 @@ type Phase = "idle" | "preparing" | "ready" | "running" | "completed" | "failed"
 type Operation = { controller: AbortController; requestId: string | null; revision: string; stop: ReaderReviewProps["onStop"] };
 const stoppedCopy = "Review stopped · Incomplete. Stopping prevents later dispatch best-effort; text already sent cannot be recalled. Prepare a new request to try again.";
 const stopRequestedCopy = "Review stop requested · Incomplete. Stopping prevents later dispatch best-effort; text already sent cannot be recalled. Awaiting stop confirmation.";
+const cancelCopy = "Preparation cancelled · No provider request started. Prepare again when ready.";
 const unconfirmedStopCopy = "Stop could not be confirmed · Incomplete. Late results are ignored here, but the provider may still be processing text already sent. That text cannot be recalled.";
+
+function stopMessage(outcome: ReaderReviewStopResult): string {
+  return outcome === "stopped" ? stoppedCopy : outcome === "not-started" ? cancelCopy : unconfirmedStopCopy;
+}
 
 /** Injected execution and explicit validated persistence; never dispatches a provider on Save. */
 export function ReaderReviewPanel(props: ReaderReviewProps) {
@@ -38,24 +44,30 @@ function ReaderReviewSession(props: ReaderReviewProps) {
   const seenRequests = useRef(new Set<string>());
   const startedRequests = useRef(new Set<string>());
   const cancellation = useRef<{ message: string } | null>(null);
+  const hadPrepared = useRef(false);
+  hadPrepared.current = prepared !== null;
 
-  const retire = useCallback((): Promise<boolean> => {
+  const retire = useCallback((): Promise<ReaderReviewStopResult> => {
     generation.current++;
     const operation = active.current;
     active.current = null;
     operation?.controller.abort();
-    if (!operation?.requestId) return Promise.resolve(true);
-    const notice = { message: stopRequestedCopy };
+    if (!operation) return Promise.resolve("stopped");
+    const notice = { message: operation.requestId ? stopRequestedCopy : cancelCopy };
     cancellation.current = notice;
-    let result: Promise<boolean>;
+    const fallback: ReaderReviewStopResult = operation.requestId ? "stopped" : "not-started";
+    let result: Promise<ReaderReviewStopResult>;
     try {
-      result = Promise.resolve(operation.stop({ requestId: operation.requestId })).then(() => true, () => false);
-    } catch { result = Promise.resolve(false); }
-    return result.then((confirmed) => {
-      notice.message = confirmed ? stoppedCopy : unconfirmedStopCopy;
+      result = Promise.resolve(operation.stop({ requestId: operation.requestId })).then(
+        (outcome) => outcome ?? fallback,
+        () => "unconfirmed" as const
+      );
+    } catch { result = Promise.resolve("unconfirmed"); }
+    return result.then((outcome) => {
+      notice.message = stopMessage(outcome);
       // Passive fact changes retain this notice; a new operation or closed view retires ownership.
       if (alive.current && cancellation.current === notice && !active.current) setMessage(notice.message);
-      return confirmed;
+      return outcome;
     });
   }, []);
 
@@ -66,7 +78,11 @@ function ReaderReviewSession(props: ReaderReviewProps) {
     setPrepared(null);
     setPhase(cancellation.current ? "stopped" : "idle");
     setNavigationBusy(false);
-    setMessage(cancellation.current?.message ?? (props.supported ? "Prepare a fresh disclosure and inspect it before starting." : "Reader review is unavailable on this host. No source preparation or provider request can start."));
+    const initial = props.supported
+      ? (hadPrepared.current ? refusalCopy.changed : "Prepare a fresh disclosure and inspect it before starting.")
+      : "Reader review is unavailable on this host. No source preparation or provider request can start.";
+    setMessage(cancellation.current?.message ?? initial);
+    hadPrepared.current = false;
     return () => {
       alive.current = false;
       void retire();
@@ -111,7 +127,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
       assertReviewData(result);
       if (result.kind === "blocked") {
         setPhase("idle");
-        setMessage(refusalMessage(result.reason));
+        setMessage(`${refusalMessage(result.reason)}${result.detail ? ` ${result.detail}` : ""}`);
       } else if (result.kind === "ready") {
         const value = acceptPreparation(result.prepared, props.bookId);
         if (seenRequests.current.has(value.envelope.requestId)) throw new Error("Reused request");
@@ -154,10 +170,13 @@ function ReaderReviewSession(props: ReaderReviewProps) {
         setMessage("Review completed · Subjective findings, with historical evidence. A rerun requires a new disclosure and Start.");
       } else if (outcome.kind === "blocked") {
         setPhase("idle");
-        setMessage(refusalMessage(outcome.reason));
+        setMessage(`${refusalMessage(outcome.reason)}${outcome.detail ? ` ${outcome.detail}` : ""}`);
       } else if (outcome.kind === "failed") {
         setPhase("failed");
         setMessage(failureMessage(outcome.reason));
+      } else if (outcome.kind === "stopped") {
+        setPhase("stopped");
+        setMessage(stoppedCopy);
       } else throw new Error("Invalid result");
     } catch {
       if (!isCurrent(operation)) return;
@@ -178,11 +197,11 @@ function ReaderReviewSession(props: ReaderReviewProps) {
     setPrepared(null);
     setPhase("stopped");
     setNavigationBusy(false);
-    setMessage(wasRunning ? stopRequestedCopy : "Preparation cancelled · No provider request started. Prepare again when ready.");
+    setMessage(wasRunning ? stopRequestedCopy : cancelCopy);
     focusStatus();
-    void result.then((confirmed) => {
-      if (!confirmed && alive.current && generation.current === stoppedGeneration && !active.current) {
-        setMessage(unconfirmedStopCopy);
+    void result.then((outcome) => {
+      if (alive.current && generation.current === stoppedGeneration && !active.current) {
+        setMessage(stopMessage(outcome));
       }
     });
   }
@@ -210,7 +229,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
 
   const busy = phase === "preparing" || phase === "running";
   return <section aria-labelledby={heading} className="space-y-4 p-4 text-(length:--text-body-size) text-foreground">
-    <h2 id={heading} className="text-(length:--text-title-3-size) font-semibold">Structured reader review</h2>
+    <h3 id={heading} data-reader-review-heading tabIndex={-1} className="text-(length:--text-title-3-size) font-semibold">Structured reader review</h3>
     <p className="text-muted-foreground">Suggestion-only · Saved selected sources · Volatile by default. Closing this view discards unsaved snapshots, profiles and results. Explicitly saved feedback remains in Saved reviews.</p>
     <p ref={status} role="status" aria-live="polite" tabIndex={-1} className="rounded-[var(--corner-md)] focus-visible:outline-2 focus-visible:outline-[var(--ring)]">{message}</p>
     {prepared ? <ReviewDisclosure prepared={prepared} /> : null}
@@ -218,7 +237,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
     {phase === "ready" && !destinationReady ? <p>{refusalCopy.unavailable}</p> : null}
     <div className="flex flex-wrap gap-2">
       {phase === "ready" && prepared ? <Button variant="primary" className={reviewActionClass} disabled={!canStart || navigationBusy} onClick={() => void start()}>Start with {prepared.envelope.destination.provider}</Button> : null}
-      {!busy ? <Button variant={phase === "ready" ? "secondary" : "primary"} className={reviewActionClass} disabled={!props.supported || navigationBusy} onClick={() => void prepare()}>
+      {!busy ? <Button variant={phase === "ready" ? "secondary" : "primary"} className={reviewActionClass} disabled={!props.supported || props.prepareDisabled === true || navigationBusy} onClick={() => void prepare()}>
         {phase === "ready" ? "Refresh disclosure" : runs.length ? "Prepare rerun" : "Prepare review"}
       </Button> : <Button className={reviewActionClass} onClick={stop}>{phase === "running" ? "Stop review" : "Cancel preparation"}</Button>}
       <Button variant="ghost" className={reviewActionClass} onClick={() => { void retire(); cancellation.current = null; setPrepared(null); setRuns([]); setNavigationRefusals(new Map()); setPhase("idle"); props.onClose(); }}>Close review</Button>

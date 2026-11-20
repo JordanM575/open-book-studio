@@ -16,6 +16,9 @@ import { idSchema, type BookChanges } from "@ai-book-studio/core/schema";
 import { MATTER_LIMITS, matterSchema } from "@ai-book-studio/core/matter";
 import { planningChannels, planningHandler, type PlanningOperation } from "@ai-book-studio/core/library/planning-api";
 import { reviewRecordChannel, reviewRecordHandler } from "@ai-book-studio/core/library/review-record-api";
+import {
+  readerReviewChannel, readerReviewHandler, type ReaderReviewService as ReaderReviewServiceContract
+} from "@ai-book-studio/core/review/reader-api";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
 import { EXTERNAL_LINKS } from "@ai-book-studio/core/providers/links";
 import { IMAGE_SIZES } from "@ai-book-studio/core/providers/images";
@@ -93,6 +96,8 @@ import {
   historyReadSchema,
   historyScopeSchema
 } from "@ai-book-studio/core/library/history";
+import { ReaderReviewService } from "./review/service";
+import { AiSdkReviewTransport } from "./review/transport";
 
 const folderInput = z.string().min(1).max(4096);
 const contentInput = z.string().max(20_000_000);
@@ -247,7 +252,16 @@ export function registerIpc(
    * Local cancel registry for host-minted speech-to-text and text-to-speech ids.
    * Null answers every id with an honest no-op and does not invent a provider receipt.
    */
-  voiceCancelRegistry: VoiceCancelRegistry | null = null
+  voiceCancelRegistry: VoiceCancelRegistry | null = null,
+  /**
+   * The one volatile reader-review service. Tests inject a synthetic transport edge; a shipping
+   * launch constructs the desktop service with the existing provider service and read-only Library.
+   */
+  readerReviewService: ReaderReviewServiceContract = new ReaderReviewService({
+    library: () => studio.requireLibrary(),
+    providers,
+    transport: new AiSdkReviewTransport()
+  })
 ): void {
   /** What the plugin folder currently provides, for the settings panel. */
   const pluginStatus = async (): Promise<PluginStatus> => {
@@ -281,6 +295,8 @@ export function registerIpc(
 
   const handlePlanning = planningHandler(() => studio.requireLibrary());
   const handleReviewRecords = reviewRecordHandler(() => studio.requireLibrary());
+  const handleReaderReview = readerReviewHandler(readerReviewService);
+  ipcMain.handle(readerReviewChannel, (_event, payload: unknown) => handleReaderReview(payload));
   ipcMain.handle(reviewRecordChannel, (_event, payload: unknown) => handleReviewRecords(payload));
   for (const operation of Object.keys(planningChannels) as PlanningOperation[]) {
     ipcMain.handle(planningChannels[operation], (_event, payload: unknown) => handlePlanning(operation, payload));

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { canonicalJson, REVIEW_LIMITS, utf8Bytes } from "../../src/review/contract";
-import { assertCompleteRequestBytes, buildReviewEnvelope, checkReviewStart, offeredReviewTools, parseReviewEnvelope, reviewDisclosure, serializeProviderRequest, serializeReviewEnvelope, validateReviewEnvelope, type EnvelopeInput } from "../../src/review/envelope";
+import { assertCompleteRequestBytes, buildReviewEnvelope, checkReviewStart, offeredReviewTools, parseReviewEnvelope, reviewDisclosure, reviewResourceUsage, serializeProviderRequest, serializeReviewEnvelope, validateReviewEnvelope, type EnvelopeInput } from "../../src/review/envelope";
+import { buildReaderRun } from "../../src/review/findings";
+import { builtinReaderProfile } from "../../src/review/profiles";
 import { createReviewReadFacade } from "../../src/review/facade";
 import { captureBibleSource, captureChapterSource } from "../../src/review/sources";
 import { currentFacts, currentSources, envelope, hash, input, item, saved, selectedEnd, selectedStart, source, stamp } from "./scoped-fixtures";
@@ -224,5 +226,36 @@ describe("pre-start invalidation inputs", () => {
       const changed = await captureBibleSource({ ...selected, ...change });
       expect(await checkReviewStart(value, action, currentFacts(value), [{ sourceId: "bible", status: "available", source: changed }])).toContain("source-stale:bible");
     }
+  });
+});
+
+describe("exact disclosed resource usage and output bound", () => {
+  test("reviewResourceUsage matches the serialized request and content bytes exactly", async () => {
+    const value = await envelope();
+    const usage = reviewResourceUsage(value);
+    const sourceBytes = source().segments.reduce((total, segment) => total + utf8Bytes(segment.text), 0);
+    expect(usage).toEqual({
+      books: 1,
+      items: 1,
+      sourceBytes,
+      combinedBytes: sourceBytes + utf8Bytes(value.prompt),
+      requestBytes: utf8Bytes(serializeProviderRequest(value)),
+      limits: {
+        books: 4, items: 64, sourceBytes: 65_536, contentBytes: 131_072,
+        requestBytes: 262_144, outputBytes: 262_144
+      }
+    });
+    expect(() => reviewResourceUsage(structuredClone(value))).toThrow("unvalidated-envelope");
+  });
+
+  test("the output bound admits exactly 262,144 bytes and refuses one more", async () => {
+    const value = await buildReviewEnvelope({ ...input(), kind: "reader-review", profile: await builtinReaderProfile("alpha") });
+    const output = JSON.stringify({ runId: value.requestId, readerId: value.profile?.id,
+      readerVersion: value.profile?.version, findings: [] });
+    const exact = output + " ".repeat(REVIEW_LIMITS.outputBytes - utf8Bytes(output));
+    expect(utf8Bytes(exact)).toBe(REVIEW_LIMITS.outputBytes);
+    await expect(buildReaderRun({ runId: value.requestId, startedAt: stamp, completedAt: stamp, envelope: value, output: exact })).resolves.toBeDefined();
+    await expect(buildReaderRun({ runId: value.requestId, startedAt: stamp, completedAt: stamp, envelope: value, output: `${exact} ` }))
+      .rejects.toThrow("output-byte-limit");
   });
 });

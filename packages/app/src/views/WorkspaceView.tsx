@@ -58,6 +58,7 @@ import type { ThemeChoice } from "../hooks/use-theme";
 import { PlanningPanel } from "../components/planning/PlanningPanel";
 import { PlanningNavigation } from "../components/planning/navigation";
 import { SavedReviewsPanel } from "../components/saved-review/SavedReviewsPanel";
+import { ReaderReviewHost } from "../components/reader-review/ReaderReviewHost";
 import { ContinuationCheckinPanel } from "../components/continuation-checkin/ContinuationCheckinPanel";
 
 export interface ChapterRequest {
@@ -1399,6 +1400,7 @@ export function WorkspaceView({
         ) : null}
 
         <section className="thin-scroll min-w-0 flex-1 overflow-y-auto">
+          <ReaderReviewHost bookId={bookId} />
           <SavedReviewsPanel bookId={bookId} libraryKey={libraryRoot} api={window.studio.reviewRecords} />
           {detail?.book.id === bookId && <PlanningPanel bookId={bookId} bookTitle={detail.book.title}
             api={window.studio.planning} navigation={navigation}
