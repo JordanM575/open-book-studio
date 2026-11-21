@@ -1,12 +1,12 @@
 /// <reference types="bun" />
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { mountDom, unmountDom } from "./support/dom";
-import { buildReviewEnvelope, type EnvelopeInput, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { buildReviewEnvelope, type CurrentSource, type EnvelopeInput, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
 import { buildReaderRun, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import { builtinReaderProfile, editReaderProfile } from "@ai-book-studio/core/review/profiles";
 import { captureBibleSource, captureChapterSource } from "@ai-book-studio/core/review/sources";
-import { citation, currentSources, input, saved, source, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
-import type { PreparationOutcome, PreparedReaderReview, ReaderReviewProps, StartOutcome } from "../../../packages/app/src/components/reader-review/contracts";
+import { citation, currentSources, input, saved, selectedStart, source, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
+import { citationNavigationCopy, failureCopy, revalidationFailureCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy, type PreparationOutcome, type PreparedReaderReview, type ReaderReviewProps, type ReaderSourceCheck, type StartOutcome } from "../../../packages/app/src/components/reader-review/contracts";
 
 let testing!: typeof import("@testing-library/react/pure");
 let ReaderReviewPanel!: typeof import("@ai-book-studio/app/components/reader-review/ReaderReviewPanel").ReaderReviewPanel;
@@ -42,23 +42,33 @@ async function run(value: ReviewEnvelope, evidence: unknown[] = [citation()], in
       findings: [{ findingId: "finding-1", category: "clarity", readerId: value.profile?.id,
         readerVersion: value.profile?.version, runId: value.requestId, interpretation, claim: "observation", evidence }] }) });
 }
+function checked(value: ReviewEnvelope, sources: readonly CurrentSource[] = currentSources(value)): ReaderSourceCheck {
+  return { kind: "checked", byScopeDigest: new Map([[value.scopeDigest, sources]]) };
+}
 function render(value: ReviewEnvelope, overrides: Partial<ReaderReviewProps> = {}) {
   const onPrepare = mock(async (): Promise<PreparationOutcome> => ({ kind: "ready", prepared: prepared(value) }));
   const onStart = mock(async (): Promise<StartOutcome> => ({ kind: "completed", run: await run(value) }));
   const onStop = mock(async (_request: Parameters<ReaderReviewProps["onStop"]>[0]) =>
     _request.requestId ? "stopped" as const : "not-started" as const);
   const onNavigate = mock(async () => "selected" as const);
+  const onCheckSources = mock(async (_input: Parameters<NonNullable<ReaderReviewProps["onCheckSources"]>>[0]) => checked(value));
   const onClose = mock(() => {});
   let props: ReaderReviewProps = { open: true, bookId: saved.bookId, viewKey: "view-1", disclosureRevision: "facts-1",
-    supported: true, currentSources: currentSources(value), editor: { clean: true, identity: citation().identity },
-    onPrepare, onStart, onStop, onNavigate, onClose, ...overrides };
+    supported: true, editor: { clean: true, identity: citation().identity },
+    onPrepare, onStart, onStop, onNavigate, onCheckSources, onClose, ...overrides };
   const view = testing.render(<ReaderReviewPanel {...props} />);
-  return { ...view, onPrepare, onStart, onStop, onNavigate, onClose,
+  return { ...view, onPrepare, onStart, onStop, onNavigate, onCheckSources, onClose,
     update(next: Partial<ReaderReviewProps>) { props = { ...props, ...next }; view.rerender(<ReaderReviewPanel {...props} />); }
   };
 }
 function body() { return testing.within(document.body); }
 function click(name: string) { testing.fireEvent.click(body().getByRole("button", { name })); }
+function evidenceButton(index = 0) {
+  const button = body().getAllByRole("button", { name: /^Show exact passage for / })[index];
+  if (!button) throw new Error("Missing exact-passage button");
+  return button;
+}
+function clickEvidence(index = 0) { testing.fireEvent.click(evidenceButton(index)); }
 async function disclose() {
   click("Prepare review");
   await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
@@ -67,6 +77,10 @@ async function complete() {
   await disclose();
   click("Start with Synthetic provider");
   await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-1" })).toBeTruthy());
+}
+async function checkSources() {
+  click("Check current sources");
+  await testing.waitFor(() => expect(statusText()).toMatch(/Saved sources checked|saved sources could not be checked|disclosure changed|selected source or destination is unavailable/));
 }
 function statusText() { return body().getByRole("status").textContent ?? ""; }
 
@@ -87,14 +101,16 @@ describe("reviewed disclosure and cancellation regressions", () => {
     expect(reads).toBe(0);
     const onNavigate = mock(async () => "selected" as const);
     const props: ReaderReviewProps = { open: true, bookId: saved.bookId, viewKey: "accessor-view", disclosureRevision: "facts-1",
-      supported: true, currentSources: sources, editor,
+      supported: true, editor,
       onPrepare: async () => ({ kind: "ready", prepared: prepared(value) }),
-      onStart: async () => ({ kind: "completed", run: completed }), onStop: async () => "stopped" as const, onNavigate, onClose: () => {} };
+      onStart: async () => ({ kind: "completed", run: completed }), onStop: async () => "stopped" as const,
+      onNavigate, onCheckSources: async () => checked(value, sources), onClose: () => {} };
     const view = testing.render(<StrictMode><ReaderReviewPanel {...props} /></StrictMode>);
     await complete();
+    await checkSources();
     expect(reads).toBe(0);
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(true);
-    click("Show exact passage");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    clickEvidence();
     expect(onNavigate).not.toHaveBeenCalled();
     view.unmount();
     expect(reads).toBe(0);
@@ -102,8 +118,9 @@ describe("reviewed disclosure and cancellation regressions", () => {
     // Keep the mounted positive control without claiming framework-wide getter-free prop replacement.
     testing.render(<StrictMode><ReaderReviewPanel {...props} editor={validEditor} /></StrictMode>);
     await complete();
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(false);
-    click("Show exact passage");
+    await checkSources();
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+    clickEvidence();
     await testing.waitFor(() => expect(onNavigate).toHaveBeenCalledTimes(1));
     expect(reads).toBe(0);
   });
@@ -391,14 +408,17 @@ describe("cancellation and disclosure lifetime races", () => {
     expect(view.onStop.mock.calls[0]?.[0]).toEqual({ requestId: null });
   });
 
-  test("a changed source clears disclosure; restoring it cannot revive authorization", async () => {
+  test("an explicit stale check clears disclosure; restoring current sources cannot revive authorization", async () => {
     const value = await envelope();
     const view = render(value);
     await disclose();
-    view.update({ currentSources: [{ sourceId: "source-1", status: "missing" }] });
-    expect(statusText()).toContain("disclosure changed");
-    view.update({ currentSources: currentSources(value) });
+    view.update({ onCheckSources: async () => checked(value, [{ sourceId: "source-1", status: "stale" }]) });
+    click("Check current sources");
+    await testing.waitFor(() => expect(statusText()).toContain("disclosure changed"));
     expect(body().queryByRole("button", { name: /Start with/ })).toBeNull();
+    view.update({ onCheckSources: async () => checked(value) });
+    expect(body().queryByRole("button", { name: /Start with/ })).toBeNull();
+    expect((body().getByRole("button", { name: "Check current sources" }) as HTMLButtonElement).disabled).toBe(true);
     expect(view.onStart).not.toHaveBeenCalled();
   });
 
@@ -473,7 +493,7 @@ describe("results, exact historical evidence and explicit reruns", () => {
     render(await envelope(), { onStart });
     await disclose();
     click("Start with Synthetic provider");
-    await testing.waitFor(() => expect(statusText()).toContain("incomplete"));
+    await testing.waitFor(() => expect(statusText()).toBe(failureCopy[reason]));
     expect(body().queryByRole("article")).toBeNull();
     expect(body().getByRole("button", { name: "Prepare review" })).toBeTruthy();
     expect(onStart).toHaveBeenCalledTimes(1);
@@ -500,13 +520,14 @@ describe("results, exact historical evidence and explicit reruns", () => {
     expect(article.textContent).toContain("Subjective observation");
     expect(article.textContent).toContain("saved version 3, captured");
     expect(article.querySelector("blockquote")?.textContent).toBe(citation().quote);
-    click("Show exact passage");
-    await testing.waitFor(() => expect(statusText()).toContain("stale or unavailable"));
+    await checkSources();
+    clickEvidence();
+    await testing.waitFor(() => expect(statusText()).toContain("passage is stale or the editor is not ready"));
     expect(onNavigate.mock.calls[0]?.[0].citation).toEqual(citation());
     expect(Object.isFrozen(onNavigate.mock.calls[0]?.[0].run)).toBe(true);
     expect(article.querySelector("blockquote")?.textContent).toBe(citation().quote);
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(true);
-    click("Show exact passage");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    clickEvidence();
     expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 
@@ -514,11 +535,16 @@ describe("results, exact historical evidence and explicit reruns", () => {
     const value = await envelope();
     const view = render(value);
     await complete();
-    if (which === "missing") view.update({ currentSources: [{ sourceId: "source-1", status: "missing" }] });
-    else if (which === "changed") view.update({ currentSources: [{ sourceId: "source-1", status: "available", source: { ...source(), identity: { ...citation().identity, version: 4 } } }] });
+    if (which === "missing") view.update({ onCheckSources: async () => checked(value, [{ sourceId: "source-1", status: "missing" }]) });
+    else if (which === "changed") view.update({ onCheckSources: async () => checked(value, [{ sourceId: "source-1", status: "available", source: { ...source(), identity: { ...citation().identity, version: 4 } } }]) });
     else view.update({ editor: { clean: which === "dirty" ? false : "false" as unknown as boolean, identity: citation().identity } });
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(true);
-    click("Show exact passage");
+    await checkSources();
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(body().getByRole("article").textContent).toContain(which === "dirty" || which === "malformed-clean"
+      ? "Historical quotation · Editor not ready — save or finish editing, then try again"
+      : which === "missing" ? "Historical quotation · Source unavailable — navigation disabled"
+        : "Historical quotation · Stale saved source — navigation disabled");
+    clickEvidence();
     expect(view.onNavigate).not.toHaveBeenCalled();
     expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(citation().quote);
   });
@@ -533,7 +559,7 @@ describe("results, exact historical evidence and explicit reruns", () => {
     await complete();
     expect(body().getByText(/1 unverified quotations withheld/)).toBeTruthy();
     expect(document.body.textContent).not.toContain("INVENTED_QUOTE_SENTINEL");
-    expect(body().queryByRole("button", { name: "Show exact passage" })).toBeNull();
+    expect(body().queryByRole("button", { name: /^Show exact passage for / })).toBeNull();
     expect(view.onNavigate).not.toHaveBeenCalled();
   });
 
@@ -543,7 +569,7 @@ describe("results, exact historical evidence and explicit reruns", () => {
     render(value, { onStart: async () => ({ kind: "completed", run: invalid }) });
     await disclose();
     click("Start with Synthetic provider");
-    await testing.waitFor(() => expect(statusText()).toContain("could not be validated"));
+    await testing.waitFor(() => expect(statusText()).toContain(revalidationFailureCopy));
     expect(body().queryByRole("article")).toBeNull();
   });
 
@@ -557,7 +583,7 @@ describe("results, exact historical evidence and explicit reruns", () => {
     const second = await envelope("request-2", { profile: author, sources: [changedSource], destination: { ...input().destination, provider: "Second synthetic provider", model: "second/model" } });
     const onPrepare = mock(async (_request: Parameters<ReaderReviewProps["onPrepare"]>[0]): Promise<PreparationOutcome> => ({ kind: "ready", prepared: prepared(second) }));
     const onStart = mock(async (): Promise<StartOutcome> => ({ kind: "completed", run: await run(second, [], "The revised scene may feel slower.") }));
-    view.update({ disclosureRevision: "facts-2", currentSources: currentSources(second), onPrepare, onStart });
+    view.update({ disclosureRevision: "facts-2", onPrepare, onStart });
     expect(body().getAllByRole("article")).toHaveLength(1);
     click("Prepare rerun");
     await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Second synthetic provider" })).toBeTruthy());
@@ -584,7 +610,8 @@ describe("results, exact historical evidence and explicit reruns", () => {
     const view = render(value, { onNavigate });
     await complete();
     expect(body().getByRole("article").textContent).toContain("Beta reader · Version 1");
-    click("Show exact passage");
+    await checkSources();
+    clickEvidence();
     view.update({ viewKey: "view-2" });
     view.update({ viewKey: "view-1" });
     expect(onNavigate.mock.calls[0]?.[0].signal.aborted).toBe(true);
@@ -617,8 +644,10 @@ describe("results, exact historical evidence and explicit reruns", () => {
       valueDigest: bible.valueDigest, containingFileHash: bible.containingFileHash, start: 0, end: bible.text.length, quote: bible.text };
     const view = render(value, { onStart: async () => ({ kind: "completed", run: await run(value, [evidence]) }) });
     await complete();
+    await checkSources();
     expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(bible.text);
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(body().getByText(/This source kind has no editor navigation/)).toBeTruthy();
     expect(view.onNavigate).not.toHaveBeenCalled();
   });
 
@@ -627,10 +656,11 @@ describe("results, exact historical evidence and explicit reruns", () => {
     const onNavigate = mock(async () => { throw new Error("PRIVATE_NAVIGATION_FAILURE"); });
     render(value, { onNavigate });
     await complete();
-    click("Show exact passage");
+    await checkSources();
+    clickEvidence();
     await testing.waitFor(() => expect(statusText()).toContain("could not be opened"));
     expect(document.body.textContent).not.toContain("PRIVATE_NAVIGATION_FAILURE");
-    expect((body().getByRole("button", { name: "Show exact passage" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
   });
 
   test("synthetic journey uses no global conversation, persistence or network capability", async () => {
@@ -645,7 +675,8 @@ describe("results, exact historical evidence and explicit reruns", () => {
     try {
       render(value);
       await complete();
-      click("Show exact passage");
+      await checkSources();
+      clickEvidence();
       await testing.waitFor(() => expect(statusText()).toContain("host confirmed"));
       click("Close review");
       expect(calls).toEqual([]);
@@ -711,5 +742,129 @@ describe("provider-named start and truthful stop states", () => {
     expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy();
     preparedView.update({ prepareDisabled: true });
     expect((body().getByRole("button", { name: "Refresh disclosure" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("explicit current-source checks and exact navigation states", () => {
+  test("no check runs automatically on open, prepare, rerender or completion; one check covers the volatile envelopes", async () => {
+    const value = await envelope();
+    const view = render(value);
+    expect(view.onCheckSources).not.toHaveBeenCalled();
+    await disclose();
+    expect(view.onCheckSources).not.toHaveBeenCalled();
+    view.update({});
+    expect(view.onCheckSources).not.toHaveBeenCalled();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-1" })).toBeTruthy());
+    expect(view.onCheckSources).not.toHaveBeenCalled();
+    click("Check current sources");
+    await testing.waitFor(() => expect(statusText()).toBe(sourceCheckCopy.currentHistorical));
+    expect(view.onCheckSources).toHaveBeenCalledTimes(1);
+    const request = view.onCheckSources.mock.calls[0]?.[0];
+    expect(request?.envelopes).toHaveLength(1);
+    expect(request?.envelopes[0]?.scopeDigest).toBe(value.scopeDigest);
+    expect(request?.signal).toBeInstanceOf(AbortSignal);
+    expect(view.onStart).toHaveBeenCalledTimes(1);
+  });
+
+  test("not checked disables the exact-passage control; a checked-current report enables it and announces selection", async () => {
+    const value = await envelope();
+    const view = render(value);
+    await complete();
+    const article = body().getByRole("article", { name: "Reader run request-1" });
+    expect(article.textContent).toContain(sourceStatusCopy.notChecked);
+    expect(article.textContent).toContain("Historical quotation · Source currency not checked — navigation disabled");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    clickEvidence();
+    expect(view.onNavigate).not.toHaveBeenCalled();
+    await checkSources();
+    expect(article.textContent).toContain(sourceStatusCopy.current);
+    expect(article.textContent).toContain("Historical quotation · Current navigation available");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+    clickEvidence();
+    await testing.waitFor(() => expect(statusText()).toBe(citationNavigationCopy.selected));
+    expect(view.onNavigate).toHaveBeenCalledTimes(1);
+    expect(article.querySelector("blockquote")?.textContent).toBe(citation().quote);
+  });
+
+  test("stale and unavailable runs stay historical; a failed check disables navigation and a later exact check clears it", async () => {
+    const value = await envelope();
+    const view = render(value);
+    await complete();
+    view.update({ onCheckSources: async () => checked(value, [{ sourceId: "source-1", status: "stale" }]) });
+    await checkSources();
+    expect(body().getByRole("article").textContent).toContain(staleSourceStatusCopy(1, 1));
+    expect(body().getByRole("article").textContent).toContain("Historical quotation · Stale saved source — navigation disabled");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+
+    view.update({ onCheckSources: async () => ({ kind: "failed" }) });
+    await checkSources();
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.checkFailed);
+    expect(body().getByRole("article").textContent).toContain("Historical quotation · Source currency could not be checked — navigation disabled");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+
+    view.update({ onCheckSources: async () => checked(value) });
+    await checkSources();
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.current);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+
+    view.update({ onCheckSources: async () => checked(value, [{ sourceId: "source-1", status: "missing" }]) });
+    await checkSources();
+    expect(body().getByRole("article").textContent).toContain(unavailableSourceStatusCopy(1, 1));
+    expect(body().getByRole("article").textContent).toContain("Historical quotation · Source unavailable — navigation disabled");
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("two citations with the same captured label get distinct accessible names", async () => {
+    const value = await envelope();
+    const second = { ...citation(), end: selectedStart + 8, quote: "Selected" };
+    const view = render(value, { onStart: async () => ({ kind: "completed", run: await run(value, [citation(), second]) }) });
+    await complete();
+    await checkSources();
+    const buttons = body().getAllByRole("button", { name: /^Show exact passage for finding-1/ });
+    expect(buttons).toHaveLength(2);
+    const names = buttons.map((button) => button.getAttribute("aria-label"));
+    expect(new Set(names).size).toBe(2);
+    expect(names[0]).toContain("evidence 1");
+    expect(names[1]).toContain("evidence 2");
+    expect(view.onNavigate).not.toHaveBeenCalled();
+  });
+
+  test("one results region, one polite status and no Apply, Reject or model chooser", async () => {
+    const value = await envelope();
+    render(value);
+    await complete();
+    expect(body().getAllByRole("region", { name: "Volatile reader results" })).toHaveLength(1);
+    expect(body().getAllByRole("status")).toHaveLength(1);
+    expect(body().queryByRole("button", { name: /^(Apply|Reject|Accept|Ignore)/ })).toBeNull();
+    expect(body().queryByRole("button", { name: /model chooser/i })).toBeNull();
+    expect(document.querySelectorAll("[aria-live]")).toHaveLength(1);
+  });
+
+  test("a failed check keeps a prepared disclosure and its zero-send authority", async () => {
+    const value = await envelope();
+    const view = render(value);
+    await disclose();
+    view.update({ onCheckSources: async () => ({ kind: "failed" }) });
+    click("Check current sources");
+    await testing.waitFor(() => expect(statusText()).toBe(sourceCheckCopy.failedPrepared));
+    expect(body().getByRole("region", { name: "Outgoing review disclosure" })).toBeTruthy();
+    expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy();
+    expect(view.onStart).not.toHaveBeenCalled();
+  });
+
+  test("a host refusal after a click keeps the historical quote and disables only that link", async () => {
+    const value = await envelope();
+    const onNavigate = mock(async (_request: Parameters<ReaderReviewProps["onNavigate"]>[0]) => "unavailable" as const);
+    render(value, { onNavigate });
+    await complete();
+    await checkSources();
+    clickEvidence();
+    await testing.waitFor(() => expect(statusText()).toBe(citationNavigationCopy.unavailable));
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(citation().quote);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(body().getByRole("article").textContent).toContain("Historical quotation · Unavailable — navigation disabled");
+    clickEvidence();
+    expect(onNavigate).toHaveBeenCalledTimes(1);
   });
 });

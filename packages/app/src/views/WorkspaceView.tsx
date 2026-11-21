@@ -48,6 +48,7 @@ import { exportBlockedMessage, exportReceipt, type ManuscriptExportReceipt } fro
 import { runAfterReviewSave } from "../lib/review-save-gate";
 import { analyzeReviewInWorker, verifyRepetitionInWorker } from "../lib/review-worker";
 import { REPETITION_VERSION } from "@ai-book-studio/core/review/repetition";
+import { readerCurrentSources, reviewCitationNavigation, type Citation, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import { mustCompatible, SchemaRefusalError } from "../lib/schema-refusal";
 import { clearEditorHistory } from "../lib/editor-history";
 import { createChapterHistoryApi, type BoundChapterHistoryApi, type ChapterHistoryClient } from "../lib/chapter-history-host";
@@ -68,6 +69,8 @@ export interface ChapterRequest {
   /** Drop unsent text and reload the chapter from disk instead of just selecting it. */
   revert: boolean;
 }
+
+type ReaderNavigationResult = "selected" | "stale" | "unavailable";
 
 /** Open the writing agent on one conversation, as a window reopened after a background turn does. */
 export interface ConversationRequest {
@@ -234,6 +237,7 @@ export function WorkspaceView({
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewView, setReviewView] = useState<ReviewGateView | ReviewRunView>({ kind: "choice" });
   const [evidenceSelection, setEvidenceSelection] = useState<(EditorSelection & { chapterId: string }) | null>(null);
+  const [readerCitationSelection, setReaderCitationSelection] = useState<(EditorSelection & { chapterId: string }) | null>(null);
   const [pendingEvidenceSwitch, setPendingEvidenceSwitch] = useState<{
     origin: EditorHandle;
     visit: NonNullable<ReturnType<EditorHandle["getEvidenceSnapshot"]>>;
@@ -241,6 +245,15 @@ export function WorkspaceView({
     selection: EditorSelection & { chapterId: string };
     unavailable: () => void;
   } | null>(null);
+  const [pendingReaderCitationSwitch, setPendingReaderCitationSwitch] = useState<{
+    origin: EditorHandle;
+    visit: NonNullable<ReturnType<EditorHandle["getEvidenceSnapshot"]>>;
+    chapter: Chapter;
+    selection: EditorSelection & { chapterId: string };
+    settle: (result: ReaderNavigationResult) => void;
+  } | null>(null);
+  const readerNavigationGeneration = useRef(0);
+  const readerNavigation = useRef<{ finish: (result: ReaderNavigationResult) => void } | null>(null);
   const runController = useRef<AbortController | null>(null);
   const reviewGeneration = useRef(0);
   // A navigation supersedes another read, but does not replace the report that owns its pages.
@@ -295,6 +308,7 @@ export function WorkspaceView({
   const historyApi = historyAdapter.current?.api ?? null;
   const committedVisit = useRef({ identity, chapterId: selected?.id ?? null, reloadKey });
   const approvedEvidenceSwitch = useRef<{ identity: string; reloadKey: number; selection: EditorSelection & { chapterId: string } } | null>(null);
+  const readerApprovedSwitch = useRef<{ identity: string; reloadKey: number; selection: EditorSelection & { chapterId: string } } | null>(null);
   const isMac = window.studio.platform === "darwin";
 
   const openSettings = useCallback((next?: SettingsSection) => {
@@ -324,6 +338,12 @@ export function WorkspaceView({
     setReviewView({ kind: "choice" });
     setEvidenceSelection(null);
     setPendingEvidenceSwitch(null);
+    readerNavigationGeneration.current++;
+    readerApprovedSwitch.current = null;
+    setReaderCitationSelection(null);
+    setPendingReaderCitationSwitch(null);
+    readerNavigation.current?.finish("unavailable");
+    readerNavigation.current = null;
     return () => {
       reviewGeneration.current++;
       reportLifetime.current++;
@@ -331,6 +351,13 @@ export function WorkspaceView({
       runController.current = null;
     };
   }, [bookId, libraryRoot]);
+
+  const settleReaderNavigation = useCallback((result: ReaderNavigationResult) => {
+    readerNavigationGeneration.current++;
+    const pending = readerNavigation.current;
+    readerNavigation.current = null;
+    pending?.finish(result);
+  }, []);
 
   const invalidateReview = useCallback((keepReportLifetime = false) => {
     reviewGeneration.current++;
@@ -347,7 +374,11 @@ export function WorkspaceView({
     approvedEvidenceSwitch.current = null;
     setEvidenceSelection(null);
     setPendingEvidenceSwitch(null);
-  }, []);
+    readerApprovedSwitch.current = null;
+    setReaderCitationSelection(null);
+    setPendingReaderCitationSwitch(null);
+    settleReaderNavigation("unavailable");
+  }, [settleReaderNavigation]);
 
   // A queued React update may wait after the read. Recheck the still-mounted origin in a layout
   // effect and schedule the switch from there: React commits layout-effect updates before paint,
@@ -368,6 +399,25 @@ export function WorkspaceView({
     setEvidenceSelection(selection);
   }, [pendingEvidenceSwitch, detail, identity, reloadKey]);
 
+  // The reader-citation chapter switch follows the same layout-effect pattern as 034 evidence. It
+  // never writes; the newly mounted editor applies the exact selection and reports its own result.
+  useLayoutEffect(() => {
+    if (!pendingReaderCitationSwitch) return;
+    const { origin, visit, chapter, selection, settle } = pendingReaderCitationSwitch;
+    setPendingReaderCitationSwitch(null);
+    if (!selection.isCurrent()) { settle("unavailable"); return; }
+    if (editorRef.current !== origin || !origin.isEvidenceCurrent(visit)) { settle("stale"); return; }
+    if (detailIdentity.current !== identity || !detail?.chapters.some((item) => item.id === chapter.id)) {
+      settle("unavailable");
+      return;
+    }
+    readerApprovedSwitch.current = { identity, reloadKey, selection };
+    setEvidenceSelection(null);
+    setDetail({ ...detail, chapters: detail.chapters.map((item) => item.id === chapter.id ? chapter : item) });
+    setSelectedId(chapter.id);
+    setReaderCitationSelection(selection);
+  }, [pendingReaderCitationSwitch, detail, identity, reloadKey]);
+
   // A chapter/reload action can itself await a save or read. Invalidate again when its visit
   // actually changes, even if a newer report read began while that earlier action was waiting.
   // The guarded evidence switch above is the sole transition that carries its own selection on.
@@ -377,16 +427,28 @@ export function WorkspaceView({
     if (previous.identity === identity && previous.chapterId === chapterId && previous.reloadKey === reloadKey) return;
     committedVisit.current = { identity, chapterId, reloadKey };
     const approved = approvedEvidenceSwitch.current;
+    const readerApproved = readerApprovedSwitch.current;
     approvedEvidenceSwitch.current = null;
+    readerApprovedSwitch.current = null;
     if (approved && approved.identity === identity && approved.reloadKey === reloadKey &&
         approved.selection === evidenceSelection && approved.selection.chapterId === chapterId && approved.selection.isCurrent()) return;
+    if (readerApproved && readerApproved.identity === identity && readerApproved.reloadKey === reloadKey &&
+        readerApproved.selection === readerCitationSelection && readerApproved.selection.chapterId === chapterId &&
+        readerApproved.selection.isCurrent()) {
+      setEvidenceSelection(null);
+      return;
+    }
     invalidateReview();
-  }, [identity, selected?.id, reloadKey, evidenceSelection, invalidateReview]);
+  }, [identity, selected?.id, reloadKey, evidenceSelection, readerCitationSelection, invalidateReview]);
 
   useEffect(() => {
     // New keystrokes supersede a highlighted evidence span.
-    if (status.kind === "dirty") setEvidenceSelection(null);
-  }, [status]);
+    if (status.kind === "dirty") {
+      setEvidenceSelection(null);
+      setReaderCitationSelection(null);
+      settleReaderNavigation("unavailable");
+    }
+  }, [status, settleReaderNavigation]);
 
   const load = useCallback(
     async (preferId?: string): Promise<BookDetail | null> => {
@@ -1130,6 +1192,90 @@ export function WorkspaceView({
     [reviewView, bookId, libraryRoot, onNotice, invalidateReview]
   );
 
+  /**
+   * Spec 039 T004: re-read the exact saved chapter, compare the checked current source, then select
+   * only the citation's exact current UTF-16 span through the existing editor seam. No write, flush,
+   * save, provider retry or provider start is reachable here.
+   */
+  const navigateToReaderEvidence = useCallback(
+    async ({ run, citation, signal }: { run: ReaderRun; citation: Citation; signal: AbortSignal }): Promise<ReaderNavigationResult> => {
+      if (signal.aborted) return "unavailable";
+      const generation = ++readerNavigationGeneration.current;
+      let done = false;
+      let resolve!: (result: ReaderNavigationResult) => void;
+      let abort: (() => void) | null = null;
+      const outcome = new Promise<ReaderNavigationResult>((yes) => { resolve = yes; });
+      const finish = (result: ReaderNavigationResult) => {
+        if (done) return;
+        done = true;
+        if (abort) signal.removeEventListener("abort", abort);
+        if (readerNavigation.current?.finish === finish) readerNavigation.current = null;
+        resolve(result);
+      };
+      readerNavigation.current = { finish };
+      abort = () => {
+        if (generation !== readerNavigationGeneration.current) return;
+        setReaderCitationSelection(null);
+        setPendingReaderCitationSwitch((current) => current?.settle === finish ? null : current);
+        finish("unavailable");
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+      const isCurrent = () => !signal.aborted && generation === readerNavigationGeneration.current &&
+        shownBookId.current === bookId && shownLibraryRoot.current === libraryRoot;
+      setEvidenceSelection(null);
+      setPendingEvidenceSwitch(null);
+      approvedEvidenceSwitch.current = null;
+      const origin = editorRef.current;
+      const visit = origin?.getEvidenceSnapshot();
+      if (!origin) { finish("unavailable"); return outcome; }
+      if (!visit) { finish("stale"); return outcome; }
+      try {
+        const fresh = await must(window.studio.books.open(bookId));
+        if (!isCurrent()) { finish("unavailable"); return outcome; }
+        const sources = readerCurrentSources(run.envelope, fresh, new Date().toISOString());
+        const navigation = reviewCitationNavigation(run.envelope, citation, sources);
+        if (navigation.status === "stale") { finish("stale"); return outcome; }
+        if (navigation.status !== "ready") { finish("unavailable"); return outcome; }
+        if (citation.kind !== "chapter") { finish("unavailable"); return outcome; }
+        const chapter = fresh.chapters.find((item) => item.id === citation.identity.chapterId);
+        if (!chapter) { finish("unavailable"); return outcome; }
+        if (chapter.version !== citation.identity.version || chapter.hash !== citation.identity.hash ||
+            chapter.content.slice(citation.start, citation.end) !== citation.quote) {
+          finish("stale");
+          return outcome;
+        }
+        if (editorRef.current !== origin || !origin.isEvidenceCurrent(visit)) { finish("stale"); return outcome; }
+        const sameChapter = visit.chapterId === chapter.id;
+        const selection: EditorSelection & { chapterId: string } = {
+          chapterId: chapter.id,
+          start: citation.start,
+          end: citation.end,
+          source: { libraryId: libraryRoot, bookId, chapterId: chapter.id, version: chapter.version,
+            rawHash: chapter.hash, savedBody: chapter.content },
+          ...(sameChapter ? { visit } : {}),
+          isCurrent,
+          onResult: (applied) => {
+            if (!isCurrent()) {
+              setReaderCitationSelection((current) => current === selection ? null : current);
+              finish("unavailable");
+              return;
+            }
+            setReaderCitationSelection(null);
+            finish(applied ? "selected" : "stale");
+          }
+        };
+        if (sameChapter) setReaderCitationSelection(selection);
+        else setPendingReaderCitationSwitch({ origin, visit, chapter, selection, settle: finish });
+        return outcome;
+      } catch {
+        finish("unavailable");
+        return outcome;
+      }
+    },
+    [bookId, libraryRoot]
+  );
+
   const onSaved = useCallback((saved: Chapter) => {
     noteHistoryTransition();
     setDetail((current) =>
@@ -1400,7 +1546,7 @@ export function WorkspaceView({
         ) : null}
 
         <section className="thin-scroll min-w-0 flex-1 overflow-y-auto">
-          <ReaderReviewHost bookId={bookId} />
+          <ReaderReviewHost bookId={bookId} onNavigate={navigateToReaderEvidence} />
           <SavedReviewsPanel bookId={bookId} libraryKey={libraryRoot} api={window.studio.reviewRecords} />
           {detail?.book.id === bookId && <PlanningPanel bookId={bookId} bookTitle={detail.book.title}
             api={window.studio.planning} navigation={navigation}
@@ -1510,9 +1656,11 @@ export function WorkspaceView({
               illustrationData={illustrationData}
               voiceStatusRevision={voiceStatusRevision}
               selection={
-                evidenceSelection && evidenceSelection.chapterId === selected.id
-                  ? evidenceSelection
-                  : null
+                readerCitationSelection && readerCitationSelection.chapterId === selected.id
+                  ? readerCitationSelection
+                  : evidenceSelection && evidenceSelection.chapterId === selected.id
+                    ? evidenceSelection
+                    : null
               }
             />
           ) : (

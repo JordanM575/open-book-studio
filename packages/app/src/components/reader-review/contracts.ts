@@ -37,7 +37,6 @@ export interface ReaderReviewProps {
   supported: boolean;
   /** True when the host has no explicit selection or another host operation owns the surface. */
   prepareDisabled?: boolean;
-  currentSources: readonly CurrentSource[];
   editor?: { clean: boolean; identity: SavedIdentity };
   /** No provider call or durable write. Resolve only the host's explicitly selected saved scope. */
   onPrepare(input: { bookId: string; signal: AbortSignal; previousRunId: string | null }): Promise<PreparationOutcome>;
@@ -47,7 +46,50 @@ export interface ReaderReviewProps {
   onStop(input: { requestId: string | null }): Promise<ReaderReviewStopResult> | ReaderReviewStopResult;
   /** Revalidate exact source AND actual clean editor immediately before selecting; no fuzzy search. */
   onNavigate(input: { run: ReaderRun; citation: Citation; signal: AbortSignal }): Promise<"selected" | "stale" | "unavailable">;
+  /**
+   * One explicit, read-only comparison for the prepared envelope and completed runs. Never called
+   * automatically and never a provider call. The map is keyed by `scopeDigest`.
+   */
+  onCheckSources?(input: { envelopes: readonly ReviewEnvelope[]; signal: AbortSignal }): Promise<ReaderSourceCheck> | ReaderSourceCheck;
   onClose(): void;
+}
+
+/** Renderer-only, per-scope current sources or one failed comparison. No durable state. */
+export type ReaderCurrentSourcesByScope = ReadonlyMap<string, readonly CurrentSource[]>;
+export type ReaderSourceCheck =
+  | { readonly kind: "checked"; readonly byScopeDigest: ReaderCurrentSourcesByScope }
+  | { readonly kind: "failed" };
+
+export const revalidationFailureCopy = "The review result could not be revalidated here. No result was added to this view. The review is incomplete; prepare a new request to try again.";
+
+export const sourceCheckCopy = {
+  checking: "Checking the saved sources · No provider request.",
+  currentPrepared: "Saved sources checked · Current. The disclosure is unchanged; Start revalidates before sending.",
+  currentHistorical: "Saved sources checked · Current. Historical quotations remain historical.",
+  staleOrUnavailable: "Saved sources checked · Stale or unavailable. Historical quotations remain; navigation is disabled.",
+  failedPrepared: "The saved sources could not be checked. The disclosure is unchanged; Start revalidates before sending. No additional provider request started.",
+  failedHistorical: "The saved sources could not be checked. The report remains historical; no additional provider request started."
+} as const;
+
+export const citationNavigationCopy = {
+  checking: "Checking the current source and editor before showing the exact passage…",
+  selected: "The host confirmed the exact current passage was selected.",
+  stale: "The passage is stale or the editor is not ready. Its historical quotation remains here; no replacement passage was selected. Save or finish editing, then check current sources.",
+  unavailable: "The passage is unavailable. Its historical quotation remains here; no replacement passage was selected.",
+  failed: "The passage could not be opened. Its historical quotation remains here. Try again after checking the source."
+} as const;
+
+export const sourceStatusCopy = {
+  notChecked: "Source status: Not checked · Check current sources before navigating. Historical quotations remain.",
+  checkFailed: "Source status: Check failed · The saved sources could not be compared. Historical quotations remain; navigation is disabled.",
+  current: "Source status: Current at the last check · Interpretations are subjective. Source changes after that check are not watched; check again before navigating."
+} as const;
+
+export function staleSourceStatusCopy(stale: number, total: number): string {
+  return `Source status: Stale at the last check (${stale} of ${total}) · This report is historical. Quotations remain; navigation is disabled for changed sources.`;
+}
+export function unavailableSourceStatusCopy(unavailable: number, total: number): string {
+  return `Source status: Unavailable at the last check (${unavailable} of ${total}) · This report is historical. Quotations remain; navigation is disabled.`;
 }
 
 export const refusalCopy: Record<ReviewRefusal, string> = {
