@@ -212,5 +212,48 @@ Success focuses the editor; refusal leaves focus on the panel status, keeps the 
 disables that link for the session. The results leaf remains one region with one polite status, one
 article per run, unique accessible evidence names and no Apply/Reject or model chooser.
 
-T004 remains unchecked pending independent exact-head review and merge. T005–T006, T008–T009 and
+T004's review and merge are recorded in the package changelog. T005–T006, T008–T009 and
 T010–T019 remain separate work.
+
+## Volatile attempt history and explicit rerun comparison (039 T005)
+
+Every Start outcome now lands in an in-memory, append-only attempt list for the open review view —
+completed runs, failed provider outcomes, author-stopped attempts, results that failed
+revalidation and unknown IPC outcomes after Start. Attempts are ordered oldest first, are never
+edited, re-ordered or evicted, and are discarded only by Close, a book/view change or unmount. At 8
+attempts — completed or not — `Prepare review` / `Prepare rerun` is disabled locally, a cap note is
+linked with `aria-describedby`, and no ninth attempt is created; nothing overwrites earlier results.
+A stopped attempt recorded at stop time stays visible even though the late Start resolution is
+ignored.
+
+Completed attempts keep the historical article (attribution, scoped quote evidence, Save when
+injected). Non-completed attempts render as `Reader attempt {id}` sections — never articles — with
+the prepared envelope, profile attribution, provider/model/connection facts, the captured scope, the
+exact-attribution disclosure and one line saying no findings were retained. No Save control, no
+navigation, no findings.
+
+Each attempt carries the accepted prepared disclosure: the complete frozen profile (id, origin,
+version, digest, name, purpose, focus, guidance), destination facts (provider, model id, connection
+id and the renderer-only connection label), the selected sources with saved versions and capture
+times, the prompt, prior feedback, consent/terms facts and the request id. The connection label
+comes from the accepted preparation display facts; it is never written into the envelope, the
+request, the saved report or any thread. A later profile edit never rewrites an earlier attempt; the
+new attempt simply carries the new snapshot.
+
+`compareReaderRuns` (core) now classifies two completed runs: `identical-input`, `changed-source`,
+`changed-profile`, `changed-destination`, `changed-request`, `multiple-changes` or `not-comparable`,
+with per-facet booleans and a `changedFacets` list. Source changes are matched by stable identity
+(chapter id / Story Bible field), never by request-local source id or capture time, and are
+reported as added, removed, revision (saved version transition), content (same-version hash change),
+selection or label changes — with labels only, never raw hashes. Profile comparison distinguishes an
+edit (same id, higher version), a fork (new id) and a bare digest change. Counts are exact returned
+findings only: observations/questions/contradictions, by-category counts, verified vs withheld
+quotations and insufficient/incomplete-evidence findings. There is no score, rank, improvement
+claim, cross-run finding identity or disposition carry-over; same-input variation is labelled
+model variation; `not-comparable` shows no delta at all. The comparison needs two completed runs and
+is a pure render with no provider call, no write and no new focus stop; capability/catalog fact
+changes are not treated as destination changes, and a title-only book change is not a policy change.
+
+The legacy `runs` prop on `ReaderReviewResults` renders the completed-run list exactly as before for
+the saved-review path, with no comparison region; `attempts` is the panel path. T005 remains
+unchecked pending independent review and merge. T006, T008–T009 and T010–T019 remain separate work.

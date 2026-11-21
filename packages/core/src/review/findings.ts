@@ -5,9 +5,11 @@ import {
   REVIEW_LIMITS, timestampSchema, validSpan, type Immutable
 } from "./contract";
 import {
-  reviewDisclosure, sourceComparisonKey, sourceCurrency, validateReviewEnvelope, type CurrentSource, type ReviewEnvelope
+  reviewDisclosure, reviewResourceUsage, sourceComparisonKey, sourceCurrency, validateReviewEnvelope,
+  type CurrentSource, type ReviewEnvelope, type ReviewResourceUsage
 } from "./envelope";
 import { captureChapterSource, sameSavedIdentity, savedEditorSchema, type ChapterSource, type ReviewSource, type SavedIdentity } from "./sources";
+import type { categorySchema } from "./profiles";
 import { citationSchema, findingsOutputSchema } from "./wire-schema";
 
 export type Citation = Immutable<z.infer<typeof citationSchema>>;
@@ -238,14 +240,290 @@ export function reviewCitationNavigation(envelope: ReviewEnvelope, citation: unk
   return { status: "ready", evidence: result.evidence };
 }
 
-export function compareReaderRuns(before: ReaderRun, after: ReaderRun) {
-  const sourceChanged = canonicalJson(before.envelope.sources.map(sourceComparisonKey)) !== canonicalJson(after.envelope.sources.map(sourceComparisonKey));
-  const profileChanged = canonicalJson(before.envelope.profile) !== canonicalJson(after.envelope.profile);
-  const destinationChanged = canonicalJson(before.envelope.destination) !== canonicalJson(after.envelope.destination);
-  const promptOrFeedbackChanged = canonicalJson([before.envelope.prompt, before.envelope.priorFeedback]) !== canonicalJson([after.envelope.prompt, after.envelope.priorFeedback]);
-  const interpretations = (run: ReaderRun) => run.findings.map((finding) => ({ category: finding.category, claim: finding.claim,
-    interpretation: finding.interpretation }));
-  const interpretationChanged = canonicalJson(interpretations(before)) !== canonicalJson(interpretations(after));
-  return freeze({ sourceChanged, profileChanged, destinationChanged, promptOrFeedbackChanged, interpretationChanged,
-    modelVariation: interpretationChanged && !sourceChanged && !profileChanged && !destinationChanged && !promptOrFeedbackChanged });
+export type ReaderRunFacet = "sources" | "profile" | "destination" | "request";
+export type ReaderRerunKind =
+  | "identical-input"
+  | "changed-source"
+  | "changed-profile"
+  | "changed-destination"
+  | "changed-request"
+  | "multiple-changes"
+  | "not-comparable";
+export type ReaderCategory = z.infer<typeof categorySchema>;
+
+export interface ReaderSourceChange {
+  readonly kind: "added" | "removed" | "revision" | "content" | "selection" | "label";
+  /** Display label only; never a source id, hash or capture time. */
+  readonly label: string;
+  readonly fromVersion: number | null;
+  readonly toVersion: number | null;
+  readonly hashChanged: boolean;
+}
+export interface ReaderProfileComparison {
+  readonly changed: boolean;
+  readonly sameId: boolean;
+  readonly versionChanged: boolean;
+  readonly digestChanged: boolean;
+  readonly from: { readonly id: string; readonly origin: "builtin" | "author"; readonly version: number; readonly name: string };
+  readonly to: { readonly id: string; readonly origin: "builtin" | "author"; readonly version: number; readonly name: string };
+}
+export interface ReaderDestinationComparison {
+  readonly changed: boolean;
+  readonly connectionChanged: boolean;
+  readonly providerChanged: boolean;
+  readonly modelChanged: boolean;
+  readonly endpointChanged: boolean;
+}
+export interface ReaderRequestComparison {
+  readonly changed: boolean;
+  readonly promptChanged: boolean;
+  readonly priorFeedbackChanged: boolean;
+  readonly bookPolicyChanged: boolean;
+  readonly scopeCountsChanged: boolean;
+  readonly before: ReviewResourceUsage;
+  readonly after: ReviewResourceUsage;
+}
+export interface ReaderFindingCounts {
+  readonly total: number;
+  readonly observations: number;
+  readonly questions: number;
+  readonly contradictions: number;
+  readonly byCategory: Readonly<Record<ReaderCategory, number>>;
+  readonly verifiedEvidence: number;
+  readonly withheldEvidence: number;
+  readonly insufficientFindings: number;
+  readonly incompleteEvidenceFindings: number;
+}
+export type ReaderRerunComparison =
+  | { readonly status: "not-comparable"; readonly reason: "invalid-run" | "invalid-envelope" | "invalid-profile" }
+  | {
+      readonly status: "comparable";
+      readonly kind: Exclude<ReaderRerunKind, "not-comparable">;
+      readonly changedFacets: readonly ReaderRunFacet[];
+      readonly sourceChanged: boolean;
+      readonly profileChanged: boolean;
+      readonly destinationChanged: boolean;
+      readonly promptOrFeedbackChanged: boolean;
+      readonly interpretationChanged: boolean;
+      readonly evidenceChanged: boolean;
+      readonly modelVariation: boolean;
+      readonly partial: boolean;
+      readonly sources: readonly ReaderSourceChange[];
+      readonly profile: ReaderProfileComparison;
+      readonly destination: ReaderDestinationComparison;
+      readonly request: ReaderRequestComparison;
+      readonly before: ReaderFindingCounts;
+      readonly after: ReaderFindingCounts;
+    };
+
+function readerCategoryCounts(): Record<ReaderCategory, number> {
+  return { "reader-impression": 0, clarity: 0, pacing: 0, "character-motivation": 0, continuity: 0 };
+}
+
+function findingCounts(run: ReaderRun): ReaderFindingCounts {
+  const byCategory = readerCategoryCounts();
+  let observations = 0, questions = 0, contradictions = 0, verified = 0, withheld = 0, insufficient = 0, incomplete = 0;
+  for (const finding of run.findings) {
+    if (Object.hasOwn(byCategory, finding.category)) {
+      byCategory[finding.category as ReaderCategory] += 1;
+    }
+    if (finding.claim === "observation") observations += 1;
+    else if (finding.claim === "question") questions += 1;
+    else if (finding.claim === "contradiction") contradictions += 1;
+    verified += finding.evidence.length;
+    withheld += finding.invalidEvidence.length;
+    if (finding.evidenceState === "insufficient-evidence") insufficient += 1;
+    else if (finding.evidenceState === "incomplete-evidence") incomplete += 1;
+  }
+  return freeze({
+    total: run.findings.length, observations, questions, contradictions, byCategory: freeze(byCategory),
+    verifiedEvidence: verified, withheldEvidence: withheld,
+    insufficientFindings: insufficient, incompleteEvidenceFindings: incomplete
+  });
+}
+
+function sortedCanonical(values: readonly string[]): string {
+  return canonicalJson([...values].sort());
+}
+
+function interpretationKey(run: ReaderRun): string {
+  return sortedCanonical(run.findings.map((finding) =>
+    canonicalJson({ category: finding.category, claim: finding.claim, interpretation: finding.interpretation })));
+}
+
+function evidenceKey(citation: Citation): string {
+  return canonicalJson(citation.kind === "chapter"
+    ? { kind: citation.kind, bookId: citation.identity.bookId, chapterId: citation.identity.chapterId,
+        start: citation.start, end: citation.end, quote: citation.quote }
+    : { kind: citation.kind, bookId: citation.bookId, field: citation.field,
+        start: citation.start, end: citation.end, quote: citation.quote });
+}
+
+function evidenceKeySet(run: ReaderRun): string {
+  return sortedCanonical(run.findings.flatMap((finding) => finding.evidence.map((entry) => evidenceKey(entry.citation))));
+}
+
+/** Stable identity of a source, ignoring request-local ids and capture time. */
+export function sourceChangeKey(source: ReviewSource): string {
+  return source.kind === "chapter"
+    ? `chapter:${source.identity.bookId}:${source.identity.chapterId}`
+    : `story-bible:${source.bookId}:${canonicalJson(source.field)}`;
+}
+
+function sourceLabel(source: ReviewSource): string {
+  return source.kind === "chapter"
+    ? `${source.bookTitle} · Chapter ${source.position}: ${source.title}`
+    : `${source.bookTitle} · Story Bible · ${source.label}`;
+}
+
+function sourceChanges(before: readonly ReviewSource[], after: readonly ReviewSource[]): ReaderSourceChange[] {
+  const beforeByKey = new Map(before.map((source) => [sourceChangeKey(source), source]));
+  const afterByKey = new Map(after.map((source) => [sourceChangeKey(source), source]));
+  const changes: ReaderSourceChange[] = [];
+  for (const [key, source] of beforeByKey) {
+    const next = afterByKey.get(key);
+    if (!next) {
+      changes.push({ kind: "removed", label: sourceLabel(source),
+        fromVersion: source.kind === "chapter" ? source.identity.version : null, toVersion: null, hashChanged: false });
+    } else if (source.kind === "chapter" && next.kind === "chapter") {
+      const label = sourceLabel(next);
+      if (source.identity.version !== next.identity.version) {
+        changes.push({ kind: "revision", label, fromVersion: source.identity.version, toVersion: next.identity.version,
+          hashChanged: source.identity.hash !== next.identity.hash });
+      } else if (source.identity.hash !== next.identity.hash) {
+        changes.push({ kind: "content", label, fromVersion: next.identity.version, toVersion: next.identity.version, hashChanged: true });
+      } else if (canonicalJson(source.segments) !== canonicalJson(next.segments)) {
+        changes.push({ kind: "selection", label, fromVersion: next.identity.version, toVersion: next.identity.version, hashChanged: false });
+      } else if (source.bookTitle !== next.bookTitle || source.title !== next.title || source.position !== next.position) {
+        changes.push({ kind: "label", label, fromVersion: next.identity.version, toVersion: next.identity.version, hashChanged: false });
+      }
+    } else if (source.kind === "story-bible" && next.kind === "story-bible") {
+      const label = sourceLabel(next);
+      if (source.valueDigest !== next.valueDigest || source.containingFileHash !== next.containingFileHash || source.text !== next.text) {
+        changes.push({ kind: "content", label, fromVersion: null, toVersion: null,
+          hashChanged: source.valueDigest !== next.valueDigest || source.containingFileHash !== next.containingFileHash });
+      } else if (source.bookTitle !== next.bookTitle || source.label !== next.label) {
+        changes.push({ kind: "label", label, fromVersion: null, toVersion: null, hashChanged: false });
+      }
+    }
+  }
+  for (const [key, source] of afterByKey) {
+    if (!beforeByKey.has(key)) {
+      changes.push({ kind: "added", label: sourceLabel(source),
+        fromVersion: null, toVersion: source.kind === "chapter" ? source.identity.version : null, hashChanged: false });
+    }
+  }
+  return changes;
+}
+
+function profileComparison(before: ReaderRun, after: ReaderRun): ReaderProfileComparison {
+  const from = before.envelope.profile;
+  const to = after.envelope.profile;
+  const shape = (profile: NonNullable<ReaderRun["envelope"]["profile"]>) =>
+    ({ id: profile.id, origin: profile.origin, version: profile.version, name: profile.name });
+  const changed = canonicalJson(from) !== canonicalJson(to);
+  return freeze({
+    changed, sameId: from?.id === to?.id, versionChanged: from?.version !== to?.version,
+    digestChanged: from?.digest !== to?.digest,
+    from: from ? freeze(shape(from)) : freeze({ id: "unknown", origin: "builtin", version: 0, name: "Unknown profile" }),
+    to: to ? freeze(shape(to)) : freeze({ id: "unknown", origin: "builtin", version: 0, name: "Unknown profile" })
+  });
+}
+
+function requestComparison(before: ReaderRun, after: ReaderRun): ReaderRequestComparison {
+  const promptChanged = before.envelope.prompt !== after.envelope.prompt;
+  const priorFeedbackChanged = canonicalJson(before.envelope.priorFeedback) !== canonicalJson(after.envelope.priorFeedback);
+  const policy = (books: ReviewEnvelope["books"]) => books.map((book) => ({
+    bookId: book.bookId, consentSatisfied: book.consentSatisfied, consentRevision: book.consentRevision,
+    termsRevision: book.termsRevision, enabledTools: book.enabledTools
+  }));
+  const bookPolicyChanged = canonicalJson(policy(before.envelope.books)) !== canonicalJson(policy(after.envelope.books));
+  const beforeUsage = reviewResourceUsage(before.envelope);
+  const afterUsage = reviewResourceUsage(after.envelope);
+  const scopeCounts = (usage: ReviewResourceUsage) =>
+    ({ books: usage.books, items: usage.items, sourceBytes: usage.sourceBytes, combinedBytes: usage.combinedBytes, requestBytes: usage.requestBytes });
+  const scopeCountsChanged = canonicalJson(scopeCounts(beforeUsage)) !== canonicalJson(scopeCounts(afterUsage));
+  return freeze({
+    changed: promptChanged || priorFeedbackChanged || bookPolicyChanged,
+    promptChanged, priorFeedbackChanged, bookPolicyChanged, scopeCountsChanged,
+    before: beforeUsage, after: afterUsage
+  });
+}
+
+function validateRun(run: ReaderRun): "invalid-run" | "invalid-envelope" | "invalid-profile" | null {
+  if (!isReviewData(run)) return "invalid-run";
+  if (run.kind !== "reader-review") return "invalid-run";
+  let envelope: ReviewEnvelope;
+  try { envelope = reviewDisclosure(run.envelope); } catch { return "invalid-envelope"; }
+  if (envelope.kind !== "reader-review") return "invalid-envelope";
+  if (!envelope.profile) return "invalid-profile";
+  if (run.runId !== envelope.requestId) return "invalid-run";
+  if (!Array.isArray(run.findings)) return "invalid-run";
+  for (const finding of run.findings) {
+    if (!isReviewData(finding)) return "invalid-run";
+    if (!Array.isArray(finding.evidence) || !Array.isArray(finding.invalidEvidence)) return "invalid-run";
+  }
+  return null;
+}
+
+/**
+ * Descriptive comparison of the latest two completed runs: which input facts changed and how the
+ * returned findings differ. It never reports improvement, causation, coverage or quality. A
+ * validation failure returns `not-comparable` with no counts.
+ */
+export function compareReaderRuns(before: ReaderRun, after: ReaderRun): ReaderRerunComparison {
+  const invalid = validateRun(before) ?? validateRun(after);
+  if (invalid) return freeze({ status: "not-comparable", reason: invalid });
+  const sourceChangesFound = sourceChanges(before.envelope.sources, after.envelope.sources);
+  const sourceChanged = sourceChangesFound.length > 0;
+  const profile = profileComparison(before, after);
+  const destinationBefore = before.envelope.destination;
+  const destinationAfter = after.envelope.destination;
+  const destination: ReaderDestinationComparison = freeze({
+    connectionChanged: destinationBefore.connectionId !== destinationAfter.connectionId,
+    providerChanged: destinationBefore.provider !== destinationAfter.provider,
+    modelChanged: destinationBefore.model !== destinationAfter.model,
+    endpointChanged: destinationBefore.endpointIdentity !== destinationAfter.endpointIdentity,
+    changed: false
+  });
+  const destinationChanged = destination.connectionChanged || destination.providerChanged || destination.modelChanged || destination.endpointChanged;
+  const destinationFinal = freeze({ ...destination, changed: destinationChanged });
+  const request = requestComparison(before, after);
+  const changedFacets: ReaderRunFacet[] = [];
+  if (sourceChanged) changedFacets.push("sources");
+  if (profile.changed) changedFacets.push("profile");
+  if (destinationChanged) changedFacets.push("destination");
+  if (request.changed) changedFacets.push("request");
+  const kind: Exclude<ReaderRerunKind, "not-comparable"> =
+    changedFacets.length === 0 ? "identical-input"
+      : changedFacets.length > 1 ? "multiple-changes"
+        : changedFacets[0] === "sources" ? "changed-source"
+          : changedFacets[0] === "profile" ? "changed-profile"
+            : changedFacets[0] === "destination" ? "changed-destination" : "changed-request";
+  const interpretationChanged = interpretationKey(before) !== interpretationKey(after);
+  const evidenceChanged = evidenceKeySet(before) !== evidenceKeySet(after);
+  const promptOrFeedbackChanged = request.promptChanged || request.priorFeedbackChanged;
+  const beforeCounts = findingCounts(before);
+  const afterCounts = findingCounts(after);
+  const partial = [...before.findings, ...after.findings].some((finding) =>
+    finding.invalidEvidence.length > 0 || finding.evidenceState !== "complete");
+  return freeze({
+    status: "comparable",
+    kind,
+    changedFacets: freeze(changedFacets),
+    sourceChanged,
+    profileChanged: profile.changed,
+    destinationChanged,
+    promptOrFeedbackChanged,
+    interpretationChanged,
+    evidenceChanged,
+    modelVariation: changedFacets.length === 0 && (interpretationChanged || evidenceChanged),
+    partial,
+    sources: freeze(sourceChangesFound),
+    profile,
+    destination: destinationFinal,
+    request,
+    before: beforeCounts,
+    after: afterCounts
+  });
 }
