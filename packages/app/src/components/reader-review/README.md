@@ -25,10 +25,13 @@ callback types. Core imports use the `review/*` leaf exports.
   disables Save. The button preserves the volatile result on refusal/conflict/failure, displays
   verified conflict-copy paths, and disables another save after an uncertain receipt until the
   author has inspected saved records. A confirmed repeated save uses the existing immutable writer.
-- `currentSources`, `editor`: host-supplied current saved snapshots and actual editor identity/
-  cleanliness. Missing, malformed, ambiguous or changed evidence cannot enable exact navigation.
-  Publish new facts when sources/editor state change. An unavailable prepared source clears its
-  disclosure instead of reviving authorization if the old source later returns.
+- `onCheckSources({ envelopes, signal })`, `editor`: the optional callback performs one explicit,
+  read-only saved-source comparison for the prepared envelope and completed runs and returns a
+  per-`scopeDigest` map or `failed`. It is never called on mount, prepare, completion, rerender or
+  focus. `editor` is the optional actual clean editor descriptor for a precheck; the Workspace
+  deliberately omits it and refuses a dirty or unmounted editor at click time. Missing, malformed,
+  ambiguous or changed evidence cannot enable exact navigation. A stale or unavailable prepared
+  source clears that disclosure instead of reviving authorization if the old source later returns.
 
 Navigation passes editor facts untouched to the descriptor-first core verifier; it never reads
 `clean` to decide whether to validate. Malformed accessors are refused without application getter
@@ -167,5 +170,47 @@ source, destination, consent or digest returns blocked with zero sends. No repor
 conversation, campaign, checkpoint or manuscript writer is reachable from this path.
 
 Browser and other unsupported hosts expose `unsupportedReaderReviewApi`: support is false and every
-operation refuses before a private read. T004–T006, T008–T009 and T010–T019 remain separate work;
-039 T003 stays unchecked until independent exact-head review and merge.
+operation refuses before a private read.
+
+## Schema, exact citations and navigation (039 T004)
+
+A reader-review provider request keeps the fixed review policy, appends the exact textual response
+policy and the canonical requested-findings JSON Schema inside the **same system message** that is
+sent, and serializes `tools: []` on the wire. The one AI SDK call receives the same two messages,
+`tools: {}`, `maxRetries: 0` and the abort signal, with no `output`/structured-output step, tool
+loop, repair callback, fallback, model change or second completion. Guided review keeps its existing
+wire shape and `{ "type": "string" }` response contract.
+
+Provider output is parsed once against the strict findings schema and the 262,144 UTF-8 byte bound.
+A non-string, invalid JSON, fence/trailing prose, missing or extra field, unsupported category,
+attribution mismatch, duplicate/over-count finding, over-limit interpretation or over-limit quote
+becomes an incomplete `failed` run with no run displayed. Invalid individual citations are withheld
+and counted; their quote text is never rendered. `acceptRun` rebuilds the display result from the
+disclosed envelope, and its refusal shows `revalidationFailureCopy` without adding a run.
+
+Evidence remains an exact captured UTF-16 span: book/chapter identity, saved version, raw-file
+SHA-256, selected-range containment, scalar-safe integer endpoints and literal captured substring
+equality. There is no normalization, whitespace folding, fuzzy lookup, quote search or nearest-match
+relocation. `readerCurrentSources` compares a fresh saved read with the captured source and returns
+available/stale/missing/ambiguous without throwing into the renderer. `readerSourceState` counts
+one envelope's sources. Story Bible evidence stays readable but has no editor navigation in this
+slice.
+
+`Check current sources` is the only currency action. It performs one read-only `BookDetail` read for
+the prepared envelope and completed runs, returns a per-`scopeDigest` map, and never starts or
+retries a provider, watches files, writes a report or changes manuscript bytes. A report is
+"Not checked" until that action; a failed check is shown as failed and disables navigation. Stale,
+missing and unavailable sources keep the historical quote and label while their exact-passage control
+stays disabled. A restored exact source may become current again through another explicit check.
+
+`Show exact passage` re-reads the exact saved chapter through the existing `books.open` path, checks
+the current source and the actual clean editor origin, then selects only the citation's exact
+current span through the existing `ManuscriptEditor` evidence seam. It never flushes, saves, writes,
+calls a provider, retries or invents a replacement passage. Same-chapter and pending-chapter-switch
+paths share the 034 layout-effect guard; only a confirmed editor selection resolves `selected`.
+Success focuses the editor; refusal leaves focus on the panel status, keeps the historical quote and
+disables that link for the session. The results leaf remains one region with one polite status, one
+article per run, unique accessible evidence names and no Apply/Reject or model chooser.
+
+T004 remains unchecked pending independent exact-head review and merge. T005–T006, T008–T009 and
+T010–T019 remain separate work.

@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { canonicalJson, REVIEW_LIMITS, utf8Bytes } from "../../src/review/contract";
-import { assertCompleteRequestBytes, buildReviewEnvelope, checkReviewStart, offeredReviewTools, parseReviewEnvelope, reviewDisclosure, reviewResourceUsage, serializeProviderRequest, serializeReviewEnvelope, validateReviewEnvelope, type EnvelopeInput } from "../../src/review/envelope";
+import { assertCompleteRequestBytes, buildReviewEnvelope, checkReviewStart, offeredReviewTools, parseReviewEnvelope, READER_RESPONSE_POLICY, reviewDisclosure, reviewResourceUsage, REVIEW_POLICY, serializeProviderRequest, serializeReviewEnvelope, sourceCurrency, validateReviewEnvelope, type EnvelopeInput } from "../../src/review/envelope";
 import { buildReaderRun } from "../../src/review/findings";
 import { builtinReaderProfile } from "../../src/review/profiles";
 import { createReviewReadFacade } from "../../src/review/facade";
 import { captureBibleSource, captureChapterSource } from "../../src/review/sources";
+import { requestedFindingsSchema } from "../../src/review/wire-schema";
 import { currentFacts, currentSources, envelope, hash, input, item, saved, selectedEnd, selectedStart, source, stamp } from "./scoped-fixtures";
 
 describe("immutable explicit review envelope", () => {
@@ -257,5 +259,66 @@ describe("exact disclosed resource usage and output bound", () => {
     await expect(buildReaderRun({ runId: value.requestId, startedAt: stamp, completedAt: stamp, envelope: value, output: exact })).resolves.toBeDefined();
     await expect(buildReaderRun({ runId: value.requestId, startedAt: stamp, completedAt: stamp, envelope: value, output: `${exact} ` }))
       .rejects.toThrow("output-byte-limit");
+  });
+});
+
+describe("reader-review provider request contract", () => {
+  async function readerEnvelope(overrides: Partial<EnvelopeInput> = {}) {
+    return buildReviewEnvelope({ ...input(), kind: "reader-review", profile: await builtinReaderProfile("alpha"), ...overrides });
+  }
+  test("the sent system message contains the requested schema and the wire has empty tools, not a responseContract", async () => {
+    const value = await readerEnvelope();
+    const raw = serializeProviderRequest(value);
+    const wire = JSON.parse(raw) as { contractVersion: number; messages: { role: string; content: string }[]; tools: unknown[] };
+    expect(Object.keys(wire).sort()).toEqual(["contractVersion", "messages", "tools"]);
+    expect(wire.contractVersion).toBe(1);
+    expect(wire.messages).toHaveLength(2);
+    const system = item(wire.messages);
+    const user = item(wire.messages, 1);
+    expect(system.role).toBe("system");
+    expect(user.role).toBe("user");
+    expect(system.content).toBe(`${REVIEW_POLICY}\n\n${READER_RESPONSE_POLICY}\n${canonicalJson({ ...z.toJSONSchema(requestedFindingsSchema) })}`);
+    expect(system.content).toContain('"findingId"');
+    expect(system.content).toContain('"evidence"');
+    expect(system.content).toContain('"additionalProperties":false');
+    expect(user.content).toBe(serializeReviewEnvelope(value));
+    expect(JSON.parse(user.content)).toEqual(reviewDisclosure(value));
+    expect(wire.tools).toEqual([]);
+    expect(Object.hasOwn(wire, "responseContract")).toBe(false);
+    expect(utf8Bytes(raw)).toBe(reviewResourceUsage(value).requestBytes);
+    const offered = await readerEnvelope({ books: input().books.map((book) => ({ ...book, enabledTools: ["read_chapter"] })) });
+    expect((JSON.parse(serializeProviderRequest(offered)) as { tools: unknown[] }).tools).toEqual([]);
+  });
+
+  test("the guided-review wire remains unchanged", async () => {
+    const value = await envelope();
+    const wire = JSON.parse(serializeProviderRequest(value)) as { messages: { content: string }[]; tools: unknown[]; responseContract: unknown };
+    expect(item(wire.messages).content).toBe(REVIEW_POLICY);
+    expect(item(wire.messages).content).not.toContain("$schema");
+    expect(wire.tools).toHaveLength(5);
+    expect(wire.responseContract).toEqual({ type: "string" });
+  });
+
+  test("the schema bytes count toward the exact complete-request limit", async () => {
+    const base = await readerEnvelope();
+    const baseline = utf8Bytes(serializeProviderRequest(base));
+    const baseInput = input();
+    const room = REVIEW_LIMITS.requestBytes - baseline;
+    const environment = { ...baseInput.environment, capabilityRevision: `${baseInput.environment.capabilityRevision}${"a".repeat(room)}` };
+    const exact = await readerEnvelope({ environment });
+    expect(utf8Bytes(serializeProviderRequest(exact))).toBe(REVIEW_LIMITS.requestBytes);
+    await expect(readerEnvelope({ environment: { ...environment, capabilityRevision: `${environment.capabilityRevision}a` } }))
+      .rejects.toThrow("request-byte-limit");
+  });
+
+  test("a stale current-source marker is distinct from missing or ambiguous", async () => {
+    const value = await envelope();
+    const captured = item(value.sources);
+    expect(sourceCurrency(captured, [{ sourceId: captured.sourceId, status: "stale" }])).toBe("stale");
+    expect(sourceCurrency(captured, [{ sourceId: captured.sourceId, status: "missing" }])).toBe("unavailable");
+    expect(sourceCurrency(captured, [{ sourceId: captured.sourceId, status: "ambiguous" }])).toBe("unavailable");
+    const reasons = await checkReviewStart(value, { kind: "start", requestId: value.requestId, scopeDigest: value.scopeDigest },
+      currentFacts(value), [{ sourceId: captured.sourceId, status: "stale" }]);
+    expect(reasons).toContain(`source-stale:${captured.sourceId}`);
   });
 });
