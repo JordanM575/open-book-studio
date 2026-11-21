@@ -7,6 +7,13 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Reader review schema validation and citation navigation
+- Reader-review provider requests now put the requested findings JSON Schema in the same sent system message, serialize `tools: []` on the wire and send `tools: {}` at the one AI SDK call with `maxRetries: 0`, the signal and no output/tool-loop options. One call, no retry, repair, fallback, model change or second completion. Guided review keeps its existing wire.
+- Provider output is parsed once against the strict findings schema and the 262,144 UTF-8 byte bound. Non-string, invalid JSON, fences, trailing prose, missing/extra fields, unsupported categories, attribution/count/byte failures end incomplete as `failed` with no run displayed; invalid individual citations are withheld and counted, never fabricated.
+- Exact captured UTF-16 quotation spans, book/chapter identity, saved version and raw-file SHA-256 remain the only evidence rules; there is no normalization, whitespace folding, fuzzy lookup or nearest-match relocation. Current saved sources are compared separately, with new stale/missing/ambiguous states and no throw into the renderer.
+- A new explicit Check current sources action performs one read-only saved-source read for the prepared envelope and completed runs, reports per-run not-checked/current/stale/unavailable/check-failed status and disables exact-passage navigation for stale, missing or unavailable sources while historical quotes, labels, revisions and withheld counts remain. No automatic check, watcher, report write or provider call occurs.
+- Show exact passage now re-reads the exact saved chapter and selects only the exact current span through the existing ManuscriptEditor evidence seam, with a same-chapter and pending-chapter-switch guard. It never flushes, saves, writes, retries or starts a provider. Failed or aborted navigation keeps the historical quote and disables that link for the session. The results leaf keeps one region and one polite status, uses unique accessible evidence names and adds no Apply/Reject or model chooser.
+- 039 T004 remains unchecked pending independent exact-head review and merge. T005–T006, T008–T009 and T010–T019 remain open.
 ### Reader review focus and provider errors
 - Opening the Reader review now moves focus to the Structured reader review heading after the panel mounts, and the focus test asserts the active element instead of page text. AI SDK transport failures are normalized through the shared provider-error mapping, so context maps to overflow and refusal maps to refused; the remaining provider failures stay the generic provider reason.
 

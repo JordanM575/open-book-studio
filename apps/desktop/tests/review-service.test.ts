@@ -355,3 +355,41 @@ describe("volatile selected-source reader service", () => {
     expect(f.transport.calls).toHaveLength(1);
   });
 });
+
+describe("strict reader output acceptance", () => {
+  test("extra fields, unsupported categories, over-count output and an over-limit quote fail as malformed with one call and unchanged bytes", async () => {
+    const variants: Array<(value: ReviewEnvelope) => string> = [
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), extra: "PRIVATE_EXTRA_SENTINEL" }),
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), findings: [{
+        findingId: "f-1", category: "unsupported", readerId: value.profile?.id, readerVersion: value.profile?.version,
+        runId: value.requestId, interpretation: "Synthetic.", claim: "observation", evidence: []
+      }] }),
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), findings: [{
+        findingId: "f-1", category: "clarity", readerId: value.profile?.id, readerVersion: value.profile?.version,
+        runId: value.requestId, interpretation: "Synthetic.", claim: "observation", evidence: [], extra: true
+      }] }),
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), findings: Array.from({ length: 51 }, (_, index) => ({
+        findingId: `f-${index}`, category: "clarity", readerId: value.profile?.id, readerVersion: value.profile?.version,
+        runId: value.requestId, interpretation: "Synthetic.", claim: "observation", evidence: []
+      })) }),
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), findings: [{
+        findingId: "f-1", category: "clarity", readerId: value.profile?.id, readerVersion: value.profile?.version,
+        runId: value.requestId, interpretation: "Synthetic.", claim: "observation", evidence: Array(9).fill({})
+      }] }),
+      (value) => JSON.stringify({ ...JSON.parse(outputFor(value)), findings: [{
+        findingId: "f-1", category: "clarity", readerId: value.profile?.id, readerVersion: value.profile?.version,
+        runId: value.requestId, interpretation: "Synthetic.", claim: "observation", evidence: [{ quote: "x".repeat(501) }]
+      }] })
+    ];
+    for (const variant of variants) {
+      const f = await fixture();
+      const before = await hashes(f.root, f.book.id, f.chapter.path);
+      const ready = await prepared(f);
+      f.transport.output = variant;
+      await expect(f.service.start({ operation: "start", requestId: ready.requestId, scopeDigest: ready.scopeDigest }))
+        .resolves.toEqual({ kind: "failed", reason: "malformed" });
+      expect(f.transport.calls).toHaveLength(1);
+      expect(await hashes(f.root, f.book.id, f.chapter.path)).toEqual(before);
+    }
+  });
+});
