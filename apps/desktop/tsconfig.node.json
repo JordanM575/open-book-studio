@@ -82,6 +82,8 @@
     "tests/task-preview-neutrality.test.tsx",
     "tests/task-preview-calls.test.tsx",
     "tests/task-preview-consent.test.tsx",
+    "tests/task-preview-handoff.test.tsx",
+    "tests/task-preview-mount.test.tsx",
     "tests/task-preview-access.test.tsx",
     "tests/chapter-read-issues.test.tsx",
     "tests/chapter-rail.test.tsx",

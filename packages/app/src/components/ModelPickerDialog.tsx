@@ -1,12 +1,21 @@
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, Loader2, Search } from "lucide-react";
 import type { BookMeta } from "@ai-book-studio/core/schema";
-import type { ConnectionSummary, ModelInfo, ProviderDescription } from "@ai-book-studio/core/providers/types";
-import { canRunAgent, unavailableReason } from "@ai-book-studio/core/providers/models";
+import type { ConnectionSummary, ModelInfo, ProviderDescription, ProviderId } from "@ai-book-studio/core/providers/types";
+import { canRunAgent, unavailableReason, type Catalogue } from "@ai-book-studio/core/providers/models";
 import { contributorWarning, isContributorModel } from "@ai-book-studio/core/providers/compatibility";
 import { Button } from "@ai-book-studio/ui/button";
 import { Dialog, DialogContent, DialogFooter } from "@ai-book-studio/ui/dialog";
 import { editBook, keptCopyText, must } from "../lib/utils";
+import type { PreviewCatalogueCache } from "../lib/task-preview-cache";
+
+/** An author-chosen candidate handed from the task preview to the one-turn picker. */
+export interface TurnHandoff {
+  provider: ProviderId;
+  modelId: string;
+  /** The sole usable connection, or null when the author must choose between several. */
+  connectionId: string | null;
+}
 
 interface Props {
   open: boolean;
@@ -18,13 +27,17 @@ interface Props {
   onPick?: ((choice: { connectionId: string; modelId: string }) => void) | undefined;
   /** The current one-off choice when the turn picker is reopened. */
   initial?: { connectionId: string; modelId: string } | null;
+  /** Seed for an author-chosen candidate from the task preview. Only passed in turn mode. */
+  handoff?: TurnHandoff | undefined;
+  /** Emits the catalogues this picker loaded, after each explicit load, for the preview snapshot. */
+  onCataloguesLoaded?: ((snapshot: PreviewCatalogueCache) => void) | undefined;
   /** Open Settings on the provider connections, so an author with no key is not stuck. */
   onOpenSettings?: (() => void) | undefined;
   /** A copy of the author's choice was kept, so the workspace lists the book's conflict copies again. */
   onConflictCopy?: (() => void) | undefined;
 }
 
-export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initial, onOpenSettings, onConflictCopy }: Props) {
+export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initial, handoff, onCataloguesLoaded, onOpenSettings, onConflictCopy }: Props) {
   const turnMode = Boolean(onPick);
   const initialConnectionId = initial?.connectionId ?? book.defaultConnectionId;
   const initialModelId = initial?.modelId ?? book.defaultModelId;
@@ -46,8 +59,27 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
   const [manualResult, setManualResult] = useState<{ error: boolean; text: string } | null>(null);
   const manualInput = useRef<HTMLInputElement>(null);
   const manualInputId = useId();
+  // Handoff seed for the provider filter and the post-load candidate check. A ref so the load
+  // callbacks read the current seed without being re-created on every render.
+  const handoffRef = useRef(handoff);
+  handoffRef.current = handoff;
+  // While a handoff is re-resolving its connection, the catalogue load waits for that list.
+  const handoffPendingRef = useRef(false);
+  const connectionsRef = useRef<ConnectionSummary[]>([]);
+  const cataloguesRef = useRef(new Map<string, Catalogue>());
+  const onCataloguesLoadedRef = useRef(onCataloguesLoaded);
+  onCataloguesLoadedRef.current = onCataloguesLoaded;
+  // Handoff mode needs to know when the connection list has settled before it can say "no usable connection".
+  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
   // A model id only matters to the writing agent, which the browser build does not run.
   const manualAllowed = window.studio.platform !== "web";
+
+  const emitCatalogues = useCallback((list: ConnectionSummary[]) => {
+    onCataloguesLoadedRef.current?.({
+      connections: list,
+      loads: [...cataloguesRef.current].map(([connectionId, catalogue]) => ({ connectionId, catalogue }))
+    });
+  }, []);
 
   const loadConnections = useCallback(async () => {
     setError(null);
@@ -58,20 +90,35 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
       ]);
       setProviders(providerList);
       setConnections(connectionList);
+      connectionsRef.current = connectionList;
+      setConnectionsLoaded(true);
+      handoffPendingRef.current = false;
       setConnectionId((current) => {
+        const seed = handoffRef.current;
+        if (seed) {
+          const usable = connectionList.filter((connection) => connection.provider === seed.provider && connection.planUsable !== false);
+          if (current && usable.some((connection) => connection.id === current)) return current;
+          return usable.length === 1 && usable[0] ? usable[0].id : null;
+        }
         if (current && connectionList.some((connection) => connection.id === current)) return current;
         const saved = connectionList.find((connection) => connection.id === initialConnectionId);
         return saved?.id ?? connectionList[0]?.id ?? null;
       });
+      emitCatalogues(connectionList);
     } catch (cause) {
+      setConnectionsLoaded(true);
+      handoffPendingRef.current = false;
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [initialConnectionId]);
+  }, [initialConnectionId, emitCatalogues]);
 
   useEffect(() => {
     if (!open) return;
-    setConnectionId(initialConnectionId);
-    setChosen(initialModelId);
+    // A handoff starts with no selection until the connection and the candidate are verified.
+    const seed = handoffRef.current;
+    handoffPendingRef.current = Boolean(seed);
+    setConnectionId(seed ? null : initialConnectionId);
+    setChosen(seed ? null : initialModelId);
     setAllowContributor(book.allowContributorTraining);
     setSearch("");
     setManualOpen(false);
@@ -88,9 +135,22 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     try {
       const catalogue = await must(window.studio.providers.models(id));
       setModels(catalogue.models);
+      cataloguesRef.current.set(id, catalogue);
+      emitCatalogues(connectionsRef.current);
       if (catalogue.listError) {
         setError(catalogue.listError);
         setListFailed(true);
+      }
+      const seed = handoffRef.current;
+      if (seed) {
+        const found = catalogue.models.find((model) => model.id === seed.modelId) ?? null;
+        if (found && canRunAgent(found)) {
+          setChosen(found.id);
+        } else {
+          setChosen(null);
+          const reason = unavailableReason(found) ?? "This model is no longer in the provider's list.";
+          setError(`${reason} Nothing has changed.`);
+        }
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -98,14 +158,15 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [emitCatalogues]);
 
   useEffect(() => {
-    if (!open || !connectionId) return;
+    if (!open || !connectionId || handoffPendingRef.current) return;
     void loadModels(connectionId);
   }, [open, connectionId, loadModels]);
 
   const savedModelMissing =
+    !handoff &&
     !loading &&
     models.length > 0 &&
     connectionId === initialConnectionId &&
@@ -116,6 +177,11 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     if (savedModelMissing) setChosen(null);
   }, [savedModelMissing]);
 
+  // Handoff mode lists only the provider's usable connections, in their existing order.
+  const handoffConnections = handoff
+    ? connections.filter((item) => item.provider === handoff.provider && item.planUsable !== false)
+    : null;
+  const visibleConnections = handoffConnections ?? connections;
   const providerName = (id: ConnectionSummary["provider"]) => providers.find((provider) => provider.id === id)?.name ?? id;
   const connection = connections.find((item) => item.id === connectionId) ?? null;
   const filtered = useMemo(() => {
@@ -166,6 +232,26 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
 
   const save = async (): Promise<void> => {
     if (!connection || !chosen || saving) return;
+    if (handoff) {
+      // Revalidation on confirmation: the connection must still be present and usable, and the
+      // chosen model still listed and able to run the agent. Otherwise nothing is picked.
+      const current = connections.find((item) => item.id === connection.id) ?? null;
+      const usable = current !== null && current.provider === handoff.provider && current.planUsable !== false;
+      if (!usable) {
+        const forProvider = connections.filter((item) => item.provider === handoff.provider);
+        const base =
+          forProvider.length > 0 && forProvider.every((item) => item.planUsable === false)
+            ? "The saved plan cannot be used right now."
+            : `No connection for ${providerName(handoff.provider)} yet.`;
+        setError(`${base} Nothing has changed.`);
+        return;
+      }
+      const chosenModel = models.find((model) => model.id === chosen) ?? null;
+      if (!chosenModel || !canRunAgent(chosenModel)) {
+        setError(`${unavailableReason(chosenModel) ?? "This model is no longer in the provider's list."} Nothing has changed.`);
+        return;
+      }
+    }
     if (contributor && !allowContributor) return;
     if (onPick) {
       if (contributor && !book.allowContributorTraining) {
@@ -219,7 +305,17 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
         }
         className="w-[calc(100vw-48px)] max-w-[600px]"
       >
-        {connections.length === 0 ? (
+        {handoff && !connectionsLoaded ? (
+          <p className="flex items-center gap-2 py-6 text-(length:--text-subheadline-size) text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" /> Loading connections…
+          </p>
+        ) : handoff && (handoffConnections?.length ?? 0) === 0 ? (
+          <div className="py-6">
+            <p className="text-(length:--text-subheadline-size) leading-[var(--text-subheadline-leading)] text-muted-foreground">
+              No usable connection is available for this model. Nothing has changed.
+            </p>
+          </div>
+        ) : connections.length === 0 ? (
           <div className="py-6">
             <p className="text-(length:--text-subheadline-size) leading-[var(--text-subheadline-leading)] text-muted-foreground">
               No provider is connected yet. Add a key in Settings to choose a model.
@@ -235,7 +331,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
             <div className="space-y-2">
               <p className="text-(length:--text-caption-size) font-medium text-muted-foreground">Connection</p>
               <div className="flex flex-wrap gap-2">
-                {connections.map((item) => (
+                {visibleConnections.map((item) => (
                   <button
                     key={item.id}
                     type="button"
@@ -432,7 +528,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
           </Button>
           <Button
             onClick={() => void save()}
-            disabled={!connection || !chosen || saving || connections.length === 0 || (contributor && !allowContributor)}
+            disabled={!connection || !chosen || saving || connections.length === 0 || (contributor && !allowContributor) || (handoff !== undefined && loading)}
           >
             {saving ? <Loader2 size={15} className="animate-spin" /> : null}
             {turnMode ? "Use for this turn" : "Use this model"}

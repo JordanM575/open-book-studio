@@ -82,6 +82,8 @@ interface Props {
   onReconnect: () => void;
   onChooseModel: () => void;
   onChooseTurnModel: () => void;
+  /** Open the advisory model preview. Omit to hide the entry; the preview never changes the selection. */
+  onPreviewModels?: (() => void) | undefined;
   /** A one-off model for the next message. The book default stays unchanged. */
   turnModel?: { connectionId: string; modelId: string } | null;
   onTurnModelUsed: () => void;
@@ -179,6 +181,7 @@ export function ChatPanel({
   onReconnect,
   onChooseModel,
   onChooseTurnModel,
+  onPreviewModels,
   turnModel,
   onTurnModelUsed,
   onConflictCopy,
@@ -2016,6 +2019,19 @@ export function ChatPanel({
                   </span>
                 </InputGroupButton>
               </Hint>
+              {onPreviewModels ? (
+                <Hint label="Preview which connected models meet a writing task">
+                  <InputGroupButton
+                    variant="ghost"
+                    size="xs"
+                    onClick={onPreviewModels}
+                    data-testid="open-task-preview"
+                    className="min-w-0 max-w-full px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+                  >
+                    <span className="truncate">Preview models</span>
+                  </InputGroupButton>
+                </Hint>
+              ) : null}
               <Hint label="Keep the turn running after the window closes and notify you when it finishes">
                 <label
                   className="relative flex shrink-0 cursor-pointer items-center rounded-[var(--corner-md)] focus-within:ring-2 focus-within:ring-[var(--ring)] has-disabled:cursor-not-allowed"

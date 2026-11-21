@@ -50,7 +50,8 @@ function renderComposer(
   turnModel: { connectionId: string; modelId: string } | null = null,
   startImpl: ((_request: unknown) => Promise<unknown>) | null = null,
   undoImpl: (() => Promise<unknown>) | null = null,
-  seed: AgentThread | null = null
+  seed: AgentThread | null = null,
+  onPreviewModels?: () => void
 ): ComposerMocks & {
   onChooseModel: ReturnType<typeof mock>;
   fire: (event: AgentEvent) => void;
@@ -121,6 +122,7 @@ function renderComposer(
       onReconnect: () => {},
       onChooseModel,
       onChooseTurnModel: () => {},
+      ...(onPreviewModels ? { onPreviewModels } : {}),
       turnModel,
       onTurnModelUsed,
       onNotice: () => {}
@@ -138,6 +140,28 @@ function composer(): { input: HTMLElement; view: ReturnType<typeof testing.withi
 }
 
 describe("chat composer", () => {
+  test("the preview entry renders only with a handler and changes nothing else", async () => {
+    const onPreviewModels = mock(() => {});
+    const { onTurnModelUsed } = renderComposer(null, null, null, null, onPreviewModels);
+    const view = testing.within(document.body);
+    const entry = view.getByTestId("open-task-preview");
+    expect(entry.textContent).toContain("Preview models");
+    expect(view.getByTestId("agent-turn-model").textContent).toContain("Model: book default");
+    await testing.act(async () => {
+      testing.fireEvent.click(entry);
+    });
+    expect(onPreviewModels).toHaveBeenCalledTimes(1);
+    expect(onTurnModelUsed).not.toHaveBeenCalled();
+    expect(view.getByTestId("agent-turn-model").textContent).toContain("Model: book default");
+    expect(view.getByTestId("chat-send")).toBeTruthy();
+  });
+
+  test("the preview entry is absent without a handler", () => {
+    renderComposer();
+    const view = testing.within(document.body);
+    expect(view.queryByTestId("open-task-preview")).toBeNull();
+  });
+
   test("ordinary typed retry preserves the request and its words remain eligible for the next history", async () => {
     const { start } = renderComposer(null, async () => ({ ok: false, error: { code: "offline", message: "Synthetic offline" } }));
     const { input, view } = composer();
