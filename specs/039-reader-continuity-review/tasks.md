@@ -3,11 +3,38 @@
 D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
 mounted journey. T003's disclosed volatile selected-source prepare/start, T004's schema, quotation
 and citation-navigation work, T005's volatile profile attribution and explicit rerun comparison and
-T008's read-only enforcement proof are delivered at the source/test level; T001, T006, T009 and
+T008's read-only enforcement proof are delivered at the source/test level; T006, T009 and
 T010–T019 remain. The built-app keyboard journey stays with T009. T010 retains the independent
-correction gate. The policy amendment completed T007.
+correction gate. The policy amendment completed T007. T001 was reconciled and recorded 2026-11-20.
 
-- [ ] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
+- [x] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
+  Completed 2026-11-20 on `feat-routing-handoff-docs` (HEAD `f4c8caa`; 034/037/039 content verified
+  identical to `origin/main` before editing). Reconciliation audit:
+  `/mnt/projects/evidence/ai-book-studio-product-completion/full-delivery-2026-11-07/reader-review-t001-reconciliation.md`
+  (2026-11-20, read-only; not re-verified by this task). Acceptance scope adopted from its §4:
+  (4.1) reconciliation delivered documentation-only — the 034/039 shared-`review/` ownership record
+  lives in `packages/core/src/review/SCOPED-CONTRACTS.md` (034 owns `index.ts`/`repetition.ts`; 039
+  owns the scoped-contract leaves; 037 owns no module there); the 037 plan "Shape" section carries a
+  dated pointer to the merged standalone transport (`apps/desktop/src/main/review/transport.ts`,
+  `tools: {}`) instead of a foreground turn in `agent/runtime.ts`; 034 spec M-4 lines corrected
+  (repetition-v1 shipped, T008); 039 spec U-039-01/02 rows, the Open-decisions preface and the plan's
+  Verification section and delivery checkpoints corrected to the merged reality. (4.2) The evidence
+  ledger is recorded as reported, not re-run: builder/coordinator-reported counts; no live-provider,
+  built-app, packaged-app, device or semantic-quality evidence for any task; 034 smoke 29/29 with
+  T016 open; 037 Phase 1 unbuilt and Phases 3–12 open (T018/T019/T021/T022/T023/T025/T032/T033
+  partials); 039 T002–T005/T007/T008 done, mounted journey not independently accepted (T009 target).
+  (4.3) Exclusions honoured: no product or test source changed; no edits to
+  `packages/core/src/library/service.ts` or `packages/core/src/workflow/record-store.ts`; no new
+  claims, evidence, smoke runs, provider calls or task boxes flipped; 038 T022 untouched; 034 and
+  037 task files untouched; T006/T009–T019 remain unchecked. Residuals recorded, not resolved:
+  M-2 (dead `guided-review` kind), M-6 (continuation-checkin ownership assumption: 039-owned
+  channel/panel, 037-owned cadence primitives), M-7 (consent-wording gaps), M-8 (schema-version
+  families, schema-1 vs schema-2 `review-campaign` path collision risk), M-9 (IPC inventory drift),
+  M-10 (duplicated record-store patterns). Audit open questions 1–8 are recorded as written; where the
+  audit named a smallest-safe default (M-6 ownership assumption; SCOPED-CONTRACTS.md as the ownership
+  home per open question 5; the 037 Shape annotation per open question 6), that default was applied
+  and is labelled as such; nothing else was resolved. T001 closes on documentation alone; no product
+  or test file changed.
 - [x] T002 Apply accepted D-193 / ADR 0018 for U-039-01/02; define and test finding, profile/version and run contracts. W10: new `review/profiles.ts`, `wire-schema.ts`, `findings.ts` and `scoped-readers.test.ts`; pure, volatile contracts only.
 - [x] T003 Apply accepted U-039-04 / D-193 bounds; build disclosed selected-source snapshots, pre-start known/unknown price and data-use/training terms, mandatory 011/022 consent gates, and provider-named start with zero-send cancel/missing-consent tests.
   Completed 2026-11-20: one bounded `readerReview:request` surface (support, prepare, start, stop, cancelPrepare), exact saved version/SHA-256/UTF-16 snapshots, the 4-book/64-item/65,536-source/131,072-combined/262,144-request/262,144-output bounds, known or unknown price with no dollar-cap claim, provider-published data-use/training terms, the 011 plan/connection gate, 022 default-off book consent, provider-named single-use Start, zero-send cancel and one transport call with no retry. Focused nine-file suite 149 pass, core review 383 pass, saved-review 26 pass; node typecheck clean, web only the pre-existing `WorkspaceView` union diagnostic. Independent exact-head review ACCEPT and merge `03622b6`. Remaining non-blocking follow-ups: the AI SDK transport drops `responseContract` and the empty tools list, there is no standalone cancel-preparation control, and staleness is enforced at Start. Opening focus and AI SDK error normalization are now fixed. T004–T006, T008–T009 and T010–T019 remain open.

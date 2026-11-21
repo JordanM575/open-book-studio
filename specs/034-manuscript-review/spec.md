@@ -23,7 +23,8 @@ character and paragraph counts to use the shared counter. The public word-count 
 text, returns zero for empty text, and otherwise counts whitespace-separated tokens; punctuation is
 not stripped (`one — two` is three words). The writing agent can answer in a conversation, while
 [025](../025-agent-capabilities/spec.md) covers operational cache and tool metrics. The report has
-coverage and fixture-tested evidence plumbing; the repetition scanner and actual underline journey remain.
+coverage and fixture-tested evidence plumbing; the repetition scanner has shipped (T008, repetition-v1,
+worker-cancelled, paginated) and evidence navigation remains partially open (T016).
 
 **Proposed:** A separate **Review manuscript** action runs only when the author asks. It reads the
 current book's saved chapter bodies, never an unsaved editor buffer, Story Bible text, agent thread,
@@ -83,7 +84,7 @@ it does not change the existing count contract or manuscript format.
   UTF-16 source spans. Punctuation separates tokens; windows may cross sentence punctuation, never
   chapters. List sequences occurring at least twice across the selected book, counting every overlap
   and retaining every location. No stemming, stopwords, ideal threshold or overuse verdict. Version
-  the analyzer, show exact evidence and paginated complete coverage. Implementation remains T008.
+  the analyzer, show exact evidence and paginated complete coverage. Implemented by T008 (repetition-v1).
 - **FR-006 — Definitions and coverage.** The report MUST make each metric's definition available
   beside its result. It MUST show the number of chapters in scope, included, empty and skipped, and
   give a plain-language reason for every skipped chapter. It MUST distinguish a complete report
