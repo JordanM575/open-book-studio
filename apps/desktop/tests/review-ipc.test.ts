@@ -64,6 +64,41 @@ async function call(payload: unknown): Promise<Result<unknown>> {
 }
 
 describe("registered readerReview:request channel and actual preload", () => {
+  test("exactly one review channel is registered and no second reader-review channel exists", () => {
+    const reviewChannels = [...handlers.keys()].filter((channel) => /review/i.test(channel)).sort();
+    expect(reviewChannels).toEqual(["readerReview:request", "reviewRecords:request"]);
+    expect([...handlers.keys()].filter((channel) => /readerreview/i.test(channel))).toEqual(["readerReview:request"]);
+  });
+
+  test("the exposed readerReview API is exactly the five bounded operations", () => {
+    if (!exposed?.readerReview) throw new Error("Preload did not expose the reader-review API");
+    const exposedAny = exposed as unknown as Record<string, unknown>;
+    const api = exposedAny.readerReview as Record<string, unknown>;
+    expect(Object.keys(api).sort()).toEqual(["cancelPrepare", "prepare", "start", "stop", "support"]);
+    for (const value of Object.values(api)) expect(typeof value).toBe("function");
+    expect(Object.keys(exposedAny)).not.toContain("ipcRenderer");
+    expect(Object.keys(exposedAny).filter((key) => /^reader/i.test(key))).toEqual(["readerReview"]);
+    expect(Object.keys(exposedAny)).toContain("reviewRecords");
+  });
+
+  test("prototype-pollution probes are refused before the service is reached", async () => {
+    const before = calls.length;
+    const secret = "a".repeat(64);
+    const probes = [
+      `{"operation":"prepare","__proto__":{"polluted":true},"prepareId":"p-1","bookId":"book_123456","profileId":"reader-alpha","chapters":[{"chapterId":"ch_123456","ranges":[{"start":0,"end":1}]}],"prompt":"Synthetic."}`,
+      `{"operation":"start","__proto__":{"polluted":true},"requestId":"request-1","scopeDigest":"${secret}"}`,
+      `{"operation":"stop","constructor":{"prototype":{"polluted":true}},"requestId":"request-1"}`,
+      `{"operation":"cancelPrepare","prototype":{"polluted":true},"prepareId":"prepare-1"}`,
+      `{"operation":"stop","requestId":"request-1","toString":"polluted"}`
+    ];
+    for (const raw of probes) {
+      const result = await call(JSON.parse(raw));
+      expect(result).toMatchObject({ ok: false, error: { code: "invalid" } });
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(calls).toHaveLength(before);
+  });
+
   test("the channel is registered once and desktop support is true", async () => {
     expect(IPC.readerReview.request).toBe("readerReview:request");
     expect(handlers.get(IPC.readerReview.request)).toHaveLength(1);
@@ -111,6 +146,37 @@ describe("registered readerReview:request channel and actual preload", () => {
     expect(result.error.code).toBe("internal");
     expect(result.error.message).toContain("sk-or-[redacted]");
     expect(result.error.message).not.toContain("PRIVATEKEYMATERIAL");
+  });
+
+  test("no reader-review operation leaks a secret-bearing error message", async () => {
+    const secret = "sk-or-v1-PRIVATEKEYMATERIALSECRETMATERIAL1234";
+    const leaking: ReaderReviewService = {
+      support: async () => { throw new Error(`support failed: ${secret}`); },
+      prepare: async () => { throw new Error(`prepare failed: ${secret}`); },
+      start: async () => { throw new Error(`start failed: ${secret}`); },
+      stop: async () => { throw new Error(`stop failed: ${secret}`); },
+      cancelPrepare: async () => { throw new Error(`cancelPrepare failed: ${secret}`); }
+    };
+    handlers.get(IPC.readerReview.request)?.pop();
+    registerIpc({ requireLibrary: () => { throw new Error("never"); } } as never, () => null,
+      {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, {} as never, () => null,
+      { status: null, start: async () => undefined, stop: async () => undefined } as never,
+      () => false, () => null, null, leaking);
+    const payloads: Array<[string, unknown]> = [
+      ["support", { operation: "support" }],
+      ["prepare", { ...prepareRequest }],
+      ["start", { operation: "start", requestId: "request-1", scopeDigest: "a".repeat(64) }],
+      ["stop", { operation: "stop", requestId: "request-1" }],
+      ["cancelPrepare", { operation: "cancelPrepare", prepareId: "prepare-1" }]
+    ];
+    for (const [name, payload] of payloads) {
+      const result = await call(payload);
+      expect(result.ok, `${name} should fail closed`).toBe(false);
+      if (result.ok) continue;
+      expect(result.error.code).toBe("internal");
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(result.error.message).not.toContain("PRIVATEKEYMATERIALSECRETMATERIAL1234");
+    }
   });
 
   test("the unsupported browser host reports support false and refuses every operation", async () => {

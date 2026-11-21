@@ -1,6 +1,6 @@
 # Structured reader and continuity review
 
-**Status:** In progress — D-193 and D-197–D-199 accepted; T003's disclosed volatile selected-source prepare/start and T004's exact schema, quotation, citation-navigation and stale/unavailable states are delivered at the source/test level. T001, T005–T006, T008–T009 and T010–T019 remain.
+**Status:** In progress — D-193 and D-197–D-199 accepted; T003's disclosed volatile selected-source prepare/start, T004's exact schema, quotation, citation-navigation and stale/unavailable states and T008's read-only enforcement proof are delivered at the source/test level. T001, T005–T006, T009 and T010–T019 remain.
 **Number:** 039
 **Requirement:** REQ-REVIEW-003, REQ-REVIEW-004
 **Depends on:** 034 saved-source evidence contracts; 037 scoped read-only provider review;

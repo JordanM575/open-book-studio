@@ -1,10 +1,10 @@
-import { expect, spyOn, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { assertReviewData, canonicalJson, digestJson } from "../../src/review/contract";
-import { buildReviewEnvelope, checkReviewStart, parseReviewEnvelope, serializeReviewEnvelope, sourceCurrency } from "../../src/review/envelope";
+import { buildReviewEnvelope, checkReviewStart, parseReviewEnvelope, serializeProviderRequest, serializeReviewEnvelope, sourceCurrency } from "../../src/review/envelope";
 import { createReviewReadFacade } from "../../src/review/facade";
 import { buildReaderRun, reviewCitationNavigation, verifyReviewCitation } from "../../src/review/findings";
 import { builtinReaderProfile, editReaderProfile, validateReaderProfile } from "../../src/review/profiles";
-import { checkSavedQuoteNavigation, verifySavedBodyQuote } from "../../src/review/sources";
+import { captureChapterSource, checkSavedQuoteNavigation, verifySavedBodyQuote } from "../../src/review/sources";
 import { citation, currentFacts, currentSources, input, saved, stamp } from "./scoped-fixtures";
 
 test("synchronous evidence refuses unchecked copies until digest-checked rehydration", async () => {
@@ -155,4 +155,42 @@ test.each(["\ud800", "\udfff"])("malformed Unicode %j cannot conceal 501 valid q
     await expect(runWithQuote(quote)).rejects.toThrow("quote-scalar-limit");
   }
   expect((await runWithQuote(`short${bad}`)).findings[0]?.evidenceState).toBe("insufficient-evidence");
+});
+
+describe("injection boundary extensions", () => {
+  test("I-19 a forged editor descriptor is never navigation-ready, whatever it claims", async () => {
+    const envelope = await buildReviewEnvelope(input());
+    const quote = citation();
+    const sources = currentSources(envelope);
+    const forged = [
+      { clean: "yes", identity: quote.identity },
+      { clean: 1, identity: quote.identity },
+      { clean: true },
+      { clean: "true", identity: { ...quote.identity, version: "3" } },
+      { clean: true, identity: { ...quote.identity, hash: "b".repeat(64) } },
+      { clean: true, identity: { ...quote.identity, chapterId: "ch_654321" } }
+    ];
+    for (const editor of forged) {
+      expect(reviewCitationNavigation(envelope, quote, sources, editor as never).status).not.toBe("ready");
+    }
+    // The genuine editor still navigates, so the refusals above are about the forgeries, not the harness.
+    expect(reviewCitationNavigation(envelope, quote, sources, { clean: true, identity: quote.identity }).status).toBe("ready");
+  });
+
+  test("bidi controls and zero-width data are inert data: accepted, counted and round-tripped exactly", async () => {
+    const body = "alpha\u202Ebeta\u202C \u200Bgamma \u0435eta";
+    const source = captureChapterSource({ sourceId: "source-1", saved: { ...saved, body }, bookTitle: "Synthetic book",
+      title: "Synthetic chapter", position: 1, capturedAt: stamp, ranges: [{ start: 0, end: body.length }] });
+    const envelope = await buildReviewEnvelope({ ...input(), kind: "reader-review", profile: await builtinReaderProfile("alpha"),
+      books: input().books.map((book) => ({ ...book, enabledTools: [] })), sources: [source] });
+    expect(source.segments[0]?.text).toBe(body);
+    const wire = JSON.parse(serializeProviderRequest(envelope)) as { messages: { role: string; content: string }[] };
+    const declared = JSON.parse(wire.messages[1]?.content ?? "") as { sources: [{ segments: [{ text: string }] }] };
+    expect(declared.sources[0].segments[0].text).toBe(body);
+    const exactQuote = { kind: "chapter" as const, sourceId: "source-1", identity: source.identity, start: 0, end: body.length, quote: body };
+    expect(verifyReviewCitation(envelope, exactQuote).status).toBe("verified-captured");
+    // A single flipped bidi marker breaks byte equality even though the visible glyphs match.
+    const tampered = `${body.slice(0, 6)}X${body.slice(7)}`;
+    expect(verifyReviewCitation(envelope, { ...exactQuote, quote: tampered }).status).toBe("invalid");
+  });
 });
