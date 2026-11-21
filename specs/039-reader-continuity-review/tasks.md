@@ -2,9 +2,10 @@
 
 D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
 mounted journey. T003's disclosed volatile selected-source prepare/start, T004's schema, quotation
-and citation-navigation work and T008's read-only enforcement proof are delivered at the
-source/test level; T001, T005–T006, T009 and T010–T019 remain. The built-app keyboard journey stays
-with T009. T010 retains the independent correction gate. The policy amendment completed T007.
+and citation-navigation work, T005's volatile profile attribution and explicit rerun comparison and
+T008's read-only enforcement proof are delivered at the source/test level; T001, T006, T009 and
+T010–T019 remain. The built-app keyboard journey stays with T009. T010 retains the independent
+correction gate. The policy amendment completed T007.
 
 - [ ] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
 - [x] T002 Apply accepted D-193 / ADR 0018 for U-039-01/02; define and test finding, profile/version and run contracts. W10: new `review/profiles.ts`, `wire-schema.ts`, `findings.ts` and `scoped-readers.test.ts`; pure, volatile contracts only.
@@ -24,7 +25,28 @@ with T009. T010 retains the independent correction gate. The policy amendment co
   `WorkspaceView` keyboard journey remains T009, provider-failure/overflow hash assertions are partial,
   source-check map completeness, and task-note wording. T001, T005–T006, T008–T009 and T010–T019
   remain open.
-- [ ] T005 Add volatile profile attribution and explicit rerun comparison without replacing prior results.
+- [x] T005 Add volatile profile attribution and explicit rerun comparison without replacing prior results.
+  Completed 2026-11-20: merged in PR #119 at `9f78a10b22fd8908e21178677fa2b2223b9154d7`; the build was
+  ACCEPTed at `2ab19d3783c69b83ed9640d60ab1586045676dca` and the merge `c1b1582` (`c1b1582666f59f6a1b5bd5d44d0ee76efbae5b7e`)
+  was ACCEPTed. Volatile per-run profile/provider/model/connection attribution, an append-only
+  volatile attempt history capped at 8 with no eviction, and an explicit rerun comparison of the
+  latest two completed runs (classified source/profile/destination/request/multiple-changes/
+  identical/not-comparable, exact returned-finding counts, model-variation labeling; no score, rank
+  or improvement claim). After the merge conflict resolution the merged reader-review suites were
+  re-run green: 15/15 journey, 131/131 reader-review+host+ipc+saved-review, 48/48 scoped-readers and
+  486/486 core review; the journey sentinel expectation is now `["synthetic-sentinel.json"]`.
+  Reviewer re-verification was static (no install permitted); the counts above are builder/
+  coordinator-reported, not re-run by the reviewers. Non-blocking notes: (1) §7.4 "no focusable
+  elements" vs the §7.2-mandated native `<details>` disclosure — the comparison region keeps exactly
+  one focusable element (the "Counts by category" summary); the design memo wording should be
+  reconciled there, no code change required; (2) the per-attempt "Exact attribution" disclosure adds
+  further focus stops beyond that summary; (3) the legacy saved-review path gains the same
+  "Exact attribution" disclosure (additive only; saved-review tests unaffected; "renders exactly as
+  before" is not literally true); (4) the CHANGELOG rerun-comparison line wording ("T008–T009
+  remain open") was stale and is corrected in this record; (5) the builder-reported scoped-readers
+  double-run anomaly was judged consistent with a runner artifact, could not be reproduced and is
+  not a defect in the commit. No live-provider, built-app, packaged-app or device evidence is
+  claimed; those stay with T009. T001, T006, T009 and T010–T019 remain open.
 - [ ] T006 Add explicit multi-book manuscript scope and, only after 030 contracts, optional planning sources.
 - [x] T007 Resolve U-039-03 / D-171 applicability; accepted November 7 as D-199 / ADR 0020, with
   explicit-save/recovery plan below. No storage implementation is claimed by this task.
