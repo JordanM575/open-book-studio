@@ -1,15 +1,29 @@
 # Tasks: structured reader and continuity review
 
 D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
-mounted journey. W10 delivers T003's disclosed volatile selected-source prepare/start with focused
-synthetic tests; T004–T006, T008–T009 and T010–T019 remain. T010 retains the independent correction
-gate. The policy amendment completed T007.
+mounted journey. T003's disclosed volatile selected-source prepare/start and T004's schema, quotation
+and citation-navigation work are delivered at the source/test level; T001, T005–T006, T008–T009 and
+T010–T019 remain. The built-app keyboard journey stays with T009. T010 retains the independent
+correction gate. The policy amendment completed T007.
 
 - [ ] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
 - [x] T002 Apply accepted D-193 / ADR 0018 for U-039-01/02; define and test finding, profile/version and run contracts. W10: new `review/profiles.ts`, `wire-schema.ts`, `findings.ts` and `scoped-readers.test.ts`; pure, volatile contracts only.
 - [x] T003 Apply accepted U-039-04 / D-193 bounds; build disclosed selected-source snapshots, pre-start known/unknown price and data-use/training terms, mandatory 011/022 consent gates, and provider-named start with zero-send cancel/missing-consent tests.
   Completed 2026-11-20: one bounded `readerReview:request` surface (support, prepare, start, stop, cancelPrepare), exact saved version/SHA-256/UTF-16 snapshots, the 4-book/64-item/65,536-source/131,072-combined/262,144-request/262,144-output bounds, known or unknown price with no dollar-cap claim, provider-published data-use/training terms, the 011 plan/connection gate, 022 default-off book consent, provider-named single-use Start, zero-send cancel and one transport call with no retry. Focused nine-file suite 149 pass, core review 383 pass, saved-review 26 pass; node typecheck clean, web only the pre-existing `WorkspaceView` union diagnostic. Independent exact-head review ACCEPT and merge `03622b6`. Remaining non-blocking follow-ups: the AI SDK transport drops `responseContract` and the empty tools list, there is no standalone cancel-preparation control, and staleness is enforced at Start. Opening focus and AI SDK error normalization are now fixed. T004–T006, T008–T009 and T010–T019 remain open.
-- [ ] T004 Add schema and quotation validation, citation navigation and stale/unavailable states.
+- [x] T004 Add schema and quotation validation, citation navigation and stale/unavailable states.
+  Completed 2026-11-20: the reader-review request now carries the requested findings schema and sends
+  `tools: []` on the wire and `tools: {}` at one `generateText` call with no retry, repair or second
+  completion; provider output is parsed once and validated against the strict schemas at the 262,144
+  UTF-8 byte bound; citations keep exact UTF-16 spans, literal quote equality, saved version and
+  raw-file SHA-256, with invalid citations withheld and counted. An explicit Check current sources
+  action performs one read-only comparison, Show exact passage re-reads and selects the exact current
+  span through the existing editor seam, and stale/unavailable sources keep the historical quote while
+  losing navigation. Focused seven-file 179 pass, core review 396 pass, review-ipc 5 pass, saved-review
+  22 pass; node typecheck clean, web only the known pre-existing `WorkspaceView` diagnostic.
+  Independent exact-head review ACCEPT and merge `7ef30b5`. Non-blocking residuals: the mounted
+  `WorkspaceView` keyboard journey remains T009, provider-failure/overflow hash assertions are partial,
+  source-check map completeness, and task-note wording. T001, T005–T006, T008–T009 and T010–T019
+  remain open.
 - [ ] T005 Add volatile profile attribution and explicit rerun comparison without replacing prior results.
 - [ ] T006 Add explicit multi-book manuscript scope and, only after 030 contracts, optional planning sources.
 - [x] T007 Resolve U-039-03 / D-171 applicability; accepted November 7 as D-199 / ADR 0020, with
