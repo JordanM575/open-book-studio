@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Review smoke evidence navigation
+- The hidden desktop smoke fixture now repeats “The lighthouse keeper” in The Light, and a new check reopens the retained review, waits for an enabled evidence control, opens the first occurrence and asserts the manuscript selects exactly “The lighthouse keeper” with the chapter still saved. The existing stale check now also proves every evidence control is disabled while stale. Smoke fixture and check coverage only; no product source, review runtime or task box changed, and T016 stays unchecked until the hidden smoke passes on a capable host.
+
 ### Reader review focus and provider errors
 - Opening the Reader review now moves focus to the Structured reader review heading after the panel mounts, and the focus test asserts the active element instead of page text. AI SDK transport failures are normalized through the shared provider-error mapping, so context maps to overflow and refusal maps to refused; the remaining provider failures stay the generic provider reason.
 
