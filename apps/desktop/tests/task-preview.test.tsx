@@ -1,7 +1,7 @@
 /// <reference types="bun" />
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import React from "react";
-import type { ConnectionSummary, ModelInfo } from "@ai-book-studio/core/providers/types";
+import type { ConnectionSummary, ModelInfo, ProviderId } from "@ai-book-studio/core/providers/types";
 import type { TaskProfile } from "@ai-book-studio/core/routing";
 import type { TaskPreviewData } from "@ai-book-studio/app/components/TaskPreviewDialog";
 import { mountDom, unmountDom } from "./support/dom";
@@ -27,7 +27,7 @@ function profile(overrides: Partial<TaskProfile> & { id: string }): TaskProfile 
     name: overrides.id,
     purpose: "Fixture profile.",
     version: 1,
-    requirements: { requiresTools: true, minContextLength: 32000 },
+    requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 },
     ...overrides
   };
 }
@@ -48,7 +48,7 @@ function data(): TaskPreviewData {
   return {
     profiles: [
       profile({ id: "drafting", name: "Drafting" }),
-      profile({ id: "art", name: "Art notes", requirements: { requiresTools: false, requiresImages: true } })
+      profile({ id: "art", name: "Art notes", requirements: { requiresTools: false, requiresImages: true, requiresKnownContext: false } })
     ],
     catalogues: [
       {
@@ -78,19 +78,28 @@ function data(): TaskPreviewData {
   };
 }
 
-function renderPreview(extra: { now?: number; onOpenModelPicker?: () => void; open?: boolean } = {}) {
+function renderPreview(
+  extra: {
+    now?: number;
+    onOpenModelPicker?: () => void;
+    open?: boolean;
+    onUseForNextMessage?: (candidate: { provider: ProviderId; modelId: string }) => void;
+  } = {}
+) {
   const onClose = mock(() => {});
   const onOpenModelPicker = mock(extra.onOpenModelPicker ?? (() => {}));
+  const onUseForNextMessage = extra.onUseForNextMessage ? mock(extra.onUseForNextMessage) : undefined;
   const view = testing.render(
     React.createElement(TaskPreviewDialog, {
       open: extra.open ?? true,
       data: data(),
       now: extra.now ?? NOW,
       onClose,
-      onOpenModelPicker
+      onOpenModelPicker,
+      ...(onUseForNextMessage ? { onUseForNextMessage } : {})
     })
   );
-  return { view, onClose, onOpenModelPicker };
+  return { view, onClose, onOpenModelPicker, onUseForNextMessage };
 }
 
 describe("task preview dialog", () => {
@@ -113,8 +122,8 @@ describe("task preview dialog", () => {
     const indices = order.map((name) => text.indexOf(name));
     expect(indices.every((index) => index >= 0)).toBe(true);
     expect([...indices].sort((a, b) => a - b)).toEqual(indices);
-    expect(view.getAllByText("Suitable")).toHaveLength(2);
-    expect(view.getByText("Not suitable")).toBeDefined();
+    expect(view.getAllByText("Known capability match")).toHaveLength(2);
+    expect(view.getByText("Does not meet known requirements")).toBeDefined();
     expect(view.getAllByText("Unknown")).toHaveLength(1);
     expect(view.getByText(/Unknown · Input: Unknown/)).toBeDefined();
     expect(view.getByText("This model cannot use tools, which the writing agent needs.")).toBeDefined();
@@ -142,6 +151,45 @@ describe("task preview dialog", () => {
     });
     expect(view.getByText("No suitable candidate known.")).toBeDefined();
     expect(view.getAllByText("This model cannot use images, which this task needs.")).toHaveLength(4);
+  });
+
+  test("the candidates are labelled as an unranked catalogue order", async () => {
+    const { view } = renderPreview();
+    await testing.within(document.body).findByTestId("task-preview");
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByText("Drafting"));
+    });
+    expect(await testing.within(document.body).findByTestId("task-preview-order-note")).toBeDefined();
+    expect(view.getByText("Listed in catalogue order; this is not a ranking.")).toBeDefined();
+    expect(view.getByTestId("task-preview-no-total").textContent).toContain("No total is shown because the request size is unknown.");
+  });
+
+  test("only eligible candidates offer the handoff action, with only provider and model id", async () => {
+    const received: Array<{ provider: string; modelId: string }> = [];
+    const { view } = renderPreview({ onUseForNextMessage: (candidate) => received.push(candidate) });
+    await testing.within(document.body).findByTestId("task-preview");
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByText("Drafting"));
+    });
+    const actions = view.getAllByTestId("task-preview-use-next");
+    // acme/large (openrouter) and muse-spark-1.3-contributor (meta) are the eligible ones.
+    expect(actions).toHaveLength(2);
+    const first = actions[0];
+    expect(first).toBeDefined();
+    await testing.act(async () => {
+      await testing.fireEvent.click(first as HTMLElement);
+    });
+    expect(received).toEqual([{ provider: "openrouter", modelId: "acme/large" }]);
+    expect(Object.keys(received[0] ?? {}).sort()).toEqual(["modelId", "provider"]);
+  });
+
+  test("no action is offered when the host does not wire the handoff", async () => {
+    const { view } = renderPreview();
+    await testing.within(document.body).findByTestId("task-preview");
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByText("Drafting"));
+    });
+    expect(view.queryByTestId("task-preview-use-next")).toBeNull();
   });
 
   test("the picker path calls back without choosing anything", async () => {

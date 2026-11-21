@@ -38,8 +38,8 @@ function model(overrides: Partial<ModelInfo> & { id: string }): ModelInfo {
 function previewData(): TaskPreviewData {
   return {
     profiles: [
-      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, minContextLength: 32000 } },
-      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false } }
+      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 } },
+      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false, requiresKnownContext: false } }
     ],
     catalogues: [
       { provider: "openrouter", catalogue: { models: [model({ id: "acme/large" })], fetchedAt: FRESH_AT } }
@@ -70,6 +70,77 @@ function throwingBridge(log: string[], path = "window.studio"): unknown {
 }
 
 describe("task preview calls", () => {
+  test("the no-cache state renders without touching the bridge or fetch", async () => {
+    const calls: string[] = [];
+    const studio = (globalThis as unknown as { window: { studio: unknown } }).window;
+    const savedStudio = studio.studio;
+    const savedFetch = globalThis.fetch;
+    const fetched: string[] = [];
+    studio.studio = throwingBridge(calls);
+    (globalThis as unknown as { fetch: unknown }).fetch = (...args: unknown[]) => {
+      fetched.push(String(args[0]));
+      throw new Error("preview must not fetch");
+    };
+    try {
+      const view = testing.render(
+        React.createElement(TaskPreviewDialog, {
+          open: true,
+          data: { ...previewData(), catalogues: [] },
+          now: NOW,
+          onClose: mock(() => {}),
+          onOpenModelPicker: mock(() => {})
+        })
+      );
+      await testing.within(document.body).findByTestId("task-preview-no-catalogues");
+      expect(view.getByText("No model list is loaded yet.")).toBeDefined();
+      expect(calls).toEqual([]);
+      expect(fetched).toEqual([]);
+    } finally {
+      studio.studio = savedStudio;
+      globalThis.fetch = savedFetch;
+    }
+  });
+
+  test("the per-candidate action fires once with the provider and model id and nothing else", async () => {
+    const calls: string[] = [];
+    const studio = (globalThis as unknown as { window: { studio: unknown } }).window;
+    const savedStudio = studio.studio;
+    const savedFetch = globalThis.fetch;
+    const fetched: string[] = [];
+    studio.studio = throwingBridge(calls);
+    (globalThis as unknown as { fetch: unknown }).fetch = (...args: unknown[]) => {
+      fetched.push(String(args[0]));
+      throw new Error("preview must not fetch");
+    };
+    const received: Array<{ provider: string; modelId: string }> = [];
+    try {
+      const view = testing.render(
+        React.createElement(TaskPreviewDialog, {
+          open: true,
+          data: previewData(),
+          now: NOW,
+          onClose: mock(() => {}),
+          onOpenModelPicker: mock(() => {}),
+          onUseForNextMessage: (candidate: { provider: string; modelId: string }) => received.push(candidate)
+        })
+      );
+      await testing.within(document.body).findByTestId("task-preview");
+      await testing.act(async () => {
+        await testing.fireEvent.click(view.getByText("Drafting"));
+      });
+      await testing.act(async () => {
+        await testing.fireEvent.click(view.getByTestId("task-preview-use-next"));
+      });
+      expect(received).toEqual([{ provider: "openrouter", modelId: "acme/large" }]);
+      expect(Object.keys(received[0] ?? {}).sort()).toEqual(["modelId", "provider"]);
+      expect(calls).toEqual([]);
+      expect(fetched).toEqual([]);
+    } finally {
+      studio.studio = savedStudio;
+      globalThis.fetch = savedFetch;
+    }
+  });
+
   test("open, change, picker path and close touch no bridge surface and fetch nothing", async () => {
     const calls: string[] = [];
     const studio = (globalThis as unknown as { window: { studio: unknown } }).window;

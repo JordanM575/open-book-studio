@@ -696,6 +696,70 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       return "run scope, studio counts, coverage and definitions over the fixture book";
     });
 
+    await check("review evidence selects the repeated phrase in the saved chapter", async () => {
+      const clicked = await evaluate<boolean>(
+        win,
+        `(() => {
+          const button = document.querySelector('[data-testid="review-manuscript"]');
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`
+      );
+      if (!clicked) throw new Error("the Review manuscript button was not found");
+      // The report is retained across Close; reopening re-checks it against the saved chapters.
+      // Freshness starts as checking and disables every control, so wait for an enabled button
+      // instead of clicking the first paint.
+      await waitUntil(
+        () =>
+          evaluate<boolean>(
+            win,
+            inPage(
+              `[...document.querySelectorAll('[data-testid="review-evidence"]')].some((button) => !button.disabled)`
+            )
+          ),
+        "the current report's evidence control"
+      );
+      const opened = await evaluate<boolean>(
+        win,
+        `(() => {
+          const button = [...document.querySelectorAll('[data-testid="review-evidence"]')].find((item) => !item.disabled);
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`
+      );
+      if (!opened) throw new Error("the current report had no enabled evidence control");
+      // The dialog closes only after the saved-source revalidation and the exact editor
+      // selection have both been applied.
+      await waitUntil(
+        () => evaluate<boolean>(win, inPage(`!document.querySelector('[data-testid="review-report"]')`)),
+        "the review report to close after selecting evidence"
+      );
+      const selection = await evaluate<string>(
+        win,
+        `(() => {
+          const el = document.querySelector('[data-testid="manuscript-text"]');
+          if (!el) return "";
+          return el.value.slice(el.selectionStart, el.selectionEnd);
+        })()`
+      );
+      if (selection !== "The lighthouse keeper") {
+        throw new Error(`evidence selection read: ${JSON.stringify(selection)}`);
+      }
+      const active = await evaluate<string>(
+        win,
+        `document.querySelector('[data-testid="chapter-row"][aria-current="page"]')?.textContent ?? ""`
+      );
+      if (!active.includes("The Light")) throw new Error(`active chapter read: ${JSON.stringify(active)}`);
+      const status = await evaluate<string>(
+        win,
+        `document.querySelector('[data-testid="save-status"]')?.textContent ?? ""`
+      );
+      if (!status.includes("Saved")) throw new Error(`save status read: ${JSON.stringify(status)}`);
+      return "opened the first occurrence and selected exactly “The lighthouse keeper”";
+    });
+
     await check("a changed chapter marks the review stale", async () => {
       const marker = `A hidden review check changed this ${Date.now()}.`;
       const typed = await evaluate<boolean>(
@@ -737,6 +801,18 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       );
       if (!stale.includes("This report is stale") || !stale.includes("The Light")) {
         throw new Error(`stale read: ${JSON.stringify(stale.slice(0, 160))}`);
+      }
+      // The retained report now has a finding, so staleness can be seen disabling its evidence.
+      const staleEvidence = await evaluate<{ total: number; enabled: number }>(
+        win,
+        `(() => {
+          const buttons = [...document.querySelectorAll('[data-testid="review-evidence"]')];
+          return { total: buttons.length, enabled: buttons.filter((button) => !button.disabled).length };
+        })()`
+      );
+      if (staleEvidence.total === 0) throw new Error("the stale report had no evidence control");
+      if (staleEvidence.enabled !== 0) {
+        throw new Error(`${staleEvidence.enabled} of ${staleEvidence.total} evidence controls stayed enabled while stale`);
       }
       const again = await evaluate<boolean>(
         win,

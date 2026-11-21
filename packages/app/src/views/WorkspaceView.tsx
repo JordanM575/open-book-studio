@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, Bot, ChevronLeft, Cpu, Download, FileSearch, FileText, History, Image as ImageIcon, List, MessageSquare, Monitor, Moon, MoreHorizontal, Plus, Search, Settings2, Sun, Type, type LucideIcon } from "lucide-react";
 import type {
   BookDetail,
@@ -12,10 +12,15 @@ import type { ManuscriptExportOutcome, RecoveredDraft, Result } from "@ai-book-s
 import { plainSaveReason } from "@ai-book-studio/core/library/errors";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
 import type { StorageSummary } from "@ai-book-studio/core/library/storage";
+import { findModel, canRunAgent } from "@ai-book-studio/core/providers/models";
+import type { ProviderId } from "@ai-book-studio/core/providers/types";
+import { WRITING_TASK_PROFILES } from "@ai-book-studio/core/routing";
 import { Button } from "@ai-book-studio/ui/button";
 import { Dialog, DialogContent, DialogFooter } from "@ai-book-studio/ui/dialog";
 import { ChapterRail } from "../components/ChapterRail";
-import { ModelPickerDialog } from "../components/ModelPickerDialog";
+import { ModelPickerDialog, type TurnHandoff } from "../components/ModelPickerDialog";
+import { TaskPreviewDialog } from "../components/TaskPreviewDialog";
+import { previewCatalogues, usableConnectionsFor, type PreviewCatalogueCache } from "../lib/task-preview-cache";
 import { IllustrationDialog } from "../components/IllustrationDialog";
 import { AgentDialog } from "../components/AgentDialog";
 import { AmbientPanel } from "../components/AmbientPanel";
@@ -97,6 +102,9 @@ interface Props {
 }
 
 const EMPTY_STATUS: SaveStatus = { kind: "saved", at: Date.now() };
+
+/** Static note for the shipped profile set; the dialog stays silent unless the host passes it. */
+const PROFILE_SET_NOTE = "All three tasks share the same requirements in this version, so they may show the same matches.";
 
 /** A short, always-visible label. The full label (with time) stays in aria-label. */
 function compactStatus(status: SaveStatus): string {
@@ -206,6 +214,11 @@ export function WorkspaceView({
   const [modelOpen, setModelOpen] = useState(false);
   const [modelMode, setModelMode] = useState<"book" | "turn">("book");
   const [turnModel, setTurnModel] = useState<{ connectionId: string; modelId: string } | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewHandoff, setPreviewHandoff] = useState<TurnHandoff | null>(null);
+  const [previewStatus, setPreviewStatus] = useState<string | undefined>(undefined);
+  const [catalogueCache, setCatalogueCache] = useState<PreviewCatalogueCache>({ connections: [], loads: [] });
+  const handoffConfirmed = useRef(false);
   const [bibleOpen, setBibleOpen] = useState(false);
   const [illustrationOpen, setIllustrationOpen] = useState(false);
   const [illustration, setIllustration] = useState<ImageRecord | null>(null);
@@ -326,10 +339,57 @@ export function WorkspaceView({
     setModelOpen(true);
   }, []);
 
+  const openPreview = useCallback(() => {
+    setPreviewStatus(undefined);
+    setPreviewOpen(true);
+  }, []);
+
+  const closePreview = useCallback(() => {
+    setPreviewOpen(false);
+    setPreviewHandoff(null);
+    handoffConfirmed.current = false;
+  }, []);
+
+  const previewCatalogueList = useMemo(() => previewCatalogues(catalogueCache), [catalogueCache]);
+  const previewData = useMemo(
+    () => ({
+      profiles: WRITING_TASK_PROFILES,
+      catalogues: previewCatalogueList,
+      connections: catalogueCache.connections,
+      build: (window.studio.platform === "web" ? "web" : "desktop") as "web" | "desktop"
+    }),
+    [previewCatalogueList, catalogueCache.connections]
+  );
+
+  const handleUseForNextMessage = useCallback(
+    (candidate: { provider: ProviderId; modelId: string }) => {
+      const entry = previewCatalogues(catalogueCache).find((item) => item.provider === candidate.provider);
+      const model = entry ? findModel(entry.catalogue, candidate.modelId) : null;
+      const usable = usableConnectionsFor(catalogueCache.connections, candidate.provider);
+      if (!model || !canRunAgent(model) || usable.length === 0) {
+        setPreviewStatus("This model is no longer a known capability match. Nothing has changed.");
+        return;
+      }
+      handoffConfirmed.current = false;
+      setPreviewStatus(undefined);
+      setPreviewHandoff({
+        provider: candidate.provider,
+        modelId: candidate.modelId,
+        connectionId: usable.length === 1 ? usable[0]?.id ?? null : null
+      });
+      openModelPicker("turn");
+    },
+    [catalogueCache, openModelPicker]
+  );
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: bookId is the trigger, not a closure value — the panel resets in place when the author switches books without a remount
   useEffect(() => {
     setTurnModel(null);
     setIssuesDismissed(false);
+    // A book switch drops the model picker and any pending candidate handoff; nothing persists.
+    setModelOpen(false);
+    setPreviewHandoff(null);
+    handoffConfirmed.current = false;
   }, [bookId]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: book/library identity invalidates run-local work even if the view stays mounted
@@ -1774,6 +1834,7 @@ export function WorkspaceView({
             onChooseTurnModel={() => openModelPicker("turn")}
             turnModel={turnModel}
             onTurnModelUsed={() => setTurnModel(null)}
+            onPreviewModels={detail ? openPreview : undefined}
             onChanged={reloadAfterAgent}
             onConflictCopy={refreshConflicts}
             onNotice={onNotice}
@@ -1803,11 +1864,35 @@ export function WorkspaceView({
       </nav>
 
       {detail ? (
+        <TaskPreviewDialog
+          open={previewOpen}
+          data={previewData}
+          profileSetNote={PROFILE_SET_NOTE}
+          status={previewStatus}
+          onClose={closePreview}
+          onOpenModelPicker={() => openModelPicker("book")}
+          onUseForNextMessage={window.studio.platform === "web" ? undefined : handleUseForNextMessage}
+        />
+      ) : null}
+
+      {detail ? (
         <ModelPickerDialog
           open={modelOpen}
           book={detail.book}
           initial={modelMode === "turn" ? turnModel : null}
-          onPick={modelMode === "turn" ? (choice) => setTurnModel(choice) : undefined}
+          onPick={
+            modelMode === "turn"
+              ? (choice) => {
+                  setTurnModel(choice);
+                  if (previewHandoff) {
+                    handoffConfirmed.current = true;
+                    setPreviewStatus("Model set for the next message.");
+                  }
+                }
+              : undefined
+          }
+          handoff={modelMode === "turn" ? previewHandoff ?? undefined : undefined}
+          onCataloguesLoaded={setCatalogueCache}
           onSaved={
             modelMode === "book"
               ? (book) => {
@@ -1816,10 +1901,22 @@ export function WorkspaceView({
                 }
               : undefined
           }
-          onClose={() => setModelOpen(false)}
+          onClose={() => {
+            setModelOpen(false);
+            if (previewHandoff) {
+              if (!handoffConfirmed.current) setPreviewStatus("No model was chosen. Nothing changed.");
+              setPreviewHandoff(null);
+            }
+            handoffConfirmed.current = false;
+          }}
           onConflictCopy={refreshConflicts}
           onOpenSettings={() => {
             setModelOpen(false);
+            if (previewHandoff) {
+              setPreviewStatus("No model was chosen. Nothing changed.");
+              setPreviewHandoff(null);
+            }
+            handoffConfirmed.current = false;
             openSettings("providers");
           }}
         />

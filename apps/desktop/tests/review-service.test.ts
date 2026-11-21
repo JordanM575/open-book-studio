@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { APICallError } from "ai";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { utf8Bytes } from "@ai-book-studio/core/review/contract";
+import { treeFingerprint, expectTreeUnchanged } from "./support/tree-fingerprint";
 import type { Catalogue } from "@ai-book-studio/core/providers/models";
 import { ProviderError, type ConnectionSummary, type ModelInfo, type StoredCredential } from "@ai-book-studio/core/providers/types";
 import { REVIEW_LIMITS } from "@ai-book-studio/core/review/contract";
@@ -69,9 +71,15 @@ class FakeTransport implements ReviewTransport {
   error: unknown = null;
   pending: Promise<{ output: string }> | null = null;
   started = deferred<void>();
+  /** Test-only escape hatch: return a contract-violating shape instead of the contract. */
+  rawResult: unknown = undefined;
+  /** Test-only hook invoked synchronously inside run(), before it returns. */
+  callDuringRun: (() => void) | undefined = undefined;
   async run(input: { envelope: ReviewEnvelope; credential: StoredCredential; signal: AbortSignal }): Promise<{ output: string }> {
     this.calls.push(input);
     this.started.resolve();
+    this.callDuringRun?.();
+    if (this.rawResult !== undefined) return this.rawResult as { output: string };
     if (this.pending) return this.pending;
     if (this.error) throw this.error;
     return { output: this.output ? this.output(input.envelope) : outputFor(input.envelope) };
@@ -89,6 +97,14 @@ async function fixture(options: {
   const library = await Library.open(root);
   const book = await library.createBook({ title: "Synthetic reader service book" });
   const chapter = await library.createChapter(book.id, { title: "The arrival", content: "Synthetic saved prose for the reader." });
+  const otherBook = await library.createBook({ title: "Synthetic unselected second book" });
+  await library.createChapter(otherBook.id, { title: "Other chapter", content: "Synthetic other-book prose, never selected." });
+  const threadsDir = join(root, "books", book.id, "threads");
+  await mkdir(threadsDir, { recursive: true });
+  await writeFile(join(threadsDir, "synthetic-sentinel.json"), "{\"sentinel\":\"reader review must not touch this\"}\n");
+  const conflictsDir = join(root, "books", book.id, "conflicts");
+  await mkdir(conflictsDir, { recursive: true });
+  await writeFile(join(conflictsDir, "chapter.conflict-external-edit.synthetic.md"), "conflict candidate bytes\n");
   const selectedConnection = connection(options.connection);
   const selectedModel = model(options.model);
   if (!options.noDefault) {
@@ -102,7 +118,7 @@ async function fixture(options: {
   const providers = new FakeProviders([selectedConnection], { models: [selectedModel], fetchedAt: stamp });
   const transport = new FakeTransport();
   const service = new ReaderReviewService({ library: () => library, providers, transport, now: () => stamp });
-  return { root, library, book, chapter, providers, transport, service, selectedConnection, selectedModel };
+  return { root, library, book, chapter, otherBook, providers, transport, service, selectedConnection, selectedModel };
 }
 
 function request(bookId: string, options: {
@@ -121,6 +137,60 @@ async function prepared(f: Awaited<ReturnType<typeof fixture>>, prepareId = "pre
   }));
   if (result.kind !== "ready") throw new Error(`Expected ready, got ${result.reason}`);
   return result;
+}
+
+/**
+ * Read-only method names the reader-review path may call; everything else must stay at zero.
+ * The `readBook*`/`chapter*`/`fallbackMeta` entries are the private read helpers that
+ * `LibraryService.readBook` is built from; verified to perform no storage writes.
+ */
+const READ_ONLY_METHODS = new Set([
+  "readBook", "readChapter", "listBooks", "listBooksWithIssues", "listConflicts",
+  "readImage", "listImages", "listChapterHistory", "readChapterHistory", "compareChapterHistory", "search",
+  "readBookFile", "readChaptersWithIssues", "readChapterFile", "chapterFileNames", "chapterFromSnapshot", "fallbackMeta"
+]);
+
+interface WriterSpy {
+  offenders(): string[];
+}
+
+/** Wraps every function on the named surfaces in a counting proxy, then reports non-read calls. */
+function spyOnLibraryWriters(library: Library): WriterSpy {
+  const targets: Array<[string, object]> = [
+    ["library", library],
+    ["library.service", (library as unknown as { service: object }).service],
+    ["library.threads", library.threads],
+    ["library.images", library.images],
+    ["library.reviewRecords", library.reviewRecords],
+    ["library.campaignContinuations", library.campaignContinuations]
+  ];
+  const counts = new Map<string, number>();
+  for (const [label, target] of targets) {
+    let proto: object | null = Object.getPrototypeOf(target);
+    const seen = new Set<string>();
+    while (proto && proto !== Object.prototype) {
+      for (const name of Object.getOwnPropertyNames(proto)) {
+        if (name === "constructor" || seen.has(name)) continue;
+        const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+        if (!descriptor || typeof descriptor.value !== "function") continue;
+        seen.add(name);
+        if (READ_ONLY_METHODS.has(name)) continue;
+        const key = `${label}.${name}`;
+        counts.set(key, 0);
+        const original = descriptor.value as (this: unknown, ...args: unknown[]) => unknown;
+        Object.defineProperty(target, name, {
+          configurable: true,
+          writable: true,
+          value(this: unknown, ...args: unknown[]) {
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+            return original.apply(this, args);
+          }
+        });
+      }
+      proto = Object.getPrototypeOf(proto);
+    }
+  }
+  return { offenders: () => [...counts].filter(([, count]) => count > 0).map(([name]) => name) };
 }
 
 function hashes(root: string, bookId: string, chapterPath: string) {
@@ -303,35 +373,48 @@ describe("volatile selected-source reader service", () => {
     ["context", new ProviderError("context", "PRIVATE_PROVIDER_BODY"), "overflow"],
     ["api offline", new APICallError({ message: "fetch failed", url: "https://example.test", requestBodyValues: {}, isRetryable: false }), "provider"],
     ["api refused", new APICallError({ message: "Content policy", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "content policy violation", isRetryable: false }), "refused"],
-    ["api context", new APICallError({ message: "Context length exceeded", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "maximum context length", isRetryable: false }), "overflow"]
+    ["api context", new APICallError({ message: "Context length exceeded", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "maximum context length", isRetryable: false }), "overflow"],
+    ["api 429", new APICallError({ message: "Too Many Requests", url: "https://example.test", requestBodyValues: {}, statusCode: 429, isRetryable: false }), "provider"],
+    ["api 401", new APICallError({ message: "Unauthorized", url: "https://example.test", requestBodyValues: {}, statusCode: 401, isRetryable: false }), "provider"],
+    ["api 400 unrelated body", new APICallError({ message: "Bad Request", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "unrelated validation detail", isRetryable: false }), "provider"],
+    ["api 400 prompt-is-too-long body (not a context signal)", new APICallError({ message: "prompt is too long", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "prompt is too long", isRetryable: false }), "provider"],
+    ["api refused behind a fenced JSON body", new APICallError({ message: "Request failed", url: "https://example.test", requestBodyValues: {}, statusCode: 400, responseBody: "```json\n{\"error\": \"content policy violation\"}\n```", isRetryable: false }), "refused"],
+    ["bare error", new Error("boom"), "provider"]
   ] as const)("a %s transport failure ends incomplete with one call", async (_name, error, expected) => {
     const f = await fixture();
     const result = await prepared(f);
+    const before = await treeFingerprint(f.root);
     f.transport.error = error;
     await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
       .resolves.toEqual({ kind: "failed", reason: expected });
     expect(f.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
   });
 
   test("malformed and oversized outputs fail the run without repair or retry", async () => {
     const malformed = await fixture();
     const first = await prepared(malformed);
+    const malformedBefore = await treeFingerprint(malformed.root);
     malformed.transport.output = () => "not-json";
     await expect(malformed.service.start({ operation: "start", requestId: first.requestId, scopeDigest: first.scopeDigest }))
       .resolves.toEqual({ kind: "failed", reason: "malformed" });
     expect(malformed.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(malformedBefore, await treeFingerprint(malformed.root));
 
     const oversized = await fixture();
     const second = await prepared(oversized);
+    const oversizedBefore = await treeFingerprint(oversized.root);
     oversized.transport.output = () => " ".repeat(REVIEW_LIMITS.outputBytes + 1);
     await expect(oversized.service.start({ operation: "start", requestId: second.requestId, scopeDigest: second.scopeDigest }))
       .resolves.toEqual({ kind: "failed", reason: "overflow" });
     expect(oversized.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(oversizedBefore, await treeFingerprint(oversized.root));
   });
 
-  test("prepare, Start, Stop and cancel leave book and chapter bytes identical and call no writer", async () => {
+  test("prepare, Start, Stop and cancel leave the whole tree byte-identical and call no writer", async () => {
     const f = await fixture();
     const before = await hashes(f.root, f.book.id, f.chapter.path);
+    const treeBefore = await treeFingerprint(f.root);
     const writes: string[] = [];
     const target = f.library as unknown as Record<string, (...args: never[]) => unknown>;
     for (const name of ["createChapter", "saveChapter", "updateBook", "deleteChapter"] as const) {
@@ -352,6 +435,7 @@ describe("volatile selected-source reader service", () => {
     expect(await f.service.cancelPrepare({ operation: "cancelPrepare", prepareId: third.prepareId })).toBe("cancelled");
     expect(writes).toEqual([]);
     expect(await hashes(f.root, f.book.id, f.chapter.path)).toEqual(before);
+    expectTreeUnchanged(treeBefore, await treeFingerprint(f.root));
     expect(f.transport.calls).toHaveLength(1);
   });
 });
@@ -385,11 +469,156 @@ describe("strict reader output acceptance", () => {
       const f = await fixture();
       const before = await hashes(f.root, f.book.id, f.chapter.path);
       const ready = await prepared(f);
+      const treeBefore = await treeFingerprint(f.root);
       f.transport.output = variant;
       await expect(f.service.start({ operation: "start", requestId: ready.requestId, scopeDigest: ready.scopeDigest }))
         .resolves.toEqual({ kind: "failed", reason: "malformed" });
       expect(f.transport.calls).toHaveLength(1);
       expect(await hashes(f.root, f.book.id, f.chapter.path)).toEqual(before);
+      expectTreeUnchanged(treeBefore, await treeFingerprint(f.root));
     }
+  });
+});
+
+describe("read-only enforcement across the whole library tree", () => {
+  test("prepare, start, stop and cancel across the whole flow call no writer anywhere and leave the tree byte-identical", async () => {
+    const f = await fixture();
+    const spy = spyOnLibraryWriters(f.library);
+    const before = await treeFingerprint(f.root);
+
+    const first = await prepared(f);
+    const completed = await f.service.start({ operation: "start", requestId: first.requestId, scopeDigest: first.scopeDigest });
+    expect(completed.kind).toBe("completed");
+
+    const second = await f.service.prepare(request(f.book.id, { chapterId: f.chapter.id, content: f.chapter.content, prepareId: "prepare-2" }));
+    expect(second.kind).toBe("ready");
+    if (second.kind !== "ready") throw new Error("Expected a second disclosure");
+    expect(await f.service.stop({ operation: "stop", requestId: second.requestId })).toBe("not-started");
+
+    const third = await f.service.prepare(request(f.book.id, { chapterId: f.chapter.id, content: f.chapter.content, prepareId: "prepare-3" }));
+    expect(third.kind).toBe("ready");
+    if (third.kind !== "ready") throw new Error("Expected a third disclosure");
+    expect(await f.service.cancelPrepare({ operation: "cancelPrepare", prepareId: third.prepareId })).toBe("cancelled");
+
+    expect(spy.offenders()).toEqual([]);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+    // The unselected second book, the threads sentinel and the conflict candidate are all inside the fingerprint.
+    expect(spy.offenders()).not.toContain("library.service.createBook");
+    expect(f.transport.calls).toHaveLength(1);
+  });
+
+  test("a failure row never calls a writer and never changes the tree", async () => {
+    const f = await fixture();
+    const spy = spyOnLibraryWriters(f.library);
+    const before = await treeFingerprint(f.root);
+    const result = await prepared(f);
+    f.transport.error = new ProviderError("refusal", "PRIVATE_PROVIDER_BODY");
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "refused" });
+    expect(f.transport.calls).toHaveLength(1);
+    expect(spy.offenders()).toEqual([]);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+  });
+
+  test("a spurious AbortError with no stop signal is a provider failure, never a stop", async () => {
+    const f = await fixture();
+    const spy = spyOnLibraryWriters(f.library);
+    const before = await treeFingerprint(f.root);
+    const result = await prepared(f);
+    f.transport.error = Object.assign(new Error("aborted"), { name: "AbortError" });
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "provider" });
+    expect(f.transport.calls).toHaveLength(1);
+    expect(f.transport.calls[0]?.signal.aborted).toBe(false);
+    expect(spy.offenders()).toEqual([]);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+  });
+
+  test("an output of exactly 262144 bytes completes; one byte more fails as overflow with one call", async () => {
+    const exact = await fixture();
+    const ready = await prepared(exact);
+    const base = outputFor(ready.envelope);
+    const padding = REVIEW_LIMITS.outputBytes - utf8Bytes(base);
+    expect(padding).toBeGreaterThan(0);
+    const exactOutput = base + " ".repeat(padding);
+    expect(utf8Bytes(exactOutput)).toBe(REVIEW_LIMITS.outputBytes);
+    const beforeExact = await treeFingerprint(exact.root);
+    exact.transport.output = () => exactOutput;
+    await expect(exact.service.start({ operation: "start", requestId: ready.requestId, scopeDigest: ready.scopeDigest }))
+      .resolves.toMatchObject({ kind: "completed" });
+    expect(exact.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(beforeExact, await treeFingerprint(exact.root));
+
+    const over = await fixture();
+    const readyOver = await prepared(over);
+    const overBase = outputFor(readyOver.envelope);
+    const overPadding = REVIEW_LIMITS.outputBytes + 1 - utf8Bytes(overBase);
+    const overOutput = overBase + " ".repeat(overPadding);
+    expect(utf8Bytes(overOutput)).toBe(REVIEW_LIMITS.outputBytes + 1);
+    const beforeOver = await treeFingerprint(over.root);
+    over.transport.output = () => overOutput;
+    await expect(over.service.start({ operation: "start", requestId: readyOver.requestId, scopeDigest: readyOver.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "overflow" });
+    expect(over.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(beforeOver, await treeFingerprint(over.root));
+  });
+
+  test("a contradiction claim outside continuity fails as malformed with one call and an unchanged tree", async () => {
+    const f = await fixture();
+    const spy = spyOnLibraryWriters(f.library);
+    const result = await prepared(f);
+    f.transport.output = (envelope) => JSON.stringify({
+      runId: envelope.requestId, readerId: envelope.profile?.id, readerVersion: envelope.profile?.version,
+      findings: [{ findingId: "f-1", category: "clarity", readerId: envelope.profile?.id, readerVersion: envelope.profile?.version,
+        runId: envelope.requestId, interpretation: "Synthetic contradiction claim.", claim: "contradiction", evidence: [] }]
+    });
+    const before = await treeFingerprint(f.root);
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "malformed" });
+    expect(f.transport.calls).toHaveLength(1);
+    expect(spy.offenders()).toEqual([]);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+  });
+
+  test("a contract-violating transport result is malformed, never a crash or a retry", async () => {
+    const f = await fixture();
+    const result = await prepared(f);
+    f.transport.rawResult = { output: undefined };
+    const before = await treeFingerprint(f.root);
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "malformed" });
+    expect(f.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+  });
+
+  test("a refusal-shaped body delivered as a successful response fails as malformed, not refused", async () => {
+    const f = await fixture();
+    const result = await prepared(f);
+    f.transport.output = () => JSON.stringify({ error: { message: "I cannot help with that request." } });
+    const before = await treeFingerprint(f.root);
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "failed", reason: "malformed" });
+    expect(f.transport.calls).toHaveLength(1);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
+  });
+
+  test("stop landing during output validation discards the run deterministically", async () => {
+    const f = await fixture();
+    const spy = spyOnLibraryWriters(f.library);
+    const result = await prepared(f);
+    const before = await treeFingerprint(f.root);
+    f.transport.callDuringRun = () => {
+      // stop() has no awaits: its body runs synchronously, aborting the controller and removing
+      // the active entry before transport.run returns control to the service.
+      void f.service.stop({ operation: "stop", requestId: result.requestId });
+    };
+    await expect(f.service.start({ operation: "start", requestId: result.requestId, scopeDigest: result.scopeDigest }))
+      .resolves.toEqual({ kind: "stopped" });
+    expect(f.transport.calls).toHaveLength(1);
+    expect(f.transport.calls[0]?.signal.aborted).toBe(true);
+    // The in-flight stop consumed the active entry, so a late stop reports unconfirmed.
+    await expect(f.service.stop({ operation: "stop", requestId: result.requestId })).resolves.toBe("unconfirmed");
+    expect(spy.offenders()).toEqual([]);
+    expectTreeUnchanged(before, await treeFingerprint(f.root));
   });
 });
