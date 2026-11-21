@@ -1108,3 +1108,57 @@ describe("volatile attempt history, attribution and explicit rerun comparison", 
     expect(body().getByText("Counts by category")).toBeTruthy();
   });
 });
+describe("injection resistance at the results surface", () => {
+  test("I-12 markup in an interpretation renders as inert text, never as elements or handlers", async () => {
+    const value = await envelope();
+    const payload = '<img src=x onerror=alert(1)> <script>globalThis.__pwned = true</script>';
+    const hostile = await run(value, [citation()], payload);
+    const marker = globalThis as Record<string, unknown>;
+    delete marker.__pwned;
+    render(value, { onStart: async () => ({ kind: "completed", run: hostile }) });
+    await complete();
+    const article = body().getByRole("article", { name: "Reader run request-1" });
+    expect(article.textContent).toContain(payload);
+    expect(article.querySelector("img")).toBeNull();
+    expect(article.querySelector("script")).toBeNull();
+    expect(article.querySelector("[onerror]")).toBeNull();
+    expect(marker.__pwned).toBeUndefined();
+  });
+
+  test("I-21 a navigation refusal is keyed to its run and is not replayed onto a rerun", async () => {
+    const value = await envelope();
+    const second = await envelope("request-2");
+    const bothChecked = () => ({ kind: "checked" as const, byScopeDigest: new Map([
+      [value.scopeDigest, currentSources(value)], [second.scopeDigest, currentSources(second)]
+    ]) });
+    const onNavigate = mock(async (_request: Parameters<ReaderReviewProps["onNavigate"]>[0]) => "unavailable" as const);
+    const view = render(value, { onNavigate });
+    await complete();
+    await checkSources();
+    clickEvidence();
+    await testing.waitFor(() => expect(statusText()).toBe(citationNavigationCopy.unavailable));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect((evidenceButton(0) as HTMLButtonElement).disabled).toBe(true);
+
+    // A rerun discloses a new request; its evidence starts unblocked even with identical citation bytes.
+    view.update({
+      disclosureRevision: "facts-2",
+      onPrepare: async () => ({ kind: "ready", prepared: prepared(second) }),
+      onStart: async () => ({ kind: "completed", run: await run(second, [citation()]) }),
+      onCheckSources: async () => bothChecked()
+    });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getAllByRole("article")).toHaveLength(2));
+    await checkSources();
+    const buttons = body().getAllByRole("button", { name: /^Show exact passage for / });
+    expect(buttons).toHaveLength(2);
+    expect((buttons[0] as HTMLButtonElement).disabled).toBe(true);
+    expect((buttons[1] as HTMLButtonElement).disabled).toBe(false);
+    testing.fireEvent.click(buttons[1] as HTMLButtonElement);
+    await testing.waitFor(() => expect(onNavigate).toHaveBeenCalledTimes(2));
+    expect(onNavigate.mock.calls[1]?.[0].run.runId).toBe("request-2");
+    expect(onNavigate.mock.calls[1]?.[0].citation).toEqual(citation());
+  });
+});

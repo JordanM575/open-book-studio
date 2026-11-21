@@ -1,10 +1,10 @@
 # Tasks: structured reader and continuity review
 
 D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
-mounted journey. T003's disclosed volatile selected-source prepare/start and T004's schema, quotation
-and citation-navigation work are delivered at the source/test level; T001, T005–T006, T008–T009 and
-T010–T019 remain. The built-app keyboard journey stays with T009. T010 retains the independent
-correction gate. The policy amendment completed T007.
+mounted journey. T003's disclosed volatile selected-source prepare/start, T004's schema, quotation
+and citation-navigation work and T008's read-only enforcement proof are delivered at the
+source/test level; T001, T005–T006, T009 and T010–T019 remain. The built-app keyboard journey stays
+with T009. T010 retains the independent correction gate. The policy amendment completed T007.
 
 - [ ] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
 - [x] T002 Apply accepted D-193 / ADR 0018 for U-039-01/02; define and test finding, profile/version and run contracts. W10: new `review/profiles.ts`, `wire-schema.ts`, `findings.ts` and `scoped-readers.test.ts`; pure, volatile contracts only.
@@ -28,7 +28,25 @@ correction gate. The policy amendment completed T007.
 - [ ] T006 Add explicit multi-book manuscript scope and, only after 030 contracts, optional planning sources.
 - [x] T007 Resolve U-039-03 / D-171 applicability; accepted November 7 as D-199 / ADR 0020, with
   explicit-save/recovery plan below. No storage implementation is claimed by this task.
-- [ ] T008 Prove read-only enforcement, injection resistance, overflow, stop, failure and no automatic retries with mocked transports and file hashes.
+- [x] T008 Prove read-only enforcement, injection resistance, overflow, stop, failure and no automatic retries with mocked transports and file hashes.
+  Completed 2026-11-20: test-only proof of read-only enforcement merged in PR #116 at `8d71814`
+  (review ACCEPT at exact head `9c526879c5ffa1321e958789952163023a609720`). Three new files
+  (`packages/core/tests/review/injection.test.ts`,
+  `apps/desktop/tests/review-readonly-boundary.test.ts`,
+  `apps/desktop/tests/support/tree-fingerprint.ts`), eight extended suites and the one merge-time
+  CHANGELOG entry; no product source, spec, task or dependency change. Reviewer re-run: 320/320
+  across the nine memo files, 465/465 core review sweep, 46/46 boundary suite; node/web typecheck
+  only the known pre-existing `WorkspaceView` diagnostic. Whole-tree SHA-256 fingerprints back
+  prepare/start/stop/cancel and every failure row; the injection corpus pins the trusted system
+  message byte-for-byte and the boundary scan enumerates the review data-plane files explicitly
+  rather than globbing them, so a future reader-path module could escape the scan until the list is
+  updated. One journey assertion was re-scoped (re-anchored to a fingerprint taken after the
+  deliberate write-and-restore, with whole-tree assertions added earlier in the same test); no
+  pre-existing assertion was weakened. T004's provider-failure/overflow hash-assertion residual is
+  partially covered by the whole-tree service-level assertions here. The post-validation stop
+  window is covered by the transport-injected deterministic test rather than a product hook. No
+  live-provider, built-app, packaged-app or device evidence is claimed; those stay with T009.
+  T001, T005–T006, T009 and T010–T019 remain open.
 - [ ] T009 Verify built-app keyboard/theme/reduced-motion/reduced-transparency/unsupported-host journeys; run exact-head tests/typecheck/smoke and record limitations in the index/changelog.
 
 ## Inline, retained and whole-book follow-through — ADR 0020

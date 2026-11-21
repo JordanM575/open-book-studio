@@ -101,3 +101,22 @@ describe("one AI SDK reader transport call", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("transport credential hygiene", () => {
+  test("the wire and the generator options never carry the credential secret", async () => {
+    const envelope = await readerEnvelope();
+    const { calls, transport } = harness("stop", "synthetic output");
+    const controller = new AbortController();
+    await transport.run({ envelope, credential, signal: controller.signal });
+    expect(calls).toHaveLength(1);
+    const wire = serializeProviderRequest(envelope);
+    expect(wire).not.toContain(credential.secret);
+    expect(JSON.stringify(calls[0])).not.toContain(credential.secret);
+    const options = calls[0] as unknown as Record<string, unknown>;
+    for (const key of Object.keys(options)) {
+      expect(key.toLowerCase()).not.toContain("credential");
+      expect(key.toLowerCase()).not.toContain("apikey");
+      expect(key.toLowerCase()).not.toContain("secret");
+    }
+  });
+});

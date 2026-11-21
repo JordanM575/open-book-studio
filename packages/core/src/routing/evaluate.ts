@@ -3,6 +3,7 @@ import type { ConnectionSummary, ModelInfo, ProviderId } from "../providers/type
 import { catalogueFreshness, unavailableReason, type Catalogue, type CatalogueFreshness } from "../providers/models";
 import { browserAvailable, browserAvailabilityCopy, providerById } from "../providers/registry";
 import type { TaskProfile } from "./profiles";
+import { UNKNOWN_CONTEXT_NOTE } from "./presentation";
 
 export type RoutingBuild = "desktop" | "web";
 
@@ -149,14 +150,12 @@ function assess(
     }
   }
   const minimum = requirements.minContextLength ?? null;
-  if (minimum !== null) {
-    if (model.contextLength === null) {
-      worsen("unknown");
-      reasons.push("This provider does not report the model's context size.");
-    } else if (model.contextLength < minimum) {
-      worsen("excluded");
-      reasons.push(`This model holds ${model.contextLength} tokens of context, below the ${minimum} this task needs.`);
-    }
+  if (model.contextLength === null && (minimum !== null || requirements.requiresKnownContext === true)) {
+    worsen("unknown");
+    reasons.push(UNKNOWN_CONTEXT_NOTE);
+  } else if (minimum !== null && model.contextLength !== null && model.contextLength < minimum) {
+    worsen("excluded");
+    reasons.push(`This model holds ${model.contextLength} tokens of context, below the ${minimum} this task needs.`);
   }
 
   if (isContributorModel(model)) {

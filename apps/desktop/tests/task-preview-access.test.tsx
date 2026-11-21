@@ -38,8 +38,8 @@ function model(overrides: Partial<ModelInfo> & { id: string }): ModelInfo {
 function previewData(): TaskPreviewData {
   return {
     profiles: [
-      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, minContextLength: 32000 } },
-      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false } }
+      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 } },
+      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false, requiresKnownContext: false } }
     ],
     catalogues: [
       {
@@ -54,16 +54,19 @@ function previewData(): TaskPreviewData {
   };
 }
 
-function openPreview() {
-  return testing.render(
+function openPreview(withHandoff = false) {
+  const onUseForNextMessage = withHandoff ? mock(() => {}) : undefined;
+  const view = testing.render(
     React.createElement(TaskPreviewDialog, {
       open: true,
       data: previewData(),
       now: NOW,
       onClose: mock(() => {}),
-      onOpenModelPicker: mock(() => {})
+      onOpenModelPicker: mock(() => {}),
+      ...(onUseForNextMessage ? { onUseForNextMessage } : {})
     })
   );
+  return { view, onUseForNextMessage };
 }
 
 describe("task preview access", () => {
@@ -80,7 +83,7 @@ describe("task preview access", () => {
   });
 
   test("profile buttons expose pressed state and take focus", async () => {
-    const view = openPreview();
+    const { view } = openPreview();
     await testing.within(document.body).findByTestId("task-preview");
     const drafting = view.getByRole("button", { name: /Drafting/ });
     expect(drafting.getAttribute("aria-pressed")).toBe("false");
@@ -94,19 +97,19 @@ describe("task preview access", () => {
   });
 
   test("reasons render as a real list beside their status", async () => {
-    const view = openPreview();
+    const { view } = openPreview();
     await testing.within(document.body).findByTestId("task-preview");
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByText("Drafting"));
     });
     const list = view.getByTestId("task-preview-candidates");
     expect(list.querySelector("ul")).not.toBeNull();
-    expect(list.textContent).toContain("Not suitable");
+    expect(list.textContent).toContain("Does not meet known requirements");
     expect(list.textContent).toContain("This model cannot use tools, which the writing agent needs.");
   });
 
   test("nothing animates inline: motion stays in the stylesheet guard", async () => {
-    const view = openPreview();
+    const { view } = openPreview();
     await testing.within(document.body).findByTestId("task-preview");
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByText("Drafting"));
@@ -119,7 +122,7 @@ describe("task preview access", () => {
   });
 
   test("light and dark render the same content with token-only styling", async () => {
-    const view = openPreview();
+    const { view } = openPreview();
     await testing.within(document.body).findByTestId("task-preview");
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByText("Drafting"));
@@ -128,7 +131,7 @@ describe("task preview access", () => {
     expect(light.length).toBeGreaterThan(0);
     testing.cleanup();
     document.documentElement.setAttribute("data-theme", "dark");
-    const darkView = openPreview();
+    const { view: darkView } = openPreview();
     await testing.within(document.body).findByTestId("task-preview");
     await testing.act(async () => {
       await testing.fireEvent.click(darkView.getByText("Drafting"));
@@ -145,5 +148,40 @@ describe("task preview access", () => {
       .map((element) => element.getAttribute("class") ?? "")
       .join(" ");
     expect(classes).not.toMatch(/#[0-9a-fA-F]{3,6}\b|rgba?\(/);
+  });
+
+  test("the handoff action is named for its model, focusable, and never the initial focus", async () => {
+    const { view } = openPreview(true);
+    const dialog = await testing.within(document.body).findByRole("dialog", { name: "Preview models" });
+    expect(dialog.contains(document.activeElement)).toBe(true); // some control inside the dialog holds focus
+    expect(document.activeElement).not.toBe(view.queryByTestId("task-preview-use-next"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByText("Drafting"));
+    });
+    const action = view.getByRole("button", { name: "Use acme/large for the next message" });
+    expect(action).toBeDefined();
+    (action as HTMLElement).focus();
+    expect(document.activeElement).toBe(action);
+    // The excluded candidate offers no action.
+    expect(view.getAllByTestId("task-preview-use-next")).toHaveLength(1);
+  });
+
+  test("the order note renders above the candidates and no chooser, Apply or Reject control exists", async () => {
+    const { view } = openPreview();
+    await testing.within(document.body).findByTestId("task-preview");
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByText("Drafting"));
+    });
+    const note = view.getByTestId("task-preview-order-note");
+    const list = view.getByTestId("task-preview-candidates");
+    expect(list.firstElementChild).toBe(note);
+    expect(note.textContent).toBe("Listed in catalogue order; this is not a ranking.");
+    const banned = /apply|reject|best|recommended/i;
+    for (const button of Array.from(view.getByTestId("task-preview").querySelectorAll("button"))) {
+      expect(button.textContent ?? "").not.toMatch(banned);
+    }
+    expect(view.queryByRole("combobox")).toBeNull();
+    expect(view.queryByRole("radio")).toBeNull();
+    expect(view.queryByRole("listbox")).toBeNull();
   });
 });

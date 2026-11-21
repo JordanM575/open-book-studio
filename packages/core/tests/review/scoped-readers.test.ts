@@ -199,7 +199,7 @@ describe("one bounded provider-output parser", () => {
     expect(parseReaderOutput(JSON.stringify(output(value)))).toEqual(output(value));
     const malformed = [
       undefined, null, 42, {}, new String(JSON.stringify(output(value))),
-      "not JSON", "```json\n{}\n```", `${JSON.stringify(output(value))} trailing`,
+      "not JSON", "```json\n{}\n```", `\uFEFF${JSON.stringify(output(value))}`, `\`\`\`json\n${JSON.stringify(output(value))}\n\`\`\``, `${JSON.stringify(output(value))} trailing`,
       JSON.stringify(null), JSON.stringify([]), JSON.stringify("text"), JSON.stringify(42),
       JSON.stringify({ ...output(value), extra: true }),
       JSON.stringify({ runId: output(value).runId, readerId: output(value).readerId, readerVersion: output(value).readerVersion }),
@@ -695,5 +695,58 @@ describe("volatile rerun comparison", () => {
     if (comparison.status !== "comparable") throw new Error("expected comparable");
     expect(comparison.sourceChanged).toBe(false);
     expect(comparison.kind).toBe("identical-input");
+  });
+});
+describe("injection resistance at the findings boundary", () => {
+  test("I-12 markup in an interpretation is stored as an inert string, never as elements", async () => {
+    const value = await readerEnvelope();
+    const payload = '<img src=x onerror=alert(1)> <script>globalThis.pwned = true</script>';
+    const report = await run(value, output(value, [finding(value, { interpretation: payload })]));
+    const result = item(report.findings);
+    expect(result.interpretation).toBe(payload);
+    expect(result.subjective).toBe(true);
+    expect(Object.isFrozen(result)).toBe(true);
+  });
+
+  test("I-13 a quote copied from unselected adjacent bytes is refused as out of range", async () => {
+    const value = await readerEnvelope();
+    const quote = saved.body.slice(selectedEnd);
+    expect(verifyReviewCitation(value, { ...citation(), start: selectedEnd, end: selectedEnd + quote.length, quote }))
+      .toEqual({ status: "invalid", reason: "range" });
+    // The same bytes are perfectly valid inside the selection, proving it is the range, not the text.
+    const inside = saved.body.slice(selectedStart, selectedEnd);
+    expect(verifyReviewCitation(value, citation())).toMatchObject({ status: "verified-captured" });
+    expect(inside).toBe(citation().quote);
+  });
+
+  test("I-14 bidi controls, zero-width joiners and homoglyphs never satisfy byte equality", async () => {
+    const value = await readerEnvelope();
+    const exact = citation().quote;
+    const variants = [
+      `\u202E${exact}`,
+      `${exact.slice(0, 3)}\u200B${exact.slice(3)}`,
+      exact.replace("e", "\u0435"),
+      exact.replace("e", "е")
+    ];
+    for (const quote of variants) {
+      const start = citation().start;
+      const end = start + [...quote].length;
+      expect(verifyReviewCitation(value, { ...citation(), start, end, quote }).status).toBe("invalid");
+    }
+    expect(verifyReviewCitation(value, citation()).status).toBe("verified-captured");
+  });
+
+  test("I-15 a citation spanning a selection gap is withheld and counted, never relocated", async () => {
+    const body = "onePRIVATEtwo";
+    const gapped = captureChapterSource({ sourceId: "source-1", saved: { ...saved, body }, bookTitle: "Synthetic book",
+      title: "Synthetic chapter", position: 1, capturedAt: stamp, ranges: [{ start: 0, end: 3 }, { start: 10, end: 13 }] });
+    const value = await readerEnvelope({ sources: [gapped] });
+    const crossing = { kind: "chapter" as const, sourceId: "source-1", identity: gapped.identity, start: 0, end: 13, quote: body };
+    expect(verifyReviewCitation(value, crossing)).toEqual({ status: "invalid", reason: "range" });
+    const report = await run(value, output(value, [finding(value, { evidence: [crossing] })]));
+    const result = item(report.findings);
+    expect(result.evidence).toHaveLength(0);
+    expect(item(result.invalidEvidence).reason).toBe("range");
+    expect(result.evidenceState).toBe("insufficient-evidence");
   });
 });

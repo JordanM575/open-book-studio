@@ -81,7 +81,7 @@ function groupTokens(value: number): string {
 }
 
 /** Twin wording lives in `unavailableReason` (`providers/models.ts`); both tests pin the sentence. */
-const UNKNOWN_CONTEXT_NOTE = "This provider does not report the model's context size.";
+export const UNKNOWN_CONTEXT_NOTE = "This provider does not report the model's context size.";
 
 export interface CatalogueAgeSource {
   fetchedAt: string | null;
