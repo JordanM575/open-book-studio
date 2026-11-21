@@ -44,7 +44,9 @@ function chapter(id: string, title: string, order: number, content: string): Cha
 
 const CHAPTER = chapter("ch_fx000010", "First", 1, "First line.\n");
 
-type Answer = { ok: true; data: string | { path: string; warnings: string[] } | null } | { ok: false; error: { code: string; message: string } };
+type Answer =
+  | { ok: true; data: string | { path: string; warnings: string[] } | { status: "cancelled"; message: string } | null }
+  | { ok: false; error: { code: string; message: string } };
 
 interface Setup {
   platform?: string;
@@ -52,6 +54,7 @@ interface Setup {
   edit?: () => Promise<unknown>;
   matter?: (input: Parameters<typeof window.studio.books.saveMatter>[0]) => Promise<unknown>;
   answers?: Partial<Record<"exportDocx" | "exportMarkdown" | "exportPdf" | "exportEpub", () => Promise<Answer>>>;
+  cancel?: () => Promise<unknown>;
 }
 
 function mockWorkspace(setup: Setup = {}) {
@@ -62,15 +65,19 @@ function mockWorkspace(setup: Setup = {}) {
     chapterReadIssues: []
   });
   const exporter = (name: "exportDocx" | "exportMarkdown" | "exportPdf" | "exportEpub", file: string) =>
-    mock((_bookId: string) => {
+    mock((_bookId: string, _attemptId: string) => {
       order.push(name);
       return setup.answers?.[name]?.() ?? Promise.resolve<Answer>({ ok: true, data: `/tmp/exports/${file}` });
     });
+  const exportCancel = mock(async (_input: { bookId: string; attemptId: string }) =>
+    setup.cancel?.() ?? { ok: true, data: { status: "accepted", attemptId: "synthetic-attempt" } }
+  );
   const exports = {
     exportDocx: exporter("exportDocx", "exported.docx"),
     exportMarkdown: exporter("exportMarkdown", "exported.md"),
     exportPdf: exporter("exportPdf", "exported.pdf"),
-    exportEpub: exporter("exportEpub", "exported.epub")
+    exportEpub: exporter("exportEpub", "exported.epub"),
+    exportCancel
   };
   const save = mock((_input: unknown) => {
     order.push("save");
@@ -451,5 +458,80 @@ describe("format dialog export", () => {
     expect(view.getByTestId("format-export-note").textContent).toBe("Exporting is available in the desktop app.");
     testing.fireEvent.click(action);
     expect(mocks.exportDocx).not.toHaveBeenCalled();
+  });
+
+  for (const [target, channel] of [
+    ["DOCX", "exportDocx"], ["PDF", "exportPdf"], ["EPUB", "exportEpub"], ["Markdown", "exportMarkdown"]
+  ] as const) {
+    test(`${target} shows Cancel export while running, sends the attempt id and settles cancelled`, async () => {
+      let finish!: (value: Answer) => void;
+      const pending = new Promise<Answer>((resolve) => { finish = resolve; });
+      const mocks = mockWorkspace({ answers: { [channel]: () => pending } });
+      const view = await openFormat();
+      choose(view, target);
+      testing.fireEvent.click(view.getByTestId("format-export"));
+      await testing.waitFor(() => expect(view.getByTestId("format-export-cancel")).toBeTruthy());
+      const exporter = mocks[channel] as ReturnType<typeof mock>;
+      const attemptId = exporter.mock.calls[0]?.[1];
+      expect(typeof attemptId).toBe("string");
+      testing.fireEvent.click(view.getByTestId("format-export-cancel"));
+      await testing.waitFor(() => expect(mocks.exportCancel).toHaveBeenCalledTimes(1));
+      expect(mocks.exportCancel.mock.calls[0]?.[0]).toEqual({ bookId: BOOK, attemptId });
+      await testing.act(async () =>
+        finish({ ok: true, data: { status: "cancelled", message: "The export was cancelled before it was published. Nothing was written." } })
+      );
+      await testing.waitFor(() => expect(view.getByTestId("format-export-cancelled")).toBeTruthy());
+      expect(view.getByTestId("format-export-cancelled").textContent).toContain("cancelled before it was published");
+      expect((view.getByTestId("format-export") as HTMLButtonElement).disabled).toBe(false);
+      expect(view.queryByTestId("format-export-cancel")).toBeNull();
+    });
+  }
+
+  test("a too-late cancel lets the published receipt replace the line and never claims cancellation", async () => {
+    let finish!: (value: Answer) => void;
+    const pending = new Promise<Answer>((resolve) => { finish = resolve; });
+    const mocks = mockWorkspace({
+      answers: { exportPdf: () => pending },
+      cancel: async () => ({ ok: true, data: { status: "too-late", attemptId: "synthetic-attempt" } })
+    });
+    const view = await openFormat();
+    choose(view, "PDF");
+    testing.fireEvent.click(view.getByTestId("format-export"));
+    await testing.waitFor(() => expect(view.getByTestId("format-export-cancel")).toBeTruthy());
+    testing.fireEvent.click(view.getByTestId("format-export-cancel"));
+    await testing.waitFor(() => expect(view.getByTestId("format-export-status")).toBeTruthy());
+    expect(view.getByTestId("format-export-status").textContent).toContain("The export is finishing");
+    await testing.act(async () => finish({ ok: true, data: { path: "/tmp/exports/exported.pdf", warnings: [] } }));
+    await testing.waitFor(() => expect(view.getByTestId("format-export-note").textContent).toBe("Saved exported.pdf"));
+    expect(view.queryByTestId("format-export-cancelled")).toBeNull();
+    expect(mocks.exportCancel).toHaveBeenCalledTimes(1);
+  });
+
+  test("the header export shows Cancel export and settles a cancelled outcome", async () => {
+    let finish!: (value: Answer) => void;
+    const pending = new Promise<Answer>((resolve) => { finish = resolve; });
+    const mocks = mockWorkspace({ answers: { exportDocx: () => pending } });
+    const view = testing.within(document.body);
+    await testing.waitFor(() => expect(view.getByTestId("manuscript-text")).toBeTruthy());
+    testing.fireEvent.click(view.getByTestId("export-docx"));
+    await testing.waitFor(() => expect(view.getByTestId("workspace-export-cancel")).toBeTruthy());
+    const attemptId = mocks.exportDocx.mock.calls[0]?.[1];
+    expect(typeof attemptId).toBe("string");
+    testing.fireEvent.click(view.getByTestId("workspace-export-cancel"));
+    await testing.waitFor(() => expect(mocks.exportCancel).toHaveBeenCalledWith({ bookId: BOOK, attemptId }));
+    await testing.act(async () =>
+      finish({ ok: true, data: { status: "cancelled", message: "The export was cancelled before it was published. Nothing was written." } })
+    );
+    await testing.waitFor(() => expect(view.getByTestId("workspace-export-note")).toBeTruthy());
+    expect(view.getByTestId("workspace-export-note").textContent).toContain("cancelled before it was published");
+    expect((view.getByTestId("export-docx") as HTMLButtonElement).disabled).toBe(false);
+    expect(view.queryByTestId("workspace-export-cancel")).toBeNull();
+  });
+
+  test("the Markdown folder target keeps its own cancel control only", async () => {
+    mockWorkspace();
+    const view = await openFormat();
+    choose(view, "Markdown folder");
+    expect(view.queryByTestId("format-export-cancel")).toBeNull();
   });
 });

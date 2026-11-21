@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } f
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IPC, type ManuscriptExportReceipt, type Result } from "@ai-book-studio/core/ipc";
+import { IPC, type ManuscriptExportCancelResult, type ManuscriptExportReceipt, type Result } from "@ai-book-studio/core/ipc";
 import { MATTER_LIMITS, matterHash, newMatterSection, readMatter } from "@ai-book-studio/core/matter";
 import { agentMessageSchema } from "@ai-book-studio/core/agent/messages";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
@@ -1549,6 +1549,51 @@ describe("exports", () => {
         if (!before) throw new Error("Missing synthetic source snapshot");
         expect(await readFile(path)).toEqual(before);
       }
+    } finally {
+      pdf.mockRestore();
+    }
+  });
+
+  test("a running single-file export can be cancelled before publication, and a bare bookId still publishes", async () => {
+    const { library } = await setup();
+    const { bookId } = await book(library);
+    const exports = await temp("studio-ipc-cancel-");
+    process.env.STUDIO_EXPORT_PATH = exports;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    let renderStarted!: () => void;
+    const started = new Promise<void>((resolve) => { renderStarted = resolve; });
+    const pdf = spyOn(await import("../src/main/pdf"), "renderPdfInHiddenWindow").mockImplementation(async () => {
+      renderStarted();
+      await held;
+      return new TextEncoder().encode("%PDF-1.7\n%%EOF\n");
+    });
+    try {
+      const attemptId = crypto.randomUUID();
+      const pending = call(IPC.books.exportPdf, { bookId, attemptId });
+      await started;
+      expect(await data<ManuscriptExportCancelResult>(IPC.books.exportCancel, { bookId, attemptId })).toEqual({
+        status: "accepted",
+        attemptId
+      });
+      release();
+      expect(await pending).toEqual({
+        ok: true,
+        data: {
+          status: "cancelled",
+          message: "The export was cancelled before it was published. Nothing was written."
+        }
+      });
+      expect(await readdir(exports)).toEqual([]);
+      expect(await data<ManuscriptExportCancelResult>(IPC.books.exportCancel, { bookId, attemptId })).toEqual({
+        status: "already-settled",
+        attemptId
+      });
+
+      // A legacy bare bookId call still publishes without cancel registration.
+      const receipt = await data<ManuscriptExportReceipt>(IPC.books.exportPdf, bookId);
+      expect(receipt.path).toBe(join(exports, "the-salt-road.pdf"));
+      expect((await readFile(receipt.path)).byteLength).toBeGreaterThan(0);
     } finally {
       pdf.mockRestore();
     }

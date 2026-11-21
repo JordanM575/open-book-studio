@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LibraryService } from "@ai-book-studio/core/library/service";
@@ -747,7 +747,8 @@ describe("markdown folder desktop publication (no-replace)", () => {
     const before = await snapshotTree(bookDir);
     const error = await host.publish(planned, destination).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: "destination-exists" });
-    expect((error as Error).message).toContain("Replacing an existing folder is not part of this export yet");
+    expect((error as Error).message).toContain("does not replace one");
+    expect((error as Error).message).toContain("Choose another folder name");
     expect(await readFile(join(destination, "prior.txt"), "utf8")).toBe("prior output bytes");
     expect((await readdir(destination)).sort()).toEqual(["prior.txt"]);
     expect(await snapshotTree(bookDir)).toEqual(before);
@@ -859,9 +860,57 @@ describe("markdown folder desktop publication (no-replace)", () => {
         }
       })
       .catch((e: unknown) => e);
-    expect(error).toMatchObject({ code: "commit-failed" });
+    expect(error).toMatchObject({ code: "commit-failed", verdict: "not-published" });
     expect(await readdir(outParent)).toEqual([]);
     expect(await snapshotTree(bookDir)).toEqual(before);
+  });
+
+  test("an unproven commit rollback stays unknown and leaves the destination as it is", async () => {
+    const { host, planned, destination, outParent } = await publishFixture();
+    let destinationChecks = 0;
+    const error = await host
+      .publish(planned, destination, {
+        rename: async () => {
+          throw Object.assign(new Error("synthetic commit failure"), { code: "EIO" });
+        },
+        lstat: async (path) => {
+          const stat = await lstat(path);
+          if (path === destination) {
+            destinationChecks += 1;
+            // The rollback proof sees a different identity than the one this call created.
+            if (destinationChecks === 2) {
+              return { dev: stat.dev, ino: stat.ino + 1, isDirectory: () => true, isSymbolicLink: () => false };
+            }
+          }
+          return stat;
+        }
+      })
+      .catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "commit-failed", verdict: "unknown" });
+    expect((error as { cleanupLeftoverPath: string }).cleanupLeftoverPath).toBe(destination);
+    expect(await readdir(outParent)).toEqual(["salt-road-folder"]);
+  });
+
+  test("post-publication staging cleanup failure is a published result with the exact leftover path", async () => {
+    const { planned, destination, outParent } = await publishFixture();
+    const result = await publishMarkdownFolder(planned.plan, destination, {
+      libraryRoot: "/synthetic-library",
+      overrides: {
+        randomToken: () => "tok123",
+        rm: async () => {
+          throw new Error("synthetic cleanup failure");
+        }
+      }
+    });
+    const name = ".salt-road-folder.markdown-folder-staging-tok123";
+    expect(result.destinationPath).toBe(destination);
+    expect(result.files).toEqual(planned.plan.files.map((f) => f.path));
+    expect(result.cleanupLeftover).toEqual({ name, path: join(outParent, name) });
+    expect((await readdir(outParent)).sort()).toEqual([name, "salt-road-folder"]);
+    for (const file of planned.plan.files) {
+      const onDisk = await readFile(join(destination, ...file.path.split("/")));
+      expect(onDisk.byteLength).toBe(file.byteLength);
+    }
   });
 
   test("owned cleanup failure is reported with the staging name, not hidden", async () => {

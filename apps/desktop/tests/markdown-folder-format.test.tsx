@@ -4,6 +4,7 @@ import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
 import { bookSchema, chapterMetaSchema, manuscriptSettingsSchema } from "@ai-book-studio/core/schema";
 import type { BookMeta, Chapter } from "@ai-book-studio/core/schema";
+import type { SaveStatus } from "@ai-book-studio/app/components/ManuscriptEditor";
 
 let testing!: typeof import("@testing-library/react/pure");
 let FormatDialog!: typeof import("@ai-book-studio/app/components/FormatDialog").FormatDialog;
@@ -60,7 +61,8 @@ function ready(attemptId: string, sequence: number) {
       ],
       excludedLegacy: [{ position: 1, key: "notes", keyIsFallback: false, reason: "not-represented" }],
       files: ["README.md", "0001-title.md", "0002-chapter.md", "images/0003.png"],
-      readingOrder: ["0001-title.md", "0002-chapter.md"]
+      readingOrder: ["0001-title.md", "0002-chapter.md"],
+      suggestedFolderName: "the-salt-road-markdown"
     }
   };
 }
@@ -73,11 +75,17 @@ interface FolderMocks {
 
 function renderBook(options: {
   capture?: () => Promise<unknown>;
-  publish?: (input: { bookId: string; attemptId: string }) => Promise<unknown>;
+  publish?: (input: { bookId: string; attemptId: string; folderName: string }) => Promise<unknown>;
   cancel?: (input: { bookId: string; attemptId: string }) => Promise<unknown>;
+  onFlush?: () => Promise<SaveStatus | null>;
+  matter?: (input: { bookId: string; matter: unknown; baseVersion: number; baseHash: string }) => Promise<unknown>;
+  order?: string[];
 } = {}): FolderMocks & { view: ReturnType<typeof testing.within> } {
   const book: BookMeta = bookSchema.parse({ id: BOOK, title: "The Salt Road", createdAt: NOW, updatedAt: NOW });
-  const capture = mock(options.capture ?? (async () => ready(ATTEMPT_ONE, 1)));
+  const capture = mock(async () => {
+    options.order?.push("capture");
+    return options.capture ? options.capture() : ready(ATTEMPT_ONE, 1);
+  });
   const publish = mock(
     options.publish ??
       (async () => ({
@@ -96,7 +104,12 @@ function renderBook(options: {
   (globalThis as unknown as { window: { studio: unknown } }).window.studio = {
     platform: "darwin",
     books: {
-      saveMatter: mock(async () => ({ ok: true, data: { status: "saved", book } })),
+      saveMatter: mock(async (input: { bookId: string; matter: unknown; baseVersion: number; baseHash: string }) => {
+        options.order?.push("matter");
+        return options.matter
+          ? options.matter(input)
+          : { ok: true, data: { status: "saved", book: { ...book, matter: input.matter } } };
+      }),
       exportMarkdownFolderCapture: capture,
       exportMarkdownFolderPublish: publish,
       exportMarkdownFolderCancel: cancel
@@ -115,7 +128,10 @@ function renderBook(options: {
       settings: manuscriptSettingsSchema.parse({}),
       chapters: CHAPTERS,
       onSaveSettings: async () => {},
-      onFlush: async () => null
+      onFlush: mock(async () => {
+        options.order?.push("flush");
+        return options.onFlush ? options.onFlush() : null;
+      })
     })
   );
   return { view: testing.within(document.body), capture, publish, cancel };
@@ -142,15 +158,15 @@ describe("markdown folder journey in the Format dialog", () => {
     expect(view.getByRole("button", { name: "Cancel" })).toBeTruthy();
   });
 
-  test("continue publishes with only the attempt identity, and success lists the destination, files and warnings", async () => {
+  test("continue publishes with the attempt identity and validated folder name, and success lists the destination, files and warnings", async () => {
     const { view, publish } = renderBook();
     await openConsent(view);
     testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
     await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
     expect(publish).toHaveBeenCalledTimes(1);
-    expect(publish).toHaveBeenCalledWith({ bookId: BOOK, attemptId: ATTEMPT_ONE });
-    const [payload] = publish.mock.calls[0] as [{ bookId: string; attemptId: string }];
-    expect(Object.keys(payload).sort()).toEqual(["attemptId", "bookId"]);
+    expect(publish).toHaveBeenCalledWith({ bookId: BOOK, attemptId: ATTEMPT_ONE, folderName: "the-salt-road-markdown" });
+    const [payload] = publish.mock.calls[0] as [{ bookId: string; attemptId: string; folderName: string }];
+    expect(Object.keys(payload).sort()).toEqual(["attemptId", "bookId", "folderName"]);
     expect(view.getByTestId("markdown-folder-destination").textContent).toBe("/tmp/exports/the-salt-road-markdown");
     expect(view.getByTestId("markdown-folder-files").textContent).toContain("README.md");
     expect(view.getByTestId("markdown-folder-files").textContent).toContain("0002-chapter.md");
@@ -225,6 +241,26 @@ describe("markdown folder journey in the Format dialog", () => {
     expect(view.queryByTestId("markdown-folder-result")).toBeNull();
   });
 
+  test("the folder name field is visible but disabled while publishing", async () => {
+    let settle: ((value: unknown) => void) | null = null;
+    const { view } = renderBook({
+      publish: () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        })
+    });
+    await openConsent(view);
+    testing.fireEvent.change(view.getByTestId("markdown-folder-name"), { target: { value: "Second Crossing" } });
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-progress")).toBeTruthy());
+    const field = view.getByTestId("markdown-folder-name") as HTMLInputElement;
+    expect(field.value).toBe("Second Crossing");
+    expect(field.disabled).toBe(true);
+    if (!settle) throw new Error("the publish call never started");
+    (settle as (value: unknown) => void)({ ok: true, data: { status: "published", destinationPath: "/tmp/exports/Second Crossing", files: ["README.md"], warnings: [] } });
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
+  });
+
   test("an unconfirmed publication is stated as unknown, never as success", async () => {
     const { view } = renderBook({
       publish: async () => ({
@@ -242,5 +278,171 @@ describe("markdown folder journey in the Format dialog", () => {
     expect(view.getByTestId("markdown-folder-unknown").textContent).toContain("Publication could not be confirmed");
     expect(view.queryByTestId("markdown-folder-result")).toBeNull();
     expect(view.queryByTestId("markdown-folder-files")).toBeNull();
+  });
+
+  test("the folder name is prefilled, editable, and sent exactly as validated", async () => {
+    const { view, publish } = renderBook();
+    await openConsent(view);
+    const field = view.getByTestId("markdown-folder-name") as HTMLInputElement;
+    expect(field.value).toBe("the-salt-road-markdown");
+    testing.fireEvent.change(field, { target: { value: "Second Crossing" } });
+    expect(field.value).toBe("Second Crossing");
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
+    expect(publish).toHaveBeenCalledWith({ bookId: BOOK, attemptId: ATTEMPT_ONE, folderName: "Second Crossing" });
+  });
+
+  test("an invalid name disables Continue and says why before any picker", async () => {
+    const { view, publish } = renderBook();
+    await openConsent(view);
+    testing.fireEvent.change(view.getByTestId("markdown-folder-name"), { target: { value: "../outside" } });
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-name-error")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-name-error").textContent).toContain("cannot contain");
+    expect((view.getByTestId("markdown-folder-continue") as HTMLButtonElement).disabled).toBe(true);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  test("picker cancel returns to consent with the typed name preserved", async () => {
+    let calls = 0;
+    const { view, publish } = renderBook({
+      publish: async () => {
+        calls += 1;
+        if (calls === 1) return { ok: true, data: null };
+        return { ok: true, data: { status: "published", destinationPath: "/tmp/exports/My Folder", files: ["README.md"], warnings: [] } };
+      }
+    });
+    await openConsent(view);
+    testing.fireEvent.change(view.getByTestId("markdown-folder-name"), { target: { value: "My Folder" } });
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-consent")).toBeTruthy());
+    expect((view.getByTestId("markdown-folder-name") as HTMLInputElement).value).toBe("My Folder");
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
+    expect(publish.mock.calls[1]?.[0]).toEqual({ bookId: BOOK, attemptId: ATTEMPT_ONE, folderName: "My Folder" });
+  });
+
+  test("a name conflict returns to the same consent with the message and the attempt can retry", async () => {
+    let calls = 0;
+    const message =
+      "That folder already exists. This export creates a new folder and does not replace one. Nothing was published. Choose another folder name or another parent folder.";
+    const { view, publish } = renderBook({
+      publish: async () => {
+        calls += 1;
+        if (calls === 1) return { ok: true, data: { status: "name-conflict", message } };
+        return { ok: true, data: { status: "published", destinationPath: "/tmp/exports/another-name", files: ["README.md"], warnings: [] } };
+      }
+    });
+    await openConsent(view);
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-notice")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-notice").textContent).toBe(message);
+    expect(view.getByTestId("markdown-folder-consent")).toBeTruthy();
+    expect(view.queryByTestId("markdown-folder-result")).toBeNull();
+    expect(view.queryByTestId("markdown-folder-unknown")).toBeNull();
+    testing.fireEvent.change(view.getByTestId("markdown-folder-name"), { target: { value: "another-name" } });
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
+  test("a name-invalid backstop returns to consent with the message and publishes nothing", async () => {
+    const { view, publish } = renderBook({
+      publish: async () => ({
+        ok: true,
+        data: { status: "name-invalid", message: "That folder name is reserved by the operating system. Choose another name." }
+      })
+    });
+    await openConsent(view);
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-notice")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-notice").textContent).toContain("reserved by the operating system");
+    expect(view.getByTestId("markdown-folder-consent")).toBeTruthy();
+    expect(view.queryByTestId("markdown-folder-result")).toBeNull();
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  test("a published folder with a cleanup leftover shows the path, not the unknown panel", async () => {
+    const path = "/tmp/exports/.the-salt-road-markdown.markdown-folder-staging-tok123";
+    const { view } = renderBook({
+      publish: async () => ({
+        ok: true,
+        data: {
+          status: "published",
+          destinationPath: "/tmp/exports/the-salt-road-markdown",
+          files: ["README.md", "0002-chapter.md"],
+          warnings: [],
+          cleanupLeftover: { name: ".the-salt-road-markdown.markdown-folder-staging-tok123", path }
+        }
+      })
+    });
+    await openConsent(view);
+    testing.fireEvent.click(view.getByRole("button", { name: "Continue without them" }));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-result")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-result").textContent).toContain("Markdown folder published");
+    expect(view.getByTestId("markdown-folder-cleanup").textContent).toContain(path);
+    expect(view.getByTestId("markdown-folder-cleanup").textContent).toContain("You can delete it.");
+    expect(view.queryByTestId("markdown-folder-unknown")).toBeNull();
+    expect(view.getByTestId("markdown-folder-result").textContent).not.toContain("could not be confirmed");
+  });
+
+  test("a failed chapter save blocks folder capture and keeps the draft unchanged", async () => {
+    const { view, capture, publish } = renderBook({
+      onFlush: async () => ({ kind: "error", message: "Synthetic disk full" })
+    });
+    testing.fireEvent.click(view.getByRole("radio", { name: "Markdown folder" }));
+    testing.fireEvent.click(view.getByTestId("format-export"));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-error")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-error").textContent).toContain("nothing was exported");
+    expect(capture).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+    expect(view.queryByTestId("markdown-folder-consent")).toBeNull();
+  });
+
+  test("a save conflict blocks folder capture and says so", async () => {
+    const { view, capture } = renderBook({
+      onFlush: async () => ({
+        kind: "conflict",
+        conflict: {
+          bookId: BOOK,
+          chapterId: "ch_mdf00001",
+          chapterTitle: "The Door",
+          savedAs: "conflicts/synthetic.md",
+          reason: "newer-version",
+          diskVersion: 2,
+          localVersion: 1
+        }
+      })
+    });
+    testing.fireEvent.click(view.getByRole("radio", { name: "Markdown folder" }));
+    testing.fireEvent.click(view.getByTestId("format-export"));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-error")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-error").textContent).toContain("conflicting copy");
+    expect(capture).not.toHaveBeenCalled();
+    expect(view.queryByTestId("markdown-folder-consent")).toBeNull();
+  });
+
+  test("the folder journey saves the matter, flushes the chapter, then captures", async () => {
+    const order: string[] = [];
+    const { view } = renderBook({ order });
+    testing.fireEvent.click(view.getByRole("radio", { name: "Markdown folder" }));
+    testing.fireEvent.change(view.getByLabelText("Author"), { target: { value: "Synthetic author" } });
+    testing.fireEvent.click(view.getByTestId("format-export"));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-consent")).toBeTruthy());
+    expect(order).toEqual(["matter", "flush", "capture"]);
+  });
+
+  test("a refused capture shows the refusal and offers no consent or publish", async () => {
+    const { view, publish } = renderBook({
+      capture: async () => ({
+        ok: true,
+        data: { status: "refused", code: "book-invalid", dimension: null, field: null, message: "The saved book record is not readable. Nothing was exported." }
+      })
+    });
+    testing.fireEvent.click(view.getByRole("radio", { name: "Markdown folder" }));
+    testing.fireEvent.click(view.getByTestId("format-export"));
+    await testing.waitFor(() => expect(view.getByTestId("markdown-folder-error")).toBeTruthy());
+    expect(view.getByTestId("markdown-folder-error").textContent).toContain("was refused");
+    expect(view.queryByTestId("markdown-folder-consent")).toBeNull();
+    expect(publish).not.toHaveBeenCalled();
   });
 });

@@ -85,10 +85,15 @@ const api: StudioApi = {
     delete: (bookId: string) => invoke(IPC.books.delete, bookId),
     open: (bookId) => invoke(IPC.books.open, bookId),
     search: (bookId: string, query: string) => invoke(IPC.books.search, { bookId, query }),
-    exportDocx: (bookId) => invoke(IPC.books.exportDocx, bookId),
-    exportMarkdown: (bookId) => invoke(IPC.books.exportMarkdown, bookId),
-    exportPdf: (bookId) => invoke(IPC.books.exportPdf, bookId),
-    exportEpub: (bookId) => invoke(IPC.books.exportEpub, bookId),
+    exportDocx: (bookId: string, attemptId?: string) =>
+      invoke(IPC.books.exportDocx, attemptId ? { bookId, attemptId } : bookId),
+    exportMarkdown: (bookId: string, attemptId?: string) =>
+      invoke(IPC.books.exportMarkdown, attemptId ? { bookId, attemptId } : bookId),
+    exportPdf: (bookId: string, attemptId?: string) =>
+      invoke(IPC.books.exportPdf, attemptId ? { bookId, attemptId } : bookId),
+    exportEpub: (bookId: string, attemptId?: string) =>
+      invoke(IPC.books.exportEpub, attemptId ? { bookId, attemptId } : bookId),
+    exportCancel: (input: { bookId: string; attemptId: string }) => invoke(IPC.books.exportCancel, input),
     exportImages: (bookId) => invoke(IPC.books.exportImages, bookId),
     exportMarkdownFolderCapture: (bookId) => invoke(IPC.books.exportMarkdownFolderCapture, bookId),
     exportMarkdownFolderPublish: (input) => invoke(IPC.books.exportMarkdownFolderPublish, input),

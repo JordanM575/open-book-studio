@@ -38,6 +38,7 @@ import { LibraryError } from "./library/store";
 import { safeJoin } from "./library/paths";
 import { recoveryIdSchema, restoreKept } from "./recovery";
 import {
+  cancelledExportOutcome,
   collectManuscriptImages,
   exportBookImages,
   exportManuscriptDocx,
@@ -46,6 +47,7 @@ import {
   exportManuscriptPdf,
   type ExportDeps
 } from "./export";
+import { ExportAttemptRegistry, type ExportTarget } from "./export-attempts";
 import { renderPdfInHiddenWindow } from "./pdf";
 import { importLegacyBackup } from "./legacy-import";
 import { importLibraryArchiveToFolder, writeLibraryArchive } from "./library/archive";
@@ -84,6 +86,7 @@ import { speechModels } from "@ai-book-studio/core/providers/speech";
 import { isValidStoredVoicePreferences, voicePreferencesSchema } from "@ai-book-studio/core/providers/voice-preferences";
 import type { ImageService } from "./images";
 import { MarkdownFolderCaptureError, MarkdownFolderHostService, MarkdownFolderPublishError, suggestMarkdownFolderName } from "./markdown-folder";
+import { validateMarkdownFolderName } from "@ai-book-studio/core/markdown-folder/name";
 import type { Library } from "./library/store";
 import { ContinuationStorageError } from "@ai-book-studio/core/review/campaign-continuation-store";
 import { recordIdSchema } from "@ai-book-studio/core/review/record-format";
@@ -562,98 +565,155 @@ export function registerIpc(
       .saveMatter(input.bookId, input.matter, { baseVersion: input.baseVersion, baseHash: input.baseHash });
   });
 
-  handle(IPC.books.exportDocx, async (payload) => {
-    const bookId = idSchema.parse(payload);
-    const library = studio.requireLibrary();
-    const detail = await library.readBook(bookId);
-    const { illustrations, warnings } = await collectManuscriptImages(detail, library);
-    const path = await exportManuscriptDocx(detail, illustrations, library.root, {
-      /*
-       * A headless run cannot answer a save dialog, so it names the folder instead. The hook
-       * only exists for the checks: otherwise the export is never exercised end to end, and the
-       * parts that go wrong are the ones nobody clicked.
-       */
-      pickDestination: async (suggestedName) => {
-        const forced = process.env.STUDIO_EXPORT_PATH;
-        if (forced) return join(forced, suggestedName);
-        const options = {
-          title: "Export manuscript",
-          defaultPath: suggestedName,
-          filters: [{ name: "Word document", extensions: ["docx"] }]
-        };
-        const window = getWindow();
-        const choice = window
-          ? await dialog.showSaveDialog(window, options)
-          : await dialog.showSaveDialog(options);
-        if (choice.canceled || !choice.filePath) return null;
-        return choice.filePath;
-      },
-      confirmReplace: async (path) => {
-        const options = {
-          type: "question" as const,
-          buttons: ["Replace", "Cancel"],
-          defaultId: 1,
-          cancelId: 1,
-          message: `“${basename(path)}” already exists. Replace it?`,
-          detail: "The current file will be overwritten."
-        };
-        const window = getWindow();
-        const answer = window
-          ? await dialog.showMessageBox(window, options)
-          : await dialog.showMessageBox(options);
-        return answer.response === 0;
-      },
-      statDestination: async (path) =>
-        stat(path)
-          .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
-          .catch(() => null)
-    });
-    return path === null ? null : { path, warnings };
-  });
+  /**
+   * Single-file export attempts. A renderer-minted id is a cancellation key only: it grants no
+   * filesystem authority. A legacy bare `bookId` call publishes without cancel registration.
+   */
+  const exportAttempts = new ExportAttemptRegistry();
+  const exportAttemptInput = z.union([idSchema, z.object({ bookId: idSchema, attemptId: z.string().uuid() }).strict()]);
+  const runSingleFileExport = async (
+    target: ExportTarget,
+    payload: unknown,
+    run: (attempt: {
+      bookId: string;
+      signal?: AbortSignal;
+      onPublishStart?: () => void;
+    }) => Promise<{ path: string; warnings: string[] } | { status: "cancelled"; message: string } | null>
+  ): Promise<{ path: string; warnings: string[] } | { status: "cancelled"; message: string } | null> => {
+    const input = exportAttemptInput.parse(payload);
+    const bookId = typeof input === "string" ? input : input.bookId;
+    const attemptId = typeof input === "string" ? null : input.attemptId;
+    if (!attemptId) {
+      try {
+        return await run({ bookId });
+      } catch (error) {
+        const cancelled = cancelledExportOutcome(error);
+        if (cancelled) return cancelled;
+        throw error;
+      }
+    }
+    const begun = exportAttempts.begin(bookId, target, attemptId);
+    if (!begun.ok) {
+      throw new LibraryError(
+        "invalid",
+        begun.reason === "duplicate"
+          ? "That export was already started. Wait for it to finish before trying again."
+          : "Another export of this target is already running for this book."
+      );
+    }
+    try {
+      return await run({
+        bookId,
+        signal: begun.signal,
+        onPublishStart: begun.onPublishStart
+      });
+    } catch (error) {
+      const cancelled = cancelledExportOutcome(error);
+      if (cancelled) return cancelled;
+      throw error;
+    } finally {
+      exportAttempts.settle(attemptId);
+    }
+  };
 
-  handle(IPC.books.exportMarkdown, async (payload) => {
-    const bookId = idSchema.parse(payload);
-    const library = studio.requireLibrary();
-    const detail = await library.readBook(bookId);
-    const { warnings } = await collectManuscriptImages(detail, library, "markdown");
-    const path = await exportManuscriptMarkdown(detail, library.root, {
-      pickDestination: async (suggestedName) => {
-        const forced = process.env.STUDIO_EXPORT_PATH;
-        if (forced) return join(forced, suggestedName);
-        const options = {
-          title: "Export manuscript",
-          defaultPath: suggestedName,
-          filters: [{ name: "Markdown document", extensions: ["md", "markdown"] }]
-        };
-        const window = getWindow();
-        const choice = window
-          ? await dialog.showSaveDialog(window, options)
-          : await dialog.showSaveDialog(options);
-        if (choice.canceled || !choice.filePath) return null;
-        return choice.filePath;
-      },
-      confirmReplace: async (path) => {
-        const options = {
-          type: "question" as const,
-          buttons: ["Replace", "Cancel"],
-          defaultId: 1,
-          cancelId: 1,
-          message: `“${basename(path)}” already exists. Replace it?`,
-          detail: "The current file will be overwritten."
-        };
-        const window = getWindow();
-        const answer = window
-          ? await dialog.showMessageBox(window, options)
-          : await dialog.showMessageBox(options);
-        return answer.response === 0;
-      },
-      statDestination: async (path) =>
-        stat(path)
-          .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
-          .catch(() => null)
-    });
-    return path === null ? null : { path, warnings };
-  });
+  handle(IPC.books.exportDocx, async (payload) =>
+    runSingleFileExport("docx", payload, async ({ bookId, signal, onPublishStart }) => {
+      const library = studio.requireLibrary();
+      const detail = await library.readBook(bookId);
+      const { illustrations, warnings } = await collectManuscriptImages(detail, library);
+      const path = await exportManuscriptDocx(detail, illustrations, library.root, {
+        /*
+         * A headless run cannot answer a save dialog, so it names the folder instead. The hook
+         * only exists for the checks: otherwise the export is never exercised end to end, and the
+         * parts that go wrong are the ones nobody clicked.
+         */
+        pickDestination: async (suggestedName) => {
+          const forced = process.env.STUDIO_EXPORT_PATH;
+          if (forced) return join(forced, suggestedName);
+          const options = {
+            title: "Export manuscript",
+            defaultPath: suggestedName,
+            filters: [{ name: "Word document", extensions: ["docx"] }]
+          };
+          const window = getWindow();
+          const choice = window
+            ? await dialog.showSaveDialog(window, options)
+            : await dialog.showSaveDialog(options);
+          if (choice.canceled || !choice.filePath) return null;
+          return choice.filePath;
+        },
+        confirmReplace: async (path) => {
+          const options = {
+            type: "question" as const,
+            buttons: ["Replace", "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            message: `“${basename(path)}” already exists. Replace it?`,
+            detail: "The current file will be overwritten."
+          };
+          const window = getWindow();
+          const answer = window
+            ? await dialog.showMessageBox(window, options)
+            : await dialog.showMessageBox(options);
+          return answer.response === 0;
+        },
+        statDestination: async (path) =>
+          stat(path)
+            .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
+            .catch(() => null),
+        ...(signal ? { signal } : {}),
+        ...(onPublishStart ? { onPublishStart } : {})
+      });
+      return path === null ? null : { path, warnings };
+    })
+  );
+
+  handle(IPC.books.exportMarkdown, async (payload) =>
+    runSingleFileExport("markdown", payload, async ({ bookId, signal, onPublishStart }) => {
+      const library = studio.requireLibrary();
+      const detail = await library.readBook(bookId);
+      const { warnings } = await collectManuscriptImages(detail, library, "markdown");
+      const path = await exportManuscriptMarkdown(detail, library.root, {
+        pickDestination: async (suggestedName) => {
+          const forced = process.env.STUDIO_EXPORT_PATH;
+          if (forced) return join(forced, suggestedName);
+          const options = {
+            title: "Export manuscript",
+            defaultPath: suggestedName,
+            filters: [{ name: "Markdown document", extensions: ["md", "markdown"] }]
+          };
+          const window = getWindow();
+          const choice = window
+            ? await dialog.showSaveDialog(window, options)
+            : await dialog.showSaveDialog(options);
+          if (choice.canceled || !choice.filePath) return null;
+          return choice.filePath;
+        },
+        confirmReplace: async (path) => {
+          const options = {
+            type: "question" as const,
+            buttons: ["Replace", "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            message: `“${basename(path)}” already exists. Replace it?`,
+            detail: "The current file will be overwritten."
+          };
+          const window = getWindow();
+          const answer = window
+            ? await dialog.showMessageBox(window, options)
+            : await dialog.showMessageBox(options);
+          return answer.response === 0;
+        },
+        statDestination: async (path) =>
+          stat(path)
+            .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
+            .catch(() => null),
+        ...(signal ? { signal } : {}),
+        ...(onPublishStart ? { onPublishStart } : {})
+      });
+      return path === null ? null : { path, warnings };
+    })
+  );
 
   /** The save dialog, replace prompt and file check behind the PDF and EPUB exports. */
   const manuscriptExportDeps = (filter: { name: string; extensions: string[] }): ExportDeps => ({
@@ -686,30 +746,39 @@ export function registerIpc(
         .catch(() => null)
   });
 
-  handle(IPC.books.exportPdf, async (payload) => {
-    const bookId = idSchema.parse(payload);
-    const library = studio.requireLibrary();
-    const detail = await library.readBook(bookId);
-    const { illustrations, warnings } = await collectManuscriptImages(detail, library);
-    const path = await exportManuscriptPdf(detail, illustrations, library.root, {
-      ...manuscriptExportDeps({ name: "PDF document", extensions: ["pdf"] }),
-      renderPdf: renderPdfInHiddenWindow
-    });
-    return path === null ? null : { path, warnings };
-  });
+  handle(IPC.books.exportPdf, async (payload) =>
+    runSingleFileExport("pdf", payload, async ({ bookId, signal, onPublishStart }) => {
+      const library = studio.requireLibrary();
+      const detail = await library.readBook(bookId);
+      const { illustrations, warnings } = await collectManuscriptImages(detail, library);
+      const path = await exportManuscriptPdf(detail, illustrations, library.root, {
+        ...manuscriptExportDeps({ name: "PDF document", extensions: ["pdf"] }),
+        ...(signal ? { signal } : {}),
+        ...(onPublishStart ? { onPublishStart } : {}),
+        renderPdf: renderPdfInHiddenWindow
+      });
+      return path === null ? null : { path, warnings };
+    })
+  );
 
-  handle(IPC.books.exportEpub, async (payload) => {
-    const bookId = idSchema.parse(payload);
-    const library = studio.requireLibrary();
-    const detail = await library.readBook(bookId);
-    const { illustrations, warnings } = await collectManuscriptImages(detail, library);
-    const path = await exportManuscriptEpub(
-      detail,
-      illustrations,
-      library.root,
-      manuscriptExportDeps({ name: "EPUB e-book", extensions: ["epub"] })
-    );
-    return path === null ? null : { path, warnings };
+  handle(IPC.books.exportEpub, async (payload) =>
+    runSingleFileExport("epub", payload, async ({ bookId, signal, onPublishStart }) => {
+      const library = studio.requireLibrary();
+      const detail = await library.readBook(bookId);
+      const { illustrations, warnings } = await collectManuscriptImages(detail, library);
+      const path = await exportManuscriptEpub(detail, illustrations, library.root, {
+        ...manuscriptExportDeps({ name: "EPUB e-book", extensions: ["epub"] }),
+        ...(signal ? { signal } : {}),
+        ...(onPublishStart ? { onPublishStart } : {})
+      });
+      return path === null ? null : { path, warnings };
+    })
+  );
+
+  const singleFileCancelInput = z.object({ bookId: idSchema, attemptId: z.string().uuid() }).strict();
+  handle(IPC.books.exportCancel, async (payload) => {
+    const input = singleFileCancelInput.parse(payload);
+    return exportAttempts.cancel(input.bookId, input.attemptId);
   });
 
   handle(IPC.books.exportImages, async (payload) => {
@@ -754,6 +823,9 @@ export function registerIpc(
   };
   // Strict input: a renderer-supplied destination or publication override is refused, never forwarded.
   const folderAttemptInput = z.object({ bookId: idSchema, attemptId: z.string().uuid() }).strict();
+  const folderPublishInput = z
+    .object({ bookId: idSchema, attemptId: z.string().uuid(), folderName: z.string().max(4096) })
+    .strict();
   const folderWarnings = (warnings: ReadonlyArray<{ kind: "list" | "image-omission"; code: string; chapterId: string | null; selectedPosition: number | null; recordId: string | null }>) =>
     warnings.map((warning) => ({
       kind: warning.kind,
@@ -785,12 +857,13 @@ export function registerIpc(
         reason: entry.reason
       })),
       files: attempt.plan.files.map((file) => file.path),
-      readingOrder: [...attempt.plan.readingOrder]
+      readingOrder: [...attempt.plan.readingOrder],
+      suggestedFolderName: suggestMarkdownFolderName(attempt.bookTitle)
     };
   });
 
   handle(IPC.books.exportMarkdownFolderPublish, async (payload) => {
-    const input = folderAttemptInput.parse(payload);
+    const input = folderPublishInput.parse(payload);
     const host = folderHostFor(studio.requireLibrary());
     const attempt = host.getAttempt(input.attemptId);
     if (!attempt || attempt.bookId !== input.bookId) {
@@ -799,8 +872,11 @@ export function registerIpc(
         "That collection is no longer available. Collect the book again before exporting."
       );
     }
-    // The destination comes from the native picker in the main process, never from the renderer.
-    const folderName = suggestMarkdownFolderName(attempt.bookTitle);
+    // The name is validated before the picker; the main process stays authoritative.
+    const validated = validateMarkdownFolderName(input.folderName);
+    if (!validated.ok) return { status: "name-invalid" as const, message: validated.message };
+    const folderName = validated.name;
+    // The parent comes from the native picker in the main process, never from the renderer.
     let destination: string;
     const forced = process.env.STUDIO_EXPORT_PATH;
     if (forced) {
@@ -825,7 +901,8 @@ export function registerIpc(
         status: "published" as const,
         destinationPath: settlement.destinationPath,
         files: settlement.files,
-        warnings: folderWarnings(settlement.warnings)
+        warnings: folderWarnings(settlement.warnings),
+        ...(settlement.cleanupLeftover ? { cleanupLeftover: settlement.cleanupLeftover } : {})
       };
     }
     return settlement;

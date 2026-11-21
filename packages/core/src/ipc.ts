@@ -178,6 +178,8 @@ export const IPC = {
     exportMarkdown: "books:exportMarkdown",
     exportPdf: "books:exportPdf",
     exportEpub: "books:exportEpub",
+    /** Ask to cancel one running single-file export before its publication begins. */
+    exportCancel: "books:exportCancel",
     exportImages: "books:exportImages",
     exportMarkdownFolderCapture: "books:exportMarkdownFolderCapture",
     exportMarkdownFolderPublish: "books:exportMarkdownFolderPublish",
@@ -403,6 +405,20 @@ export interface ManuscriptExportReceipt {
   warnings: string[];
 }
 
+/**
+ * The outcome of one single-file export. A published file keeps its receipt; an accepted
+ * cancel before publication settles here instead, and nothing was written.
+ */
+export type ManuscriptExportOutcome =
+  | ManuscriptExportReceipt
+  | { status: "cancelled"; message: string };
+
+/** Whether a single-file cancel was accepted before the rename, or arrived too late. */
+export interface ManuscriptExportCancelResult {
+  status: "accepted" | "too-late" | "already-settled";
+  attemptId: string;
+}
+
 export interface DraftInput {
   bookId: string;
   chapterId: string;
@@ -539,12 +555,23 @@ export type MarkdownFolderCaptureResult =
       excludedLegacy: MarkdownFolderExcludedLegacyView[];
       files: string[];
       readingOrder: string[];
+      /** The main-process suggestion the dialog seeds its editable Folder name field from. */
+      suggestedFolderName: string;
     }
   | { status: "refused"; code: string; dimension: string | null; field: string | null; message: string };
 
 /** Truthful settlement of a Markdown folder publication attempt. */
 export type MarkdownFolderPublishOutcome =
-  | { status: "published"; destinationPath: string; files: string[]; warnings: MarkdownFolderWarningView[] }
+  | {
+      status: "published";
+      destinationPath: string;
+      files: string[];
+      warnings: MarkdownFolderWarningView[];
+      /** Present only when the published folder's temporary staging could not be removed. */
+      cleanupLeftover?: { name: string; path: string };
+    }
+  | { status: "name-invalid"; message: string }
+  | { status: "name-conflict"; message: string }
   | { status: "cancelled"; message: string }
   | { status: "unknown"; message: string; destinationPath: string | null };
 
@@ -675,18 +702,20 @@ export interface StudioApi {
     saveMatter(input: SaveMatterInput): Promise<Result<SaveMatterResult>>;
     delete(bookId: string): Promise<Result<{ trashedAt: string }>>;
     open(bookId: string): Promise<Result<BookDetail>>;
-    exportDocx(bookId: string): Promise<Result<ManuscriptExportReceipt | null>>;
-    exportMarkdown(bookId: string): Promise<Result<ManuscriptExportReceipt | null>>;
+    exportDocx(bookId: string, attemptId?: string): Promise<Result<ManuscriptExportOutcome | null>>;
+    exportMarkdown(bookId: string, attemptId?: string): Promise<Result<ManuscriptExportOutcome | null>>;
     /** Save the manuscript as a PDF where the author chooses; null when they cancel. */
-    exportPdf(bookId: string): Promise<Result<ManuscriptExportReceipt | null>>;
+    exportPdf(bookId: string, attemptId?: string): Promise<Result<ManuscriptExportOutcome | null>>;
     /** Save the manuscript as an EPUB 3 e-book where the author chooses; null when they cancel. */
-    exportEpub(bookId: string): Promise<Result<ManuscriptExportReceipt | null>>;
+    exportEpub(bookId: string, attemptId?: string): Promise<Result<ManuscriptExportOutcome | null>>;
+    /** Ask to cancel one running single-file export before publication begins. */
+    exportCancel(input: { bookId: string; attemptId: string }): Promise<Result<ManuscriptExportCancelResult>>;
     /** Save every image in the book as a JPEG in a new folder the author chooses. */
     exportImages(bookId: string): Promise<Result<ImageExportResult>>;
     /** Collect the saved book into a frozen Markdown folder bundle and plan it. Desktop only. */
     exportMarkdownFolderCapture(bookId: string): Promise<Result<MarkdownFolderCaptureResult>>;
     /** Publish the frozen bundle for one attempt to a new folder chosen in the main process. Null when the picker is cancelled. */
-    exportMarkdownFolderPublish(input: { bookId: string; attemptId: string }): Promise<Result<MarkdownFolderPublishOutcome | null>>;
+    exportMarkdownFolderPublish(input: { bookId: string; attemptId: string; folderName: string }): Promise<Result<MarkdownFolderPublishOutcome | null>>;
     /** Ask to cancel one Markdown folder attempt before its commit begins. */
     exportMarkdownFolderCancel(input: { bookId: string; attemptId: string }): Promise<Result<MarkdownFolderCancelResult>>;
     search(bookId: string, query: string): Promise<Result<SearchHit[]>>;

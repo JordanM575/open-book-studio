@@ -407,6 +407,42 @@ export interface ExportDeps {
   /** Scoped filesystem faults for synthetic publication tests; production uses the real writer. */
   atomic?: ExportAtomicOverrides;
   inspection?: ExportInspectionOverrides;
+  /** The attempt's cancel signal; checked at each checkpoint and at the pre-rename gate. */
+  signal?: AbortSignal;
+  /** Called once, in the same synchronous block as the last abort check before rename. */
+  onPublishStart?: () => void;
+}
+
+/** The author cancelled before publication. Distinct from a LibraryError; nothing was written. */
+export class ExportCancelledError extends Error {
+  constructor(message = EXPORT_CANCELLED_MESSAGE) {
+    super(message);
+    this.name = "ExportCancelledError";
+  }
+}
+
+export const EXPORT_CANCELLED_MESSAGE = "The export was cancelled before it was published. Nothing was written.";
+
+/** The cancelled receipt for a boundary failure, including a temp that could not be removed. */
+export function cancelledExportOutcome(
+  error: unknown
+): { status: "cancelled"; message: string } | null {
+  if (error instanceof ExportCancelledError) return { status: "cancelled", message: EXPORT_CANCELLED_MESSAGE };
+  if (error instanceof LibraryError && error.cause instanceof ExportCancelledError) {
+    const temporary = (error as LibraryError & { temporaryPath?: unknown }).temporaryPath;
+    const path = typeof temporary === "string" ? temporary : null;
+    return {
+      status: "cancelled",
+      message: path
+        ? `${EXPORT_CANCELLED_MESSAGE} Temporary output could not be removed: ${path}. Remove that file when it is no longer needed.`
+        : EXPORT_CANCELLED_MESSAGE
+    };
+  }
+  return null;
+}
+
+function throwIfExportCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ExportCancelledError();
 }
 
 /** Kept for the DOCX journey's existing imports; new code uses ExportDeps. */
@@ -469,6 +505,8 @@ async function publishManuscript(
 ): Promise<string | null> {
   const destination = await deps.pickDestination(suggestedName);
   if (!destination) return null;
+  // 1. The picker returned after a cancel: stop before inspection or any build.
+  throwIfExportCancelled(deps.signal);
   if (isInsideLibrary(libraryRoot, destination)) {
     throw new LibraryError(
       "invalid",
@@ -478,7 +516,11 @@ async function publishManuscript(
   const inspected = await inspectExportDestination(libraryRoot, destination, deps.inspection);
   const observed = await deps.statDestination(destination);
   const data = await build();
+  // 2. A long render that was cancelled must not then ask to replace a file.
+  throwIfExportCancelled(deps.signal);
   if ((observed || inspected.exists) && !(await deps.confirmReplace(destination))) return null;
+  // 3. Replacement consent arrived; stop before any staging write.
+  throwIfExportCancelled(deps.signal);
   const validate = async (): Promise<void> => {
     const reread = await deps.statDestination(destination);
     if (!sameExportState(observed, reread) || inspected.fingerprint !== (await inspectExportDestination(libraryRoot, destination, deps.inspection)).fingerprint) {
@@ -486,7 +528,15 @@ async function publishManuscript(
     }
   };
   await validate();
-  const write = deps.writeFile ?? createExportWriter(validate, deps.atomic);
+  // The staging write starts only after this last pre-write check.
+  throwIfExportCancelled(deps.signal);
+  // 4. The atomic decision point: fingerprint, abort check and publish start in one synchronous block.
+  const gate = async (): Promise<void> => {
+    await validate();
+    throwIfExportCancelled(deps.signal);
+    deps.onPublishStart?.();
+  };
+  const write = deps.writeFile ?? createExportWriter(gate, deps.atomic);
   // Anchor staging and cleanup to the checked real parent, not a retargetable alias supplied by the picker.
   await write(inspected.resolvedPath, data);
   return destination;

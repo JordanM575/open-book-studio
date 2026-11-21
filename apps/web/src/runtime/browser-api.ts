@@ -171,6 +171,10 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
         Promise.resolve(
           failure("invalid", "EPUB export is available in the desktop app. Export the library archive instead.")
         ),
+      exportCancel: () =>
+        Promise.resolve(
+          failure("invalid", "Export cancellation is available in the desktop app. Export the library archive instead.")
+        ),
       exportImages: () =>
         Promise.resolve(
           failure("invalid", "Image export is available in the desktop app. Export the library archive instead.")

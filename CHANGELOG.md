@@ -7,6 +7,8 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Export safety
+- The Markdown folder rechecks cancellation, consent and plan identity at the commit boundary; post-publication staging cleanup is reported as a published warning with its exact path; single-file DOCX/PDF/EPUB/Markdown exports gain attempt-bound cancellation before publication; a folder-name field makes repeat exports explicit; an existing folder is still refused. T016/T017/T019 remain unchecked.
 ### Reader review rerun comparison
 - The volatile reader review now keeps an append-only per-session attempt history of at most 8 attempts, oldest first, covering completed, failed, stopped, invalid-result and unknown outcomes. Attempts are never edited, reordered or evicted; only Close, a book/view change or unmount discards them. At 8 attempts the Prepare action is disabled with an `aria-describedby` cap note, and no ninth attempt is created. A stopped Start records its attempt when Stop is pressed, even though the late Start resolution is ignored.
 - Every attempt keeps its prepared disclosure and attribution: the complete frozen profile snapshot, provider/model/connection facts (including the renderer-only connection label, never written to the envelope, request or any record), terms and consent facts, and the scope and request identity. Failed, stopped, invalid-result and unknown attempts render as `Reader attempt {id}` sections with no findings, Save or navigation; completed attempts keep the historical article. No writer, storage, report, thread or profile path is added.

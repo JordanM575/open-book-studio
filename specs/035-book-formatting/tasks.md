@@ -147,7 +147,10 @@ manuscripts, credentials, live providers, paid services or devices.
   [the folder format](../../docs/formats/markdown-folder.md). Write ordinary ordered Markdown files
   and copy verified attached image files to the export destination without changing the 019 source
   files. Test with synthetic text and image fixtures. The subordinate gates below own acceptance;
-  this task stays unchecked until they and T016/T017/T019 close.
+  this task stays unchecked until they and T016/T017/T019 close. Capture, publication and the mounted
+  journey are implemented on the desktop local-folder target. The task stays unchecked until T016,
+  T017 and T019 close; replacing an existing folder and other destination classes remain successor
+  work.
   - [x] **T014-C** Independent review of the recorded D-202 packet against its exact head. Owner:
     independent reviewer. Evidence: scoped review accepting or revising the decision, format, spec,
     plan and changelog wording at that head. This gate closes no implementation task. Closed:
@@ -181,7 +184,9 @@ manuscripts, credentials, live providers, paid services or devices.
     warnings and written-file lists, destination-picker cancel, accepted pre-commit cancellation
     that actually prevents publication, and truthful late or unknown settlement, each exercised in
     synthetic end-to-end journeys without exposing the folder target before this gate passes. Closed:
-    independently accepted at `255fc77`; merged in PR #54.
+    independently accepted at `255fc77`; merged in PR #54. The follow-up commit-window recheck and the
+    published-with-cleanup settlement are recorded under T016; they do not reopen this gate or change
+    its accepted head.
 - [ ] **T015** After T006, implement the selected PDF and EPUB renderer adapters. Validate structural
   output with synthetic books containing ordered matter, verse-like lines and attached synthetic
   images. Keep preview copy approximate and make no eligibility, pagination, measurement or publisher
@@ -206,8 +211,13 @@ manuscripts, credentials, live providers, paid services or devices.
   `docx-export-flush.test.tsx`); the earlier missing-header-guard note was stale. W05 adds canonical
   destination-alias rejection, publication-time rechecks and cleanup diagnostics for all four
   formats, exercised in `export-safety.test.ts`. The shared underlying filesystem adapter's separate
-  containment issue remains tracked with history. Independent integrated review and full verification
-  are still required before this task closes.
+  containment issue remains tracked with history. The single-file contract now has attempt-bound
+  cancellation before publication, and the folder rechecks cancellation, consent currency and plan
+  identity at commit-started. Replacement consent is met by the single-file targets; the Markdown
+  folder is new-folder-only under D-202's retained successor gate, and no existing folder is deleted,
+  merged or renamed. Post-publication staging cleanup is a published warning with the exact leftover
+  path, not an unknown settlement. Independent integrated review and full verification are still
+  required.
 - [ ] **T017** Complete synthetic end-to-end journeys for DOCX, PDF, EPUB and Markdown as each renderer
   becomes available. Verify the author-visible destination/status, source hashes, matter order,
   optional-image warning, save conflict, cancel and failure behavior. Unsupported targets must remain
@@ -219,7 +229,9 @@ manuscripts, credentials, live providers, paid services or devices.
   deliver image-snapshot warnings through all four real IPC handlers to the Format and workspace
   receipt displays. `ipc-handlers.test.ts` covers receipts, cancellation, refusal and source bytes;
   the extended hidden smoke asserts the visible Markdown omission warning. The new built-app checks
-  and independent review remain pending on the combined candidate.
+  and independent review remain pending on the combined candidate. The Format dialog now exposes a
+  single-file Cancel export control and a folder-name field for repeat exports; the folder save-conflict,
+  refusal and preflight-order tests are added. No built-app journey has been run on this head.
 
 ## Phase 5 — Public format and acceptance record
 
@@ -228,7 +240,12 @@ manuscripts, credentials, live providers, paid services or devices.
   implementation change, not in this spec-authoring task.
   D-202, the FORMAT folder section, the folder format and the changelog entry are recorded with this
   packet; the task stays unchecked until the implementation changes complete the remaining format
-  and decision updates and T019 reviews them.
+  and decision updates and T019 reviews them. This slice updates FORMAT.md, the host capability matrix
+  and the spec, plan and task status. T018 stays unchecked until T019 reviews the corrected public
+  record.
 - [ ] **T019** Review the final author-visible journey against spec 002 and spec 019: DOCX/PDF/EPUB/
   Markdown scope, ordered matter, canonical typography, approximate-preview disclosure, saved-source
   safety and image-store ownership. Record remaining gaps without claiming publisher readiness.
+  The public status now agrees that the desktop local-folder target is implemented and exposed.
+  Replacement, other destination classes, the DOCX contents page, FR-020's full completion notice and
+  FR-054 remain open. No publisher, measurement or device readiness is claimed.

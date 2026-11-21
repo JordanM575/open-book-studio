@@ -275,24 +275,28 @@ Q capabilities are: **capture** (§2 enumeration and freeze), **verify** (§3 im
 **plan** (planner under §4), **stage** (assemble the folder in owned sibling staging), **commit**
 (genuine no-replace publication to a new destination), **replace** (existing-folder replacement),
 **cancel/settle** (attempt-bound cancellation and truthful settlement) and **deliver** (mounted
-journey showing destination, files and warnings). No target can claim the folder journey today.
+journey showing destination, files and warnings). The desktop author-chosen local-folder target claims
+capture, verify, plan, stage, no-replace commit, cancel/settle and delivery, with synthetic evidence
+only. No other target claims the folder journey. Replacement is refused.
 
 | Capability | Desktop, author-chosen local folder | Desktop, removable / network / synced folder | Browser, author-picked folder | Browser, origin storage (OPFS) |
 | --- | --- | --- | --- | --- |
-| Capture | Cannot claim: port supports complete bounded reads; capture unimplemented | Cannot claim: same code path, consistency over sync unqualified | Cannot claim: port implements library reads; capture unimplemented | Cannot claim: same port class; capture unimplemented |
-| Verify | Cannot claim: snapshot SHA-256 and header inspection exist; §3 binding unimplemented | Cannot claim: same primitives, unimplemented | Cannot claim: hashing needs Web Crypto; binding unimplemented | Cannot claim: same, unimplemented |
-| Plan | Pure planner available; not wired to any host | Pure planner available; not wired | Pure planner available; not wired | Pure planner available; not wired |
-| Stage | Cannot claim: sibling staging exists for single files and the all-images action; folder staging unbuilt | Cannot claim: partial staging may be synced or cross a volume boundary | Cannot claim: no atomic directory staging primitive | Cannot claim: no author-visible folder to stage for |
-| Commit (no-replace) | Cannot claim: existence check plus rename is expressly insufficient (folder format §8) | Cannot claim: rename and durability semantics vary by volume and sync client | Cannot claim: directory move is copy-then-remove, not atomic | Cannot claim: no destination publication exists |
-| Replace | Cannot claim: named successor work, unowned today | Cannot claim: successor work | Cannot claim: successor work | Cannot claim: successor work |
-| Cancel / settle | Cannot claim: single-file cancel exists; no folder attempt lifecycle | Cannot claim: no folder attempt lifecycle | Cannot claim: manuscript exports are refused on web today | Cannot claim: no export exists |
-| Deliver | Cannot claim: no mounted journey (T014-U) | Cannot claim: no mounted journey | Cannot claim: journey unavailable (folder format §8) | Cannot claim: no folder delivery surface |
+| Capture | Implemented: complete bounded reads and opening/closing samples; synthetic evidence only. | Cannot claim: same code path, consistency over sync unqualified | Cannot claim: port implements library reads; capture unimplemented | Cannot claim: same port class; capture unimplemented |
+| Verify | Implemented: §3 image binding; synthetic evidence only. | Cannot claim: same primitives, unimplemented | Cannot claim: hashing needs Web Crypto; binding unimplemented | Cannot claim: same, unimplemented |
+| Plan | Implemented: wired through the host; synthetic evidence only. | Pure planner available; not wired | Pure planner available; not wired | Pure planner available; not wired |
+| Stage | Implemented: owned sibling staging; synthetic evidence only. | Cannot claim: partial staging may be synced or cross a volume boundary | Cannot claim: no atomic directory staging primitive | Cannot claim: no author-visible folder to stage for |
+| Commit (no-replace) | Implemented: exclusive destination creation and per-file moves; synthetic evidence only. | Cannot claim: rename and durability semantics vary by volume and sync client | Cannot claim: directory move is copy-then-remove, not atomic | Cannot claim: no destination publication exists |
+| Replace | Refused: named successor work; no destination is deleted or merged. | Cannot claim: successor work | Cannot claim: successor work | Cannot claim: successor work |
+| Cancel / settle | Implemented: attempt-bound cancel before commit; accepted cancel prevents publication; late cancel is too late; post-publication cleanup is a published warning, not unknown. | Cannot claim: no folder attempt lifecycle | Cannot claim: manuscript exports are refused on web today | Cannot claim: no export exists |
+| Deliver | Implemented: mounted Format journey with destination, files and warnings; synthetic evidence only. | Cannot claim: no mounted journey | Cannot claim: journey unavailable (folder format §8) | Cannot claim: no folder delivery surface |
 
-Existing targets keep exactly their current claims and gain nothing here: the single-file DOCX, PDF,
-EPUB and Markdown exports and the separate all-images action remain desktop publication under their
-own contracts; web manuscript exports remain refused as desktop-only. The browser build's
-manuscript exports being unavailable is a current product fact this matrix records, not a folder
-capability. Native and mobile surfaces have no spec 035 export journey today and claim nothing.
+The desktop local-folder target now claims the implemented Q journey above; the single-file exports
+gain attempt-bound cancellation. The other destination classes and replacement gain nothing. The
+single-file DOCX, PDF, EPUB and Markdown exports and the separate all-images action remain desktop
+publication under their own contracts; web manuscript exports remain refused as desktop-only. The
+browser build's manuscript exports being unavailable is a current product fact this matrix records,
+not a folder capability. Native and mobile surfaces have no spec 035 export journey today and claim
+nothing.
 Each desktop destination class (local, removable, network, synced) and each browser storage class
 needs its own qualification evidence before any cell above changes; crash and restart recovery of an
 interrupted publication needs its own claim and evidence as well.
