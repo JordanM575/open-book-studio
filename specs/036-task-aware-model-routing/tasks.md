@@ -1,6 +1,6 @@
 # Tasks: task-aware model routing
 
-**Spec**: [spec.md](spec.md) · **Plan**: [plan.md](plan.md) · **State**: In progress; offline preview leaf implemented, four Phase-0 decisions accepted as D-204–D-207 on 2026-11-20, production mount and broader integration remain.
+**Spec**: [spec.md](spec.md) · **Plan**: [plan.md](plan.md) · **State**: In progress; offline preview leaf implemented and T016's narrow handoff delivered at the source/test level (implementation `eb876f0`, exact-head review ACCEPT, merged `a246d5d` via PR #118); D-204–D-207 accepted; T015/T017 and the new-total portion of T018 remain deliberately not selected; T019 remains unchecked; no live/packaged/provider claim.
 
 Tasks are ordered by dependency; checked rows name their evidence. A decision blocks only the task
 that relies on it; offline preview work does not wait for decisions about dispatch or fallback.
@@ -142,11 +142,42 @@ that relies on it; offline preview work does not wait for decisions about dispat
 - [ ] T015 **Deliberately not selected by D-205.** Neither ranking nor a single suggestion is in scope.
   Do not implement a score, ordering or advisory pick, and do not record this task as shipped. A later
   ranking policy requires a new decision naming its evidence and deterministic rule.
-- [ ] T016 **Unblocked by D-205 and D-207; not implemented.** Add only the narrow two-step handoff: an
+- [x] T016 **Unblocked by D-205 and D-207; delivered 2026-11-20.** Add only the narrow two-step handoff: an
   explicit action on an author-chosen candidate opens the existing one-turn picker, the author confirms,
   and only the existing one-turn override is set. It must not change the book default, consent, send
   behavior or persistence, and the existing Send action remains the only provider trigger. The wording
   is now “author-chosen candidate”, not “chosen suggestion”.
+  Completed 2026-11-20: implemented at `eb876f08328165fd1897e8e2875eb6baae751a1c` (22 files against its
+  parent; the design memo's 23-entry §7 allowlist went unused at `packages/core/src/routing/index.ts`).
+  124 focused passes were recorded; the exact-head review re-ran 122 passing, 0 failing, and node
+  typecheck was clean with web showing only the known pre-existing `WorkspaceView` diagnostic.
+  ACCEPTed by independent exact-head review; the pre-merge `main` merge
+  `0df52611d3ce60ea02ed1ddaebdd1b10a604b04c` was itself reviewed and ACCEPTed first; merged to main as
+  `a246d5d2d35533882039044157bf082da19ab43f` via PR #118. The slice mounts the preview from the
+  writing-agent composer (an optional “Preview models” entry, rendered only when the host wires it), fed
+  exclusively by the in-memory snapshot of catalogues the explicit model picker already loaded; with an
+  empty snapshot it refuses before any profile is chosen and makes no bridge call. An eligible
+  candidate shows “Use for next message”, which passes exactly `{ provider, modelId }` to the existing
+  one-turn picker; the picker restricts itself to that provider's usable connections (preselecting one
+  only when exactly one exists — otherwise the author chooses, never the first credential), revalidates
+  the connection and model on open and on confirm, and sets only the existing one-turn override
+  (`turnModel`) through its existing confirm path. No IPC channel, preload method, provider call, vault
+  read, persistence, ranking/score/single suggestion, request-size estimator or task/route store is
+  added; the book default, connection, consent, conversation and manuscript are untouched, and Send
+  remains the only dispatch trigger.
+  Judgment calls recorded from the reviews: the known-context requirement is an optional
+  `requiresKnownContext` per §7.1 of the design memo (an absent flag never grants eligibility; the
+  shipped `WRITING_TASK_PROFILES` set it and are pinned by test; the §3.1/§7.1 wording difference is a
+  recorded design-note residual); the D-206 “No total is shown because the request size is unknown.”
+  sentence shipped as the §7.1/Q3-permitted static disclosure with no calculation attached; the picker's
+  `handoffPendingRef` guard is inert in non-handoff mode and is covered by the mount test's exact
+  `providers.models` call counts.
+  Residuals: `connectionsLoaded` is not reset when the handoff picker is re-opened (cosmetic only — the
+  confirm path revalidates against fresh state, so no stale write is possible; a one-line reset is a
+  follow-up); live, packaged and provider-behaviour evidence, including the T009-equivalent built-app
+  class, remains out of scope and no such claim is made; T016's acceptance under its design is
+  implementation plus independent exact-head review plus merge — all three are now done. T015, T017,
+  T018 and T019 remain unchecked; 037 T022 and 038 T022 remain unchecked.
 - [ ] T017 **Deliberately not selected by D-207.** Persistent task/route details are out of scope. No
   book, thread or usage schema, route store or task record is added; a later proposal needs its own
   decision covering schema, ownership, privacy, versioning, migration and attribution.

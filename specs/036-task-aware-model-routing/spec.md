@@ -11,12 +11,14 @@ are accepted as D-204–D-207. The initial taxonomy is three author-selected pro
 tools and a known catalogue context (D-204); candidates stay unranked with no single suggestion (D-205);
 there is no local request-size estimator or total cost (D-206); and only a two-step handoff to the
 existing one-turn picker is allowed, with no persistence (D-207). T015, T017 and the new-total portions
-of T008/T018 are deliberately not selected; T016 remains unchecked and unblocked only for the narrow
-author-chosen-candidate handoff. T019 stays separately gated, and the preview still has no production
-mount. These decisions do not add a mount, provider call, route store or estimator.
+of T008/T018 are deliberately not selected. T019 stays separately gated. These decisions do not add a
+provider call, route store or estimator. Update, 2026-11-20: T016's narrow author-chosen-candidate
+handoff was implemented, reviewed at its exact head and merged (`a246d5d`, PR #118); the preview is
+now mounted from the writing-agent composer and consumes only catalogues the explicit picker already
+loaded. No live, packaged or provider-behaviour claim is made.
 
 **Feature Branch**: `036-task-aware-model-routing`  
-**Status**: In progress — offline preview leaf exists; D-204–D-207 accepted; T015/T017 and the new-total portion of T018 deliberately not selected, T016 narrow handoff unchecked; production mount and selected workflow routing remain open.
+**Status**: In progress — D-204–D-207 accepted; T016's narrow author-chosen-candidate handoff delivered at the source/test level (implementation `eb876f0`, exact-head review ACCEPT, merged `a246d5d` via PR #118); T015/T017 and the new-total portion of T018 deliberately not selected; T019 remains unchecked; no live/packaged/provider claim.
 **Depends on**: [011](../011-model-access/spec.md) provider access and model selection; [022](../022-provider-compatibility/spec.md) provider compatibility and Contributor consent; [002](../002-studio-v1/spec.md) writing-agent behavior.
 
 ## Overview
@@ -263,8 +265,8 @@ the 2026-11-07 delivery authority; dependent implementation remains separate.
 4. **Suggestion confirmation and persistence — accepted as a two-step handoff only (D-207).** An explicit
    action on an author-chosen candidate opens the existing one-turn picker; author confirmation is
    required; only the existing one-turn override is set. No book default, consent, send or persistence
-   change. T017 is deliberately not selected; T016 remains unchecked and unblocked only for this narrow
-   handoff.
+   change. T017 is deliberately not selected; T016's narrow author-chosen-candidate handoff is
+   delivered at the source/test level (merged `a246d5d`, PR #118).
 5. **D-116 cost enforcement**: Accepted ADR 0019 distinguishes finite operation mode (not a money
    cap) from qualified strict money with conservative durable reservations and provider-enforceable
    all-charge limits. Unknown/unresolved charges block strict mode. Implementation and adapter
@@ -279,7 +281,9 @@ the 2026-11-07 delivery authority; dependent implementation remains separate.
 preview never marks a model eligible that `canRunAgent` would refuse (D-204). A future production mount
 must use catalogues already loaded by an explicit picker or refresh action, or a read-only cached-summary
 seam; calling `ProviderService.models()` when the preview opens would fetch on a cache miss and violate
-FR-012 and SC-001. Neither condition is implemented here.
+FR-012 and SC-001. Both conditions are met at the source/test level by the T016 delivery (the shipped
+profiles require a known context, and the merged mount consumes only catalogues the explicit picker
+already loaded, or refuses); no live, packaged or provider-behaviour verification is claimed.
 
 ## Assumptions
 
