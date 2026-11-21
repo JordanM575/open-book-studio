@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ReviewContractError, REVIEW_LIMITS, utf8Bytes } from "../../src/review/contract";
-import { buildReviewEnvelope, checkReviewStart, sourceCurrency, type EnvelopeInput, type ReviewEnvelope } from "../../src/review/envelope";
+import { buildReviewEnvelope, checkReviewStart, reviewResourceUsage, sourceCurrency, type EnvelopeInput, type ReviewEnvelope } from "../../src/review/envelope";
 import { buildReaderRun, compareReaderRuns, parseReaderOutput, readerCurrentSources, readerSourceState, reviewCitationNavigation, verifyReviewCitation } from "../../src/review/findings";
 import { builtinReaderProfile, editReaderProfile, validateReaderProfile, type ProfileContent } from "../../src/review/profiles";
 import { captureBibleSource, captureChapterSource } from "../../src/review/sources";
@@ -176,8 +176,8 @@ describe("hostile structured findings and exact citations", () => {
     const before = await readerEnvelope(); const first = await run(before);
     const after = await readerEnvelope({ requestId: "request-2" });
     const second = await run(after, output(after, [finding(after, { interpretation: "A different impression." })]));
-    expect(compareReaderRuns(first, second)).toEqual({ sourceChanged: false, profileChanged: false, destinationChanged: false,
-      promptOrFeedbackChanged: false, interpretationChanged: true, modelVariation: true });
+    expect(compareReaderRuns(first, second)).toMatchObject({ sourceChanged: false, profileChanged: false, destinationChanged: false,
+      promptOrFeedbackChanged: false, interpretationChanged: true, modelVariation: true, status: "comparable", kind: "identical-input", changedFacets: [] });
     const changedProfile = await editReaderProfile(await builtinReaderProfile("alpha"), content, "author-1");
     const changedSource = { ...structuredClone(source()), identity: { ...citation().identity, version: 4 } };
     const thirdEnvelope = await readerEnvelope({ requestId: "request-3", profile: structuredClone(changedProfile), sources: [changedSource],
@@ -346,5 +346,354 @@ describe("explicit current saved-source checks", () => {
     const quote = { kind: "story-bible", sourceId: "bible", bookId: saved.bookId, field: bible.field,
       valueDigest: bible.valueDigest, containingFileHash: hash, start: 0, end: 5, quote: "Known" };
     expect(reviewCitationNavigation(bibleEnvelope, quote, [], editor)).toMatchObject({ status: "unavailable", reason: "kind" });
+  });
+});
+
+describe("volatile rerun comparison", () => {
+  const content: ProfileContent = { name: "Same name", purpose: "A fictional editorial lens", focus: ["clarity"], guidance: "Be concise." };
+
+  test("identical input with different interpretation is model variation, never improvement", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const before = await run(first, output(first, [finding(first, { interpretation: "One reading." })]));
+    const after = await run(second, output(second, [finding(second, { interpretation: "Another reading." })]));
+    const comparison = compareReaderRuns(before, after);
+    expect(comparison.status).toBe("comparable");
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("identical-input");
+    expect(comparison.changedFacets).toEqual([]);
+    expect(comparison.modelVariation).toBe(true);
+    expect(comparison.interpretationChanged).toBe(true);
+    expect(comparison.evidenceChanged).toBe(false);
+    expect(comparison.partial).toBe(false);
+    expect(comparison.before.total).toBe(1);
+    expect(comparison.after.total).toBe(1);
+  });
+
+  test("identical input with identical findings reports no variation", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const before = await run(first);
+    const after = await run(second);
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("identical-input");
+    expect(comparison.modelVariation).toBe(false);
+    expect(comparison.interpretationChanged).toBe(false);
+    expect(comparison.evidenceChanged).toBe(false);
+    expect(comparison.changedFacets).toEqual([]);
+  });
+
+  test("order-only finding reordering does not set interpretationChanged", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const one = finding(first, { findingId: "finding-1", interpretation: "First impression." });
+    const two = finding(first, { findingId: "finding-2", category: "pacing", interpretation: "Second impression." });
+    const before = await run(first, output(first, [one, two]));
+    const after = await run(second, output(second, [
+      { ...two, runId: second.requestId, readerId: second.profile?.id, readerVersion: second.profile?.version },
+      { ...one, runId: second.requestId, readerId: second.profile?.id, readerVersion: second.profile?.version }
+    ]));
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.interpretationChanged).toBe(false);
+    expect(comparison.modelVariation).toBe(false);
+  });
+
+  test("same interpretation with a different captured span sets evidenceChanged only", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const narrower = { ...citation(), end: selectedStart + "Selected".length, quote: "Selected" };
+    const before = await run(first);
+    const after = await run(second, output(second, [finding(second, { evidence: [narrower] })]));
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.interpretationChanged).toBe(false);
+    expect(comparison.evidenceChanged).toBe(true);
+    expect(comparison.modelVariation).toBe(true);
+    expect(comparison.kind).toBe("identical-input");
+  });
+
+  test("a saved-version revision reports one revision source change and nothing else", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const revised = captureChapterSource({ sourceId: "source-1", saved: { ...saved, version: 4, hash: "b".repeat(64) },
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await readerEnvelope({ requestId: "request-2", sources: [revised] });
+    const before = await run(first);
+    const after = await run(second);
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("changed-source");
+    expect(comparison.changedFacets).toEqual(["sources"]);
+    expect(comparison.sources).toHaveLength(1);
+    expect(comparison.sources[0]).toEqual({ kind: "revision", label: "Synthetic book · Chapter 1: Synthetic chapter",
+      fromVersion: 3, toVersion: 4, hashChanged: true });
+    expect(comparison.profile.changed).toBe(false);
+    expect(comparison.destination.changed).toBe(false);
+    expect(comparison.request.changed).toBe(false);
+    expect(comparison.promptOrFeedbackChanged).toBe(false);
+  });
+
+  test("a same-version content change reports content with no version transition", async () => {
+    const changedBody = "ADJACENT_BEFORE\nSelected 😀 exact.\nADJACENT_AFTER!";
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const contentSource = captureChapterSource({ sourceId: "source-1", saved: { ...saved, body: changedBody, hash: "b".repeat(64) },
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await readerEnvelope({ requestId: "request-2", sources: [contentSource] });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("changed-source");
+    expect(comparison.sources[0]).toMatchObject({ kind: "content", fromVersion: 3, toVersion: 3, hashChanged: true });
+  });
+
+  test("a same-version selection change reports selection and keeps the hash", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const reselected = captureChapterSource({ sourceId: "source-1", saved,
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd - 3 }] });
+    const second = await readerEnvelope({ requestId: "request-2", sources: [reselected] });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("changed-source");
+    expect(comparison.sources[0]).toMatchObject({ kind: "selection", hashChanged: false, fromVersion: 3, toVersion: 3 });
+  });
+
+  test("a same-version title or position change reports a label change", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const renamed = captureChapterSource({ sourceId: "source-1", saved,
+      bookTitle: "Synthetic book", title: "Renamed chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await readerEnvelope({ requestId: "request-2", sources: [renamed] });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.sources[0]).toMatchObject({ kind: "label", hashChanged: false });
+    expect(comparison.kind).toBe("changed-source");
+  });
+
+  test("added and removed sources report one-sided versions without hash text", async () => {
+    const bible = await captureBibleSource({ sourceId: "bible", bookId: saved.bookId, bookTitle: "Synthetic book",
+      field: { section: "outline" }, label: "Outline", containingFileHash: hash, capturedAt: stamp, text: "Known outline" });
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const added = await readerEnvelope({ requestId: "request-2", sources: [structuredClone(source()), bible] });
+    const addedComparison = compareReaderRuns(await run(first), await run(added));
+    if (addedComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(addedComparison.sources).toHaveLength(1);
+    expect(addedComparison.sources[0]).toMatchObject({ kind: "added", label: "Synthetic book · Story Bible · Outline",
+      fromVersion: null, toVersion: null, hashChanged: false });
+    expect(JSON.stringify(addedComparison.sources)).not.toContain(hash);
+    const removedComparison = compareReaderRuns(await run(added), await run(first));
+    if (removedComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(removedComparison.sources).toHaveLength(1);
+    expect(removedComparison.sources[0]).toMatchObject({ kind: "removed", label: "Synthetic book · Story Bible · Outline" });
+  });
+
+  test("a built-in to author fork reports changed-profile with fork identity", async () => {
+    const alpha = await builtinReaderProfile("alpha");
+    const author = await editReaderProfile(alpha, content, "author-1");
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2", profile: structuredClone(author) });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("changed-profile");
+    expect(comparison.changedFacets).toEqual(["profile"]);
+    expect(comparison.profile).toMatchObject({ changed: true, sameId: false, versionChanged: false, digestChanged: true });
+    expect(comparison.profile.from).toMatchObject({ id: "reader-alpha", version: 1, origin: "builtin" });
+    expect(comparison.profile.to).toMatchObject({ id: "author-1", version: 1, origin: "author" });
+    expect(first.profile?.id).toBe("reader-alpha");
+    expect(first.profile?.version).toBe(1);
+    expect(comparison.modelVariation).toBe(false);
+  });
+
+  test("an author v1 to v2 edit reports the version transition with the same id", async () => {
+    const alpha = await builtinReaderProfile("alpha");
+    const author = await editReaderProfile(alpha, content, "author-1");
+    const next = await editReaderProfile(author, { ...content, guidance: "Changed guidance." });
+    const first = await readerEnvelope({ requestId: "request-1", profile: structuredClone(author) });
+    const second = await readerEnvelope({ requestId: "request-2", profile: structuredClone(next) });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("changed-profile");
+    expect(comparison.profile).toMatchObject({ changed: true, sameId: true, versionChanged: true, digestChanged: true });
+  });
+
+  test("provider, model, connection and endpoint changes are independent destination facets", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const destinationOf = async (destination: Partial<ReviewEnvelope["destination"]>, id = "request-2") => {
+      const value = await readerEnvelope({ requestId: id, destination: { ...input().destination, ...destination } });
+      const comparison = compareReaderRuns(await run(first), await run(value));
+      if (comparison.status !== "comparable") throw new Error("expected comparable");
+      return comparison;
+    };
+    expect((await destinationOf({ provider: "Other provider" })).destination).toMatchObject({ providerChanged: true, modelChanged: false, connectionChanged: false, endpointChanged: false, changed: true });
+    expect((await destinationOf({ model: "other/model" })).destination).toMatchObject({ modelChanged: true, providerChanged: false, connectionChanged: false, endpointChanged: false });
+    expect((await destinationOf({ connectionId: "connection-2" })).destination).toMatchObject({ connectionChanged: true, providerChanged: false, modelChanged: false, endpointChanged: false });
+    expect((await destinationOf({ endpointIdentity: "endpoint-revision-2" })).destination).toMatchObject({ endpointChanged: true, providerChanged: false, modelChanged: false, connectionChanged: false, changed: true });
+    expect((await destinationOf({})).destination.changed).toBe(false);
+    expect((await destinationOf({ provider: "Other provider" })).kind).toBe("changed-destination");
+  });
+
+  test("a capability revision or price fact is not a destination change", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const base = input();
+    const second = await readerEnvelope({ requestId: "request-2",
+      environment: { ...base.environment, capabilityRevision: "capability-2", priceAsOf: stamp, catalogContextTokens: 128000, catalogAsOf: stamp } });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.destination.changed).toBe(false);
+    expect(comparison.kind).toBe("identical-input");
+  });
+
+  test("prompt, prior feedback and book policy changes are request facets; a title-only change is not", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const prompted = await readerEnvelope({ requestId: "request-2", prompt: "A different request." });
+    const promptedComparison = compareReaderRuns(await run(first), await run(prompted));
+    if (promptedComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(promptedComparison.kind).toBe("changed-request");
+    expect(promptedComparison.request.changed).toBe(true);
+    expect(promptedComparison.request.promptChanged).toBe(true);
+    expect(promptedComparison.request.priorFeedbackChanged).toBe(false);
+    expect(promptedComparison.request.bookPolicyChanged).toBe(false);
+
+    const fed = await readerEnvelope({ requestId: "request-3",
+      priorFeedback: [{ id: "feedback-1", runId: "request-1", label: "Earlier note", text: "An explicit earlier impression." }] });
+    const fedComparison = compareReaderRuns(await run(first), await run(fed));
+    if (fedComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(fedComparison.kind).toBe("changed-request");
+    expect(fedComparison.request.priorFeedbackChanged).toBe(true);
+    expect(fedComparison.request.promptChanged).toBe(false);
+
+    const base = input();
+    const retitledSource = captureChapterSource({ sourceId: "source-1", saved,
+      bookTitle: "Renamed book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const retitled = await readerEnvelope({ requestId: "request-4",
+      books: base.books.map((book) => ({ ...book, title: "Renamed book" })), sources: [retitledSource] });
+    const retitledComparison = compareReaderRuns(await run(first), await run(retitled));
+    if (retitledComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(retitledComparison.request.bookPolicyChanged).toBe(false);
+
+    const repoliced = await readerEnvelope({ requestId: "request-5",
+      books: base.books.map((book) => ({ ...book, termsRevision: "terms-2" })) });
+    const repolicedComparison = compareReaderRuns(await run(first), await run(repoliced));
+    if (repolicedComparison.status !== "comparable") throw new Error("expected comparable");
+    expect(repolicedComparison.request.bookPolicyChanged).toBe(true);
+    expect(repolicedComparison.kind).toBe("changed-request");
+  });
+
+  test("request scope counts are exact UTF-8/UTF-16 accounting and flag only real differences", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const usage = reviewResourceUsage(first);
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.request.before).toEqual(usage);
+    expect(comparison.request.after).toEqual(usage);
+    expect(comparison.request.scopeCountsChanged).toBe(false);
+    const fed = await readerEnvelope({ requestId: "request-3",
+      priorFeedback: [{ id: "feedback-1", runId: "request-1", label: "Earlier note", text: "An explicit earlier impression." }] });
+    const withFeedback = compareReaderRuns(await run(first), await run(fed));
+    if (withFeedback.status !== "comparable") throw new Error("expected comparable");
+    expect(withFeedback.request.scopeCountsChanged).toBe(true);
+    expect(withFeedback.request.after.combinedBytes).toBeGreaterThan(withFeedback.request.before.combinedBytes);
+  });
+
+  test("multiple facets are all listed and never collapsed into one cause", async () => {
+    const alpha = await builtinReaderProfile("alpha");
+    const author = await editReaderProfile(alpha, content, "author-1");
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const changedSource = captureChapterSource({ sourceId: "source-1", saved: { ...saved, version: 4, hash: "b".repeat(64) },
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await readerEnvelope({ requestId: "request-2", profile: structuredClone(author),
+      sources: [changedSource], destination: { ...input().destination, model: "other/model" }, prompt: "A different request." });
+    const comparison = compareReaderRuns(await run(first), await run(second));
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("multiple-changes");
+    expect(comparison.changedFacets).toEqual(["sources", "profile", "destination", "request"]);
+    expect(comparison.modelVariation).toBe(false);
+  });
+
+  test("counts are exact, category-complete and never a score", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const findings = [
+      finding(first, { findingId: "f-1", category: "clarity", claim: "observation", evidence: [citation()] }),
+      finding(first, { findingId: "f-2", category: "continuity", claim: "contradiction",
+        evidence: [citation(), { ...citation(), end: selectedStart + 8, quote: "Selected" }] }),
+      finding(first, { findingId: "f-3", category: "pacing", claim: "question", evidence: [{ ...citation(), quote: "invented" }] }),
+      finding(first, { findingId: "f-4", category: "character-motivation", claim: "observation",
+        evidence: [citation(), { ...citation(), quote: "invented" }] })
+    ];
+    const before = await run(first, output(first, findings));
+    const after = await run(second, output(second, []));
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.before).toMatchObject({ total: 4, observations: 2, questions: 1, contradictions: 1,
+      verifiedEvidence: 4, withheldEvidence: 2, insufficientFindings: 1, incompleteEvidenceFindings: 1 });
+    expect(comparison.before.byCategory).toEqual({
+      "reader-impression": 0, clarity: 1, pacing: 1, "character-motivation": 1, continuity: 1
+    });
+    expect(comparison.after).toMatchObject({ total: 0, observations: 0, questions: 0, contradictions: 0,
+      verifiedEvidence: 0, withheldEvidence: 0, insufficientFindings: 0, incompleteEvidenceFindings: 0 });
+    expect(comparison.partial).toBe(true);
+  });
+
+  test("a zero-finding run is comparable with exact zeros", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const before = await run(first, output(first, []));
+    const after = await run(second, output(second, []));
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.kind).toBe("identical-input");
+    expect(comparison.before.total).toBe(0);
+    expect(comparison.after.total).toBe(0);
+    expect(comparison.partial).toBe(false);
+  });
+
+  test("an unregistered envelope or a mismatched run fails closed with no counts", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const before = await run(first);
+    const mismatched = { ...before, runId: "request-other" };
+    const byId = compareReaderRuns(before, mismatched);
+    expect(byId).toEqual({ status: "not-comparable", reason: "invalid-run" });
+    const detached = { ...before, envelope: JSON.parse(JSON.stringify(before.envelope)) as typeof before.envelope };
+    const byEnvelope = compareReaderRuns(before, detached);
+    expect(byEnvelope).toEqual({ status: "not-comparable", reason: "invalid-envelope" });
+    expect("before" in byEnvelope).toBe(false);
+    expect("after" in byEnvelope).toBe(false);
+    expect("changedFacets" in byEnvelope).toBe(false);
+  });
+
+  test("a complete 50-finding and 8-evidence boundary count is exact", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const second = await readerEnvelope({ requestId: "request-2" });
+    const many = Array.from({ length: 50 }, (_, index) => finding(first, { findingId: `f-${index}`,
+      evidence: Array.from({ length: 8 }, () => citation()) }));
+    const before = await run(first, output(first, many));
+    const after = await run(second, output(second, []));
+    const comparison = compareReaderRuns(before, after);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.before.total).toBe(50);
+    expect(comparison.before.verifiedEvidence).toBe(400);
+    expect(comparison.before.byCategory.clarity).toBe(50);
+    expect(comparison.partial).toBe(false);
+  });
+
+  test("capture time and request-local aliases never register as source changes", async () => {
+    const first = await readerEnvelope({ requestId: "request-1" });
+    const aliased = captureChapterSource({ sourceId: "renamed-alias", saved,
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: "2026-11-08T00:00:00Z",
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await readerEnvelope({ requestId: "request-2", sources: [aliased] });
+    const aliasedRun = await run(second, output(second, [
+      finding(second, { evidence: [{ ...citation(), sourceId: "renamed-alias" }] })
+    ]));
+    const comparison = compareReaderRuns(await run(first), aliasedRun);
+    if (comparison.status !== "comparable") throw new Error("expected comparable");
+    expect(comparison.sourceChanged).toBe(false);
+    expect(comparison.kind).toBe("identical-input");
   });
 });

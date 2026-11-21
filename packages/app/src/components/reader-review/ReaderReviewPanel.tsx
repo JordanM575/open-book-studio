@@ -5,9 +5,10 @@ import { readerSourceState, type Citation, type ReaderRun, type ReaderSourceSumm
 import type { ReaderReviewStopResult } from "@ai-book-studio/core/review/reader-api";
 import { Button } from "@ai-book-studio/ui/button";
 import {
-  acceptPreparation, acceptRun, citationNavigationCopy, failureMessage, refusalCopy, refusalMessage,
+  acceptPreparation, acceptRun, citationNavigationCopy, completedRerunCopy,
+  failureCopy, failureMessage, maxVolatileAttempts, attemptCapCopy, refusalCopy, refusalMessage,
   revalidationFailureCopy, sourceCheckCopy,
-  type PreparedReaderReview, type ReaderReviewProps, type ReaderSourceCheck
+  type PreparedReaderReview, type ReaderReviewProps, type ReaderSourceCheck, type VolatileReaderRun
 } from "./contracts";
 import { ReviewDisclosure, reviewActionClass } from "./ReviewDisclosure";
 import { navigationDetail, navigationKey, ReaderReviewResults } from "./ReaderReviewResults";
@@ -49,6 +50,15 @@ function withoutScope(check: ReaderSourceCheck | null, scopeDigest: string | und
   return byScopeDigest.delete(scopeDigest) ? { kind: "checked", byScopeDigest } : check;
 }
 
+function boundedFailureReason(reason: unknown): "provider" | "overflow" | "malformed" | "refused" {
+  return typeof reason === "string" && Object.hasOwn(failureCopy, reason) ? reason as "provider" | "overflow" | "malformed" | "refused" : "provider";
+}
+
+function appendAttempt(attempts: readonly VolatileReaderRun[], attempt: VolatileReaderRun): readonly VolatileReaderRun[] {
+  // The Start path is guarded by maxVolatileAttempts; never evict an earlier attempt to make room.
+  return attempts.length >= maxVolatileAttempts ? attempts : [...attempts, attempt];
+}
+
 /** Injected execution and explicit validated persistence; never dispatches a provider on Save. */
 export function ReaderReviewPanel(props: ReaderReviewProps) {
   // A→B→A creates a new lifetime, even if a host reuses book IDs. Closing also drops all volatile data.
@@ -57,8 +67,9 @@ export function ReaderReviewPanel(props: ReaderReviewProps) {
 
 function ReaderReviewSession(props: ReaderReviewProps) {
   const heading = useId();
+  const capNoteId = useId();
   const [prepared, setPrepared] = useState<PreparedReaderReview | null>(null);
-  const [runs, setRuns] = useState<readonly ReaderRun[]>([]);
+  const [attempts, setAttempts] = useState<readonly VolatileReaderRun[]>([]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [message, setMessage] = useState("Prepare the selected saved scope to inspect it. Nothing starts automatically.");
   const [navigationBusy, setNavigationBusy] = useState(false);
@@ -76,6 +87,8 @@ function ReaderReviewSession(props: ReaderReviewProps) {
   const cancellation = useRef<{ message: string } | null>(null);
   const hadPrepared = useRef(false);
   hadPrepared.current = prepared !== null;
+  const completedRuns = attempts.flatMap((attempt) => attempt.outcome.kind === "completed" ? [attempt.outcome.run] : []);
+  const attemptsFull = attempts.length >= maxVolatileAttempts;
 
   const retire = useCallback((): Promise<ReaderReviewStopResult> => {
     generation.current++;
@@ -147,7 +160,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
   function focusStatus() { status.current?.focus(); }
 
   async function prepare() {
-    if (!props.supported || active.current || checkController.current) return;
+    if (!props.supported || active.current || checkController.current || attemptsFull) return;
     const operation = begin();
     setSourceCheck((current) => withoutScope(current, prepared?.envelope.scopeDigest));
     setPrepared(null);
@@ -155,7 +168,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
     setMessage("Preparing the selected saved scope · No provider request has started.");
     focusStatus();
     try {
-      const result = await props.onPrepare({ bookId: props.bookId, signal: operation.controller.signal, previousRunId: runs.at(-1)?.runId ?? null });
+      const result = await props.onPrepare({ bookId: props.bookId, signal: operation.controller.signal, previousRunId: attempts.at(-1)?.requestId ?? null });
       if (!isCurrent(operation)) return;
       assertReviewData(result);
       if (result.kind === "blocked") {
@@ -181,11 +194,12 @@ function ReaderReviewSession(props: ReaderReviewProps) {
   const environment = prepared?.envelope.environment;
   const consentReady = prepared?.envelope.books.every((book) => book.consentSatisfied) === true;
   const destinationReady = environment?.hostSupported === true && environment.connectionAvailable === true && environment.modelSupported === true;
-  const canStart = props.supported && phase === "ready" && consentReady && destinationReady;
+  const canStart = props.supported && phase === "ready" && consentReady && destinationReady && !attemptsFull;
 
   async function start() {
-    if (!canStart || !prepared || active.current || checkController.current || startedRequests.current.has(prepared.envelope.requestId)) return;
+    if (!canStart || !prepared || attemptsFull || active.current || checkController.current || startedRequests.current.has(prepared.envelope.requestId)) return;
     const envelope = prepared.envelope;
+    const connection = prepared.connection;
     startedRequests.current.add(envelope.requestId);
     const operation = begin(envelope.requestId);
     setPhase("running");
@@ -201,27 +215,33 @@ function ReaderReviewSession(props: ReaderReviewProps) {
           run = await acceptRun(outcome.run, envelope);
         } catch {
           if (isCurrent(operation)) {
+            setAttempts((previous) => appendAttempt(previous, { requestId: envelope.requestId, envelope, connection, outcome: { kind: "invalid-result" } }));
             setPhase("failed");
             setMessage(revalidationFailureCopy);
           }
           return;
         }
         if (!isCurrent(operation)) return;
-        setRuns((previous) => [...previous, run]);
+        const completedAfter = attempts.filter((attempt) => attempt.outcome.kind === "completed").length + 1;
+        setAttempts((previous) => appendAttempt(previous, { requestId: run.runId, envelope: run.envelope, connection, outcome: { kind: "completed", run } }));
         setPhase("completed");
-        setMessage("Review completed · Subjective findings, with historical evidence. A rerun requires a new disclosure and Start.");
+        setMessage(completedAfter >= 2 ? completedRerunCopy
+          : "Review completed · Subjective findings, with historical evidence. A rerun requires a new disclosure and Start.");
       } else if (outcome.kind === "blocked") {
         setPhase("idle");
         setMessage(`${refusalMessage(outcome.reason)}${outcome.detail ? ` ${outcome.detail}` : ""}`);
       } else if (outcome.kind === "failed") {
+        setAttempts((previous) => appendAttempt(previous, { requestId: envelope.requestId, envelope, connection, outcome: { kind: "failed", reason: boundedFailureReason(outcome.reason) } }));
         setPhase("failed");
         setMessage(failureMessage(outcome.reason));
       } else if (outcome.kind === "stopped") {
+        setAttempts((previous) => appendAttempt(previous, { requestId: envelope.requestId, envelope, connection, outcome: { kind: "stopped" } }));
         setPhase("stopped");
         setMessage(stoppedCopy);
       } else throw new Error("Invalid result");
     } catch {
       if (!isCurrent(operation)) return;
+      setAttempts((previous) => appendAttempt(previous, { requestId: envelope.requestId, envelope, connection, outcome: { kind: "unknown" } }));
       setPhase("failed");
       setMessage("The request failed or its result could not be validated · Incomplete. Text already sent cannot be recalled. Prepare a new request to try again; it may incur cost.");
     } finally {
@@ -234,7 +254,18 @@ function ReaderReviewSession(props: ReaderReviewProps) {
 
   function stop() {
     const wasRunning = active.current?.requestId !== null && active.current?.requestId !== undefined;
+    // The attempt is recorded at stop time with its prepared envelope: the in-flight Start's late
+    // resolution is intentionally ignored, and a stopped attempt must stay visible for attribution.
+    const pendingEnvelope = wasRunning ? prepared?.envelope : undefined;
+    const pendingConnection = wasRunning ? prepared?.connection : undefined;
     const result = retire();
+    if (pendingEnvelope) {
+      const envelope = pendingEnvelope;
+      const connection = pendingConnection;
+      setAttempts((previous) => appendAttempt(previous, connection
+        ? { requestId: envelope.requestId, envelope, connection, outcome: { kind: "stopped" } }
+        : { requestId: envelope.requestId, envelope, outcome: { kind: "stopped" } }));
+    }
     const stoppedGeneration = generation.current;
     setPrepared(null);
     setPhase("stopped");
@@ -256,7 +287,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
       if (!envelopes.some((candidate) => candidate.scopeDigest === envelope.scopeDigest)) envelopes.push(envelope);
     };
     if (prepared) add(prepared.envelope);
-    for (const run of runs) add(run.envelope);
+    for (const run of completedRuns) add(run.envelope);
     if (envelopes.length === 0) return;
     const controller = new AbortController();
     checkController.current = controller;
@@ -280,7 +311,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
         setMessage(refusalCopy.unavailable);
       } else if (accepted.kind === "failed") {
         setMessage(prepared ? sourceCheckCopy.failedPrepared : sourceCheckCopy.failedHistorical);
-      } else if (!runs.every((run) => summaryFor(run.envelope, accepted)?.status === "current")) {
+      } else if (!completedRuns.every((run) => summaryFor(run.envelope, accepted)?.status === "current")) {
         setMessage(sourceCheckCopy.staleOrUnavailable);
       } else if (prepared && preparedSummary?.status === "current") {
         setMessage(sourceCheckCopy.currentPrepared);
@@ -330,7 +361,7 @@ function ReaderReviewSession(props: ReaderReviewProps) {
   }
 
   const busy = phase === "preparing" || phase === "running";
-  const checkAvailable = Boolean(props.onCheckSources) && props.supported && (prepared !== null || runs.length > 0);
+  const checkAvailable = Boolean(props.onCheckSources) && props.supported && (prepared !== null || completedRuns.length > 0);
   return <section aria-labelledby={heading} className="space-y-4 p-4 text-(length:--text-body-size) text-foreground">
     <h3 id={heading} data-reader-review-heading tabIndex={-1} className="text-(length:--text-title-3-size) font-semibold">Structured reader review</h3>
     <p className="text-muted-foreground">Suggestion-only · Saved selected sources · Volatile by default. Closing this view discards unsaved snapshots, profiles and results. Explicitly saved feedback remains in Saved reviews.</p>
@@ -340,13 +371,14 @@ function ReaderReviewSession(props: ReaderReviewProps) {
     {phase === "ready" && !destinationReady ? <p>{refusalCopy.unavailable}</p> : null}
     <div className="flex flex-wrap gap-2">
       {phase === "ready" && prepared ? <Button variant="primary" className={reviewActionClass} disabled={!canStart || navigationBusy || checkingSources} onClick={() => void start()}>Start with {prepared.envelope.destination.provider}</Button> : null}
-      {!busy ? <Button variant={phase === "ready" ? "secondary" : "primary"} className={reviewActionClass} disabled={!props.supported || props.prepareDisabled === true || navigationBusy || checkingSources} onClick={() => void prepare()}>
-        {phase === "ready" ? "Refresh disclosure" : runs.length ? "Prepare rerun" : "Prepare review"}
+      {!busy ? <Button variant={phase === "ready" ? "secondary" : "primary"} className={reviewActionClass} disabled={!props.supported || props.prepareDisabled === true || navigationBusy || checkingSources || attemptsFull} aria-describedby={attemptsFull ? capNoteId : undefined} onClick={() => void prepare()}>
+        {phase === "ready" ? "Refresh disclosure" : attempts.length ? "Prepare rerun" : "Prepare review"}
       </Button> : <Button className={reviewActionClass} onClick={stop}>{phase === "running" ? "Stop review" : "Cancel preparation"}</Button>}
       <Button variant="secondary" className={reviewActionClass} disabled={!checkAvailable || busy || checkingSources || navigationBusy} onClick={() => void checkCurrentSources()}>Check current sources</Button>
-      <Button variant="ghost" className={reviewActionClass} onClick={() => { void retire(); cancellation.current = null; setPrepared(null); setRuns([]); setNavigationRefusals(new Map()); setSourceCheck(null); setPhase("idle"); props.onClose(); }}>Close review</Button>
+      <Button variant="ghost" className={reviewActionClass} onClick={() => { void retire(); cancellation.current = null; setPrepared(null); setAttempts([]); setNavigationRefusals(new Map()); setSourceCheck(null); setPhase("idle"); props.onClose(); }}>Close review</Button>
     </div>
-    <ReaderReviewResults runs={runs} sourceCheck={sourceCheck} editor={props.editor} navigationBusy={busy || checkingSources || navigationBusy || !props.supported} navigationRefusals={navigationRefusals} onNavigate={(run, citation) => void navigate(run, citation)}
+    {attemptsFull ? <p id={capNoteId}>{attemptCapCopy}</p> : null}
+    <ReaderReviewResults attempts={attempts} sourceCheck={sourceCheck} editor={props.editor} navigationBusy={busy || checkingSources || navigationBusy || !props.supported} navigationRefusals={navigationRefusals} onNavigate={(run, citation) => void navigate(run, citation)}
       persistence={props.persistence?.scope.bookId === props.bookId && props.persistence.scope.viewId === props.viewKey ? props.persistence : undefined} />
   </section>;
 }
