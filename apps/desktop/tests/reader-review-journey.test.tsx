@@ -1,6 +1,6 @@
 /// <reference types="bun" />
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Catalogue } from "@ai-book-studio/core/providers/models";
@@ -357,5 +357,146 @@ describe("explicit source check and editor navigation seam", () => {
     expect(onNavigate).toHaveBeenCalledTimes(1);
     expect(f.transport.calls).toHaveLength(1);
     expectTreeUnchanged(before, await fingerprint(f));
+  });
+});
+
+describe("explicit rerun comparison journey", () => {
+  test("two lenses across a saved revision keep both attempts; the comparison names source and profile changes", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    await openAndSelect(f);
+    await disclose();
+    await start();
+    const afterFirstRun = await fingerprint(f);
+    expect(f.calls.prepare).toBe(1);
+    expect(f.calls.start).toBe(1);
+    await f.library.saveChapter(f.book.id, f.chapter.id, "Synthetic journey PROSE for the selected chapter.", {
+      baseVersion: f.chapter.version, baseHash: f.chapter.hash
+    });
+    const afterSave = await fingerprint(f);
+    expect(afterSave).not.toEqual(afterFirstRun);
+    testing.fireEvent.click(body().getByRole("radio", { name: /Beta reader/ }));
+    expect(f.calls.prepare).toBe(1);
+    expect(f.calls.start).toBe(1);
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Meta" })).toBeTruthy());
+    await start();
+    expect(f.transport.calls).toHaveLength(2);
+    expect(body().getAllByRole("article")).toHaveLength(2);
+    const firstArticle = body().getByRole("article", { name: `Reader run ${f.transport.calls[0]?.envelope.requestId}` });
+    const secondArticle = body().getByRole("article", { name: `Reader run ${f.transport.calls[1]?.envelope.requestId}` });
+    expect(firstArticle.textContent).toContain("Alpha reader · Version 1");
+    expect(firstArticle.textContent).toContain("Saved version 1");
+    expect(secondArticle.textContent).toContain("Beta reader · Version 1");
+    expect(secondArticle.textContent).toContain("Saved version 2");
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("Run");
+    expect(comparison.textContent).toContain("saved version 1 → 2");
+    expect(comparison.textContent).toContain("Profile: Changed");
+    expect(comparison.textContent).toContain("2 completed runs in this view");
+    expect(await fingerprint(f)).toEqual(afterSave);
+    const bookEntries = await readdir(join(f.root, "books", f.book.id));
+    expect(bookEntries).not.toContain("reviews");
+    expect(await readdir(join(f.root, "books", f.book.id, "threads"))).toEqual(["synthetic-sentinel.json"]);
+    expect(await readdir(join(f.root, "books", f.book.id, "checkpoints"))).toEqual([]);
+  });
+
+  test("an identical rerun keeps both interpretations and is labelled same-input model variation", async () => {
+    const f = await fixture();
+    let call = 0;
+    f.transport.output = (envelope) => {
+      call += 1;
+      return JSON.stringify({ runId: envelope.requestId, readerId: envelope.profile?.id,
+        readerVersion: envelope.profile?.version,
+        findings: [{ findingId: "finding-1", category: "clarity", readerId: envelope.profile?.id,
+          readerVersion: envelope.profile?.version, runId: envelope.requestId,
+          interpretation: call === 1 ? "First subjective reading." : "Second subjective reading.",
+          claim: "observation", evidence: [evidenceFor(envelope)] }] });
+    };
+    const before = await fingerprint(f);
+    await openAndSelect(f);
+    await disclose();
+    await start();
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Meta" })).toBeTruthy());
+    await start();
+    expect(f.transport.calls).toHaveLength(2);
+    const first = body().getByRole("article", { name: `Reader run ${f.transport.calls[0]?.envelope.requestId}` });
+    const second = body().getByRole("article", { name: `Reader run ${f.transport.calls[1]?.envelope.requestId}` });
+    expect(first.textContent).toContain("First subjective reading.");
+    expect(second.textContent).toContain("Second subjective reading.");
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("Inputs: Identical");
+    expect(comparison.textContent).toContain("Same-input model variation");
+    expect(comparison.textContent).toContain("Interpretation: Changed · Not a quality judgment");
+    expect(await fingerprint(f)).toEqual(before);
+  });
+
+  test("a failed first attempt is retained and only an explicit rerun sends again", async () => {
+    const f = await fixture();
+    f.transport.error = new ProviderError("rate-limit", "PRIVATE_TRANSPORT_SENTINEL");
+    await openAndSelect(f);
+    await disclose();
+    click("Start with Meta");
+    await testing.waitFor(() => expect(status()).toContain("provider request failed"));
+    expect(document.body.textContent).not.toContain("PRIVATE_TRANSPORT_SENTINEL");
+    expect(f.transport.calls).toHaveLength(1);
+    expect(body().queryByRole("article")).toBeNull();
+    const attempts = body().getAllByRole("region", { name: /Reader attempt / });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]?.textContent).toContain("No findings were retained for this attempt.");
+    expect((body().getByRole("button", { name: "Check current sources" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(f.transport.calls).toHaveLength(1);
+    f.transport.error = null;
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Meta" })).toBeTruthy());
+    await start();
+    expect(f.transport.calls).toHaveLength(2);
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("One completed run and one attempt without findings · No comparison.");
+    expect(body().getAllByRole("region", { name: /Reader attempt / })).toHaveLength(1);
+  });
+
+  test("a stale check after a save keeps historical quotes and the comparison still reports the captured revision", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    await openAndSelect(f);
+    await disclose();
+    await start();
+    const firstArticle = () => body().getAllByRole("article")[0];
+    const quote = firstArticle()?.querySelector("blockquote")?.textContent;
+    expect(quote).toBeTruthy();
+    await f.library.saveChapter(f.book.id, f.chapter.id, "Rewritten synthetic journey prose that differs entirely.", {
+      baseVersion: f.chapter.version, baseHash: f.chapter.hash
+    });
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.staleOrUnavailable));
+    expect(firstArticle()?.querySelector("blockquote")?.textContent).toBe(quote);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Meta" })).toBeTruthy());
+    await start();
+    expect(f.transport.calls).toHaveLength(2);
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("saved version 1 → 2");
+    expect(firstArticle()?.querySelector("blockquote")?.textContent).toBe(quote);
+  });
+
+  test("review activity writes no report, thread or profile files and keeps manuscript bytes outside author saves", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    const before = await fingerprint(f);
+    await openAndSelect(f);
+    await disclose();
+    await start();
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.currentHistorical));
+    const second = f.transport.calls[0]?.envelope;
+    expect(second).toBeTruthy();
+    expect(await fingerprint(f)).toEqual(before);
+    const bookEntries = await readdir(join(f.root, "books", f.book.id));
+    expect(bookEntries).not.toContain("reviews");
+    expect(await readdir(join(f.root, "books", f.book.id, "threads"))).toEqual(["synthetic-sentinel.json"]);
+    expect(bookEntries.some((entry) => entry.includes("profile"))).toBe(false);
   });
 });

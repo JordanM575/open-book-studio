@@ -36,7 +36,7 @@ const details: BookDetail = {
   chapterReadIssues: [{ fileName: "chapter-03.md", order: 3, reason: "unreadable" }]
 };
 
-async function envelope(consent = true): Promise<ReviewEnvelope> {
+async function envelope(consent = true, lens: "reader-alpha" | "reader-beta" = "reader-alpha", requestId = "request-1"): Promise<ReviewEnvelope> {
   const base = input();
   const chapter = captureChapterSource({
     sourceId: "source-1",
@@ -45,7 +45,7 @@ async function envelope(consent = true): Promise<ReviewEnvelope> {
     ranges: [{ start: selectedStart, end: selectedEnd }]
   });
   return buildReviewEnvelope({
-    ...base, kind: "reader-review", profile: await builtinReaderProfile("alpha"),
+    ...base, kind: "reader-review", requestId, profile: await builtinReaderProfile(lens === "reader-alpha" ? "alpha" : "beta"),
     books: base.books.map((book) => ({ ...book, consentSatisfied: consent })), sources: [chapter]
   });
 }
@@ -265,5 +265,115 @@ describe("explicit saved-source checks and navigation forwarding", () => {
     expect(onNavigate.mock.calls[0]?.[0].run.runId).toBe("request-1");
     expect(onNavigate.mock.calls[0]?.[0].signal).toBeInstanceOf(AbortSignal);
     expect(view.start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("volatile rerun history in one mounted view", () => {
+  async function completeRun(view: ReturnType<typeof render>, value: ReviewEnvelope) {
+    view.start.mockImplementation(async () => ({ ok: true as const, data: { kind: "completed" as const, run: await completed(value) } }));
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: `Reader run ${value.requestId}` })).toBeTruthy());
+  }
+
+  test("two lenses keep two attributable attempts; prepare/start happen only on explicit clicks", async () => {
+    const alpha = await envelope(true, "reader-alpha", "request-1");
+    const beta = await envelope(true, "reader-beta", "request-2");
+    const view = render({ value: alpha });
+    await openAndWait(view);
+    testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
+    view.prepare.mockImplementation(async () => ({ ok: true as const, data: prepareResult(alpha) }));
+    click("Prepare review");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    expect(view.prepare).toHaveBeenCalledTimes(1);
+    expect(view.start).not.toHaveBeenCalled();
+    await completeRun(view, alpha);
+    expect(view.start).toHaveBeenCalledTimes(1);
+
+    testing.fireEvent.click(body().getByRole("radio", { name: /Beta reader/ }));
+    expect(view.prepare).toHaveBeenCalledTimes(1);
+    expect(view.start).toHaveBeenCalledTimes(1);
+    view.prepare.mockImplementation(async () => ({ ok: true as const, data: prepareResult(beta) }));
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    expect(view.start).toHaveBeenCalledTimes(1);
+    await completeRun(view, beta);
+    expect(view.prepare).toHaveBeenCalledTimes(2);
+    expect(view.start).toHaveBeenCalledTimes(2);
+
+    expect(body().getAllByRole("article")).toHaveLength(2);
+    expect(body().getByRole("article", { name: "Reader run request-1" }).textContent).toContain("Alpha reader · Version 1");
+    expect(body().getByRole("article", { name: "Reader run request-2" }).textContent).toContain("Beta reader · Version 1");
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("Profile: Changed");
+    expect(comparison.textContent).toContain("Run request-1 → Run request-2");
+  });
+
+  test("close and reopen discards the volatile history and restores the empty state", async () => {
+    const value = await envelope();
+    const view = render({ value, startData: { kind: "completed", run: await completed(value) } });
+    await openAndWait(view);
+    testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
+    click("Prepare review");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-1" })).toBeTruthy());
+    click("Close review");
+    click("Open reader review");
+    await testing.waitFor(() => expect(body().getByRole("group", { name: "Saved chapters" })).toBeTruthy());
+    expect(body().queryByRole("article")).toBeNull();
+    expect(body().queryByRole("region", { name: "Reader attempt request-1" })).toBeNull();
+    expect(body().getByRole("region", { name: "Latest run comparison" }).textContent)
+      .toContain("No runs yet · No comparison. Prepare the selected saved scope and inspect the disclosure before Start.");
+  });
+
+  test("a failed attempt is not checked and is passed to no navigation; one completed run is checked once", async () => {
+    const value = await envelope();
+    const view = render({ value });
+    await openAndWait(view);
+    testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
+    // First attempt fails at the provider; no completed run exists yet, so no check is possible.
+    view.start.mockImplementation(async () => ({ ok: true as const, data: { kind: "failed" as const, reason: "provider" as const } }));
+    click("Prepare review");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("region", { name: "Reader attempt request-1" })).toBeTruthy());
+    expect((body().getByRole("button", { name: "Check current sources" }) as HTMLButtonElement).disabled).toBe(true);
+    const readsAfterFailure = view.loadBook.mock.calls.length;
+    // A second attempt completes; the check then covers the completed envelope with one read.
+    const second = await envelope(true, "reader-alpha", "request-2");
+    view.prepare.mockImplementation(async () => ({ ok: true as const, data: prepareResult(second) }));
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    view.start.mockImplementation(async () => ({ ok: true as const, data: { kind: "completed" as const, run: await completed(second) } }));
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-2" })).toBeTruthy());
+    click("Check current sources");
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(sourceCheckCopy.currentHistorical));
+    expect(view.loadBook.mock.calls.length).toBe(readsAfterFailure + 1);
+    const failed = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(failed.querySelector("button")).toBeNull();
+  });
+
+  test("rendering and updating the comparison does not prepare, start, stop, cancel or read the book", async () => {
+    const value = await envelope();
+    const view = render({ value, startData: { kind: "completed", run: await completed(value) } });
+    await openAndWait(view);
+    testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
+    click("Prepare review");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-1" })).toBeTruthy());
+    const before = {
+      prepare: view.prepare.mock.calls.length, start: view.start.mock.calls.length,
+      stop: view.stop.mock.calls.length, cancelPrepare: view.cancelPrepare.mock.calls.length,
+      loadBook: view.loadBook.mock.calls.length
+    };
+    view.rerender(<ReaderReviewHost bookId={saved.bookId} api={view.api} loadBook={view.loadBook} onNavigate={undefined} />);
+    view.rerender(<ReaderReviewHost bookId={saved.bookId} api={view.api} loadBook={view.loadBook} onNavigate={undefined} />);
+    expect(view.prepare.mock.calls.length).toBe(before.prepare);
+    expect(view.start.mock.calls.length).toBe(before.start);
+    expect(view.stop.mock.calls.length).toBe(before.stop);
+    expect(view.cancelPrepare.mock.calls.length).toBe(before.cancelPrepare);
+    expect(view.loadBook.mock.calls.length).toBe(before.loadBook);
   });
 });

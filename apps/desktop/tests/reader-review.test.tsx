@@ -5,7 +5,7 @@ import { buildReviewEnvelope, type CurrentSource, type EnvelopeInput, type Revie
 import { buildReaderRun, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import { builtinReaderProfile, editReaderProfile } from "@ai-book-studio/core/review/profiles";
 import { captureBibleSource, captureChapterSource } from "@ai-book-studio/core/review/sources";
-import { citation, currentSources, input, saved, selectedStart, source, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
+import { citation, currentSources, input, saved, selectedEnd, selectedStart, source, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
 import { citationNavigationCopy, failureCopy, revalidationFailureCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy, type PreparationOutcome, type PreparedReaderReview, type ReaderReviewProps, type ReaderSourceCheck, type StartOutcome } from "../../../packages/app/src/components/reader-review/contracts";
 
 let testing!: typeof import("@testing-library/react/pure");
@@ -148,7 +148,8 @@ describe("reviewed disclosure and cancellation regressions", () => {
       if (stage === "prepare") click("Prepare review");
       else { await disclose(); click("Start with Synthetic provider"); }
       await testing.waitFor(() => expect(statusText()).toContain(stage === "failed" ? "provider request failed" : "unavailable"));
-      expect(body().getByRole("button", { name: "Prepare review" })).toBeTruthy();
+      expect(body().getByRole("button", { name: stage === "failed" ? "Prepare rerun" : "Prepare review" })).toBeTruthy();
+      if (stage === "failed") expect(body().getByRole("region", { name: "Reader attempt request-1" })).toBeTruthy();
       expect(body().queryByRole("article")).toBeNull();
       view.unmount();
     }
@@ -482,7 +483,7 @@ describe("cancellation and disclosure lifetime races", () => {
     await testing.act(async () => stopResult.reject(new Error("stop failed")));
     expect(statusText()).toContain("Stop could not be confirmed");
     view.update({ onPrepare: async () => ({ kind: "blocked", reason: "consent" }) });
-    click("Prepare review");
+    click("Prepare rerun");
     await testing.waitFor(() => expect(statusText()).toContain("This model may use the selected text for training"));
   });
 });
@@ -495,7 +496,7 @@ describe("results, exact historical evidence and explicit reruns", () => {
     click("Start with Synthetic provider");
     await testing.waitFor(() => expect(statusText()).toBe(failureCopy[reason]));
     expect(body().queryByRole("article")).toBeNull();
-    expect(body().getByRole("button", { name: "Prepare review" })).toBeTruthy();
+    expect(body().getByRole("button", { name: "Prepare rerun" })).toBeTruthy();
     expect(onStart).toHaveBeenCalledTimes(1);
   });
 
@@ -592,9 +593,13 @@ describe("results, exact historical evidence and explicit reruns", () => {
     click("Start with Second synthetic provider");
     await testing.waitFor(() => expect(body().getAllByRole("article")).toHaveLength(2));
     const comparison = body().getByRole("region", { name: "Latest run comparison" });
-    expect(comparison.textContent).toContain("Sources: Changed · Profile: Changed");
-    expect(comparison.textContent).toContain("Provider or destination: Changed");
-    expect(comparison.textContent).toContain("not improvement scores");
+    expect(comparison.textContent).toContain("Run request-1 → Run request-2 · 2 completed runs in this view");
+    expect(comparison.textContent).toContain("Sources: Changed · 1 of 1 sources differ");
+    expect(comparison.textContent).toContain("Profile: Changed · Alpha reader (reader-alpha) · v1 · Built-in → Alpha reader (author-profile-1) · v1 · Author");
+    expect(comparison.textContent).toContain("Provider: Changed · Synthetic provider → Second synthetic provider");
+    expect(comparison.textContent).toContain("Model: Changed · synthetic/model → second/model");
+    expect(comparison.textContent).toContain("saved version 3 → 4");
+    expect(comparison.textContent).toContain("not an improvement score");
     expect(body().getByRole("article", { name: "Reader run request-1" }).textContent).toContain("reader-alpha");
     expect(body().getByRole("article", { name: "Reader run request-2" }).textContent).toContain("author-profile-1");
     expect(body().getByRole("article", { name: "Reader run request-2" }).textContent).toContain("Author profile");
@@ -716,6 +721,10 @@ describe("provider-named start and truthful stop states", () => {
     click("Start with Synthetic provider");
     await testing.waitFor(() => expect(statusText()).toContain("Review stopped · Incomplete"));
     expect(body().queryByRole("article")).toBeNull();
+    const attempt = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(attempt.textContent).toContain("Stopped");
+    expect(attempt.textContent).toContain("No findings were retained for this attempt.");
+    expect(attempt.querySelector("button")).toBeNull();
   });
 
   test("bounded overflow details appear beside the exact refusal and failure copy", async () => {
@@ -835,6 +844,7 @@ describe("explicit current-source checks and exact navigation states", () => {
     render(value);
     await complete();
     expect(body().getAllByRole("region", { name: "Volatile reader results" })).toHaveLength(1);
+    expect(body().getAllByRole("region", { name: "Latest run comparison" })).toHaveLength(1);
     expect(body().getAllByRole("status")).toHaveLength(1);
     expect(body().queryByRole("button", { name: /^(Apply|Reject|Accept|Ignore)/ })).toBeNull();
     expect(body().queryByRole("button", { name: /model chooser/i })).toBeNull();
@@ -869,6 +879,235 @@ describe("explicit current-source checks and exact navigation states", () => {
   });
 });
 
+describe("volatile attempt history, attribution and explicit rerun comparison", () => {
+  test("a completed attempt shows provider, model, connection, times, profile and collapsed exact attribution", async () => {
+    const value = await envelope();
+    render(value);
+    await complete();
+    const article = body().getByRole("article", { name: "Reader run request-1" });
+    expect(article.textContent).toContain("Run request-1 · Completed");
+    expect(article.textContent).toContain("Provider: Synthetic provider · Model: synthetic/model");
+    expect(article.textContent).toContain("Connection: Synthetic work account");
+    expect(article.textContent).toMatch(/Started \d{4}-\d{2}-\d{2}T.*Completed \d{4}-\d{2}-\d{2}T/);
+    expect(article.textContent).toContain("Alpha reader · Version 1 · Fictional built-in lens");
+    expect(article.textContent).toContain("Profile identity: reader-alpha");
+    const exact = Array.from(article.querySelectorAll("details")).find((node) => node.querySelector("summary")?.textContent === "Exact attribution");
+    expect(exact?.textContent).toContain("Model id: synthetic/model");
+    expect(exact?.textContent).toContain("Connection id: connection-1");
+    expect(exact?.textContent).toContain("Endpoint identity: endpoint-revision-1");
+    expect(exact?.textContent).toContain("Scope digest: ");
+    expect(exact?.textContent).toContain("Profile digest: ");
+  });
+
+  test("a failed attempt remains with its disclosure and attribution and grants no findings or Save", async () => {
+    const onStart = mock(async (): Promise<StartOutcome> => ({ kind: "failed", reason: "malformed" }));
+    render(await envelope(), { onStart });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toBe(failureCopy.malformed));
+    const attempt = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(attempt.textContent).toContain("Run request-1 · Failed");
+    expect(attempt.textContent).toContain(failureCopy.malformed);
+    expect(attempt.textContent).toContain("No findings were retained for this attempt.");
+    expect(attempt.textContent).toContain("Disclosure captured 2026-11-07T12:00:00Z · No completed result");
+    expect(attempt.textContent).toContain("Alpha reader · Version 1");
+    expect(attempt.textContent).toContain("Provider: Synthetic provider · Model: synthetic/model");
+    expect(attempt.textContent).toContain("Connection: Synthetic work account");
+    expect(attempt.querySelector("article")).toBeNull();
+    expect(attempt.querySelector("button")).toBeNull();
+    expect(body().queryByRole("article")).toBeNull();
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(body().getByRole("button", { name: "Prepare rerun" })).toBeTruthy();
+  });
+
+  test("an invalid result attempt names the revalidation copy without showing findings", async () => {
+    const value = await envelope();
+    const invalid = { ...(await run(value)), runId: "wrong-request" };
+    render(value, { onStart: async () => ({ kind: "completed", run: invalid }) });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toBe(revalidationFailureCopy));
+    const attempt = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(attempt.textContent).toContain("Run request-1 · Result not accepted");
+    expect(attempt.textContent).toContain(revalidationFailureCopy);
+    expect(attempt.textContent).toContain("No findings were retained for this attempt.");
+    expect(attempt.textContent).not.toContain("The scene may feel abrupt.");
+    expect(body().queryByRole("article")).toBeNull();
+  });
+
+  test("an unknown outcome after Start stays visible, redacted and inert", async () => {
+    render(await envelope(), { onStart: async () => { throw new Error("PRIVATE_IPC_SENTINEL"); } });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(statusText()).toContain("The request failed or its result could not be validated"));
+    const attempt = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(attempt.textContent).toContain("Run request-1 · Outcome unknown");
+    expect(attempt.textContent).toContain("The request outcome is unknown. The request may have been sent; text already sent cannot be recalled. No findings were retained here.");
+    expect(document.body.textContent).not.toContain("PRIVATE_IPC_SENTINEL");
+    expect(body().queryByRole("article")).toBeNull();
+  });
+
+  test("a stopped attempt stays attributable with one Start and one Stop", async () => {
+    const value = await envelope();
+    const pending = deferred<StartOutcome>();
+    const onStart = mock(() => pending.promise);
+    const onStop = mock(async () => "stopped" as const);
+    render(value, { onStart, onStop });
+    await disclose();
+    click("Start with Synthetic provider");
+    click("Stop review");
+    await testing.act(async () => pending.resolve({ kind: "stopped" }));
+    await testing.waitFor(() => expect(statusText()).toContain("Review stopped · Incomplete"));
+    const attempt = body().getByRole("region", { name: "Reader attempt request-1" });
+    expect(attempt.textContent).toContain("Run request-1 · Stopped");
+    expect(attempt.textContent).toContain("Stopped · Incomplete. Stopping prevents later dispatch best-effort; text already sent cannot be recalled. No findings were retained for this attempt.");
+    expect(onStart).toHaveBeenCalledTimes(1);
+    expect(onStop).toHaveBeenCalledTimes(1);
+    expect(body().queryByRole("article")).toBeNull();
+  });
+
+  test("empty, single and no-completed states use the exact comparison copy", async () => {
+    const value = await envelope();
+    const view = render(value);
+    expect(body().getByRole("region", { name: "Latest run comparison" }).textContent)
+      .toContain("No runs yet · No comparison. Prepare the selected saved scope and inspect the disclosure before Start.");
+    view.update({ onStart: mock(async (): Promise<StartOutcome> => ({ kind: "failed", reason: "provider" })) });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("region", { name: "Latest run comparison" }).textContent)
+      .toContain("No completed runs to compare. Attempts remain listed with their disclosure and attribution."));
+    view.unmount();
+
+    const second = render(value, { onStart: async () => ({ kind: "completed", run: await run(value) }) });
+    await complete();
+    expect(body().getByRole("region", { name: "Latest run comparison" }).textContent)
+      .toContain("One completed run · No comparison yet. A second completed run in this view compares sources, profile, provider and request facts.");
+    second.unmount();
+
+    const third = render(value, { onStart: async () => ({ kind: "failed", reason: "provider" }) });
+    await disclose();
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("region", { name: "Reader attempt request-1" })).toBeTruthy());
+    const secondValue = await envelope("request-2");
+    third.update({ onPrepare: async () => ({ kind: "ready", prepared: prepared(secondValue) }),
+      onStart: async () => ({ kind: "completed", run: await run(secondValue) }) });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("region", { name: "Latest run comparison" }).textContent)
+      .toContain("One completed run and one attempt without findings · No comparison. A second completed run compares the input facts."));
+    third.unmount();
+  });
+
+  test("a second completed run is compared with the first and both remain immutable", async () => {
+    const first = await envelope("request-1");
+    const view = render(first);
+    await complete();
+    const firstArticleBefore = body().getByRole("article", { name: "Reader run request-1" }).textContent;
+    const second = await envelope("request-2");
+    view.update({ onPrepare: async () => ({ kind: "ready", prepared: prepared(second) }),
+      onStart: async () => ({ kind: "completed", run: await run(second, [citation()], "A second, equally subjective reading.") }) });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getAllByRole("article")).toHaveLength(2));
+    expect(body().getByRole("article", { name: "Reader run request-1" }).textContent).toBe(firstArticleBefore);
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("Inputs: Identical · Interpretation or evidence changed. Same-input model variation, not an improvement score.");
+    expect(comparison.textContent).toContain("Run request-1 → Run request-2 · 2 completed runs in this view");
+    expect(comparison.textContent).toContain("Findings: 1 → 1");
+    expect(comparison.textContent).toContain("Interpretation: Changed · Not a quality judgment");
+    expect(comparison.textContent).toContain("Counts describe returned findings, not manuscript coverage or quality.");
+    expect(comparison.textContent).toContain("Compared from captured revisions · Check current sources separately.");
+    expect(comparison.querySelector("button")).toBeNull();
+    expect(comparison.querySelector("select, textarea, input, a[href]")).toBeNull();
+  });
+
+  test("a latest failed attempt still compares the two completed runs and keeps its own section", async () => {
+    const first = await envelope("request-1");
+    const view = render(first);
+    await complete();
+    const second = await envelope("request-2");
+    view.update({ onPrepare: async () => ({ kind: "ready", prepared: prepared(second) }),
+      onStart: async () => ({ kind: "completed", run: await run(second, [], "Second impression.") }) });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getAllByRole("article")).toHaveLength(2));
+    const third = await envelope("request-3");
+    view.update({ onPrepare: async () => ({ kind: "ready", prepared: prepared(third) }),
+      onStart: async () => ({ kind: "failed", reason: "provider" }) });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("region", { name: "Reader attempt request-3" })).toBeTruthy());
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.textContent).toContain("The latest attempt (request-3) did not complete. This comparison uses the latest two completed runs; the attempt remains listed below with its attribution.");
+    expect(comparison.textContent).toContain("Run request-1 → Run request-2");
+    expect(body().queryByRole("article", { name: "Reader run request-3" })).toBeNull();
+  });
+
+  test("the 8-attempt cap disables Prepare and never evicts or silently accepts a ninth attempt", async () => {
+    const envelopes = await Promise.all(Array.from({ length: 9 }, (_, index) => envelope(`request-${index + 1}`)));
+    let next = 0;
+    const onPrepare = mock(async (): Promise<PreparationOutcome> => {
+      const current = envelopes[next];
+      if (!current) throw new Error("ran out of envelopes");
+      return { kind: "ready", prepared: prepared(current) };
+    });
+    const onStart = mock(async (): Promise<StartOutcome> => {
+      const current = envelopes[next];
+      next += 1;
+      if (!current) throw new Error("ran out of envelopes");
+      return { kind: "completed", run: await run(current) };
+    });
+    const view = render(envelopes[0] as (typeof envelopes)[number]);
+    view.update({ onPrepare, onStart });
+    for (let round = 0; round < 8; round += 1) {
+      click(round === 0 ? "Prepare review" : "Prepare rerun");
+      await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+      click("Start with Synthetic provider");
+      await testing.waitFor(() => expect(body().getByRole("article", { name: `Reader run request-${round + 1}` })).toBeTruthy());
+    }
+    expect(onPrepare).toHaveBeenCalledTimes(8);
+    const capNote = body().getByText("This view keeps up to 8 attempts, including failed and stopped attempts. Close the review to discard this volatile history and start a new view. Nothing is prepared or sent.");
+    const prepareButton = body().getByRole("button", { name: "Prepare rerun" }) as HTMLButtonElement;
+    expect(prepareButton.disabled).toBe(true);
+    expect(prepareButton.getAttribute("aria-describedby")).toBe(capNote.id);
+    expect(body().getAllByRole("article")).toHaveLength(8);
+    testing.fireEvent.click(prepareButton);
+    expect(onPrepare).toHaveBeenCalledTimes(8);
+    expect(body().getAllByRole("article")).toHaveLength(8);
+    click("Close review");
+    view.update({ open: false });
+    view.update({ open: true, viewKey: "view-2" });
+    expect(body().queryByRole("article")).toBeNull();
+    expect(body().queryByRole("region", { name: "Reader attempt request-1" })).toBeNull();
+    expect((body().getByRole("button", { name: "Prepare review" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test("the comparison region holds no controls and the source-change list is labelled", async () => {
+    const first = await envelope("request-1");
+    const view = render(first);
+    await complete();
+    const revised = captureChapterSource({ sourceId: "source-1", saved: { ...saved, version: 4, hash: "b".repeat(64) },
+      bookTitle: "Synthetic book", title: "Synthetic chapter", position: 1, capturedAt: stamp,
+      ranges: [{ start: selectedStart, end: selectedEnd }] });
+    const second = await envelope("request-2", { sources: [revised] });
+    view.update({ onPrepare: async () => ({ kind: "ready", prepared: prepared(second) }),
+      onStart: async () => ({ kind: "completed", run: await run(second) }) });
+    click("Prepare rerun");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getAllByRole("article")).toHaveLength(2));
+    const comparison = body().getByRole("region", { name: "Latest run comparison" });
+    expect(comparison.querySelectorAll("button, a[href], input, select, textarea")).toHaveLength(0);
+    expect(comparison.querySelectorAll("[tabindex]")).toHaveLength(0);
+    const changes = body().getByRole("list", { name: "Source changes between the latest two runs" });
+    expect(changes.textContent).toContain("saved version 3 → 4");
+    expect(body().getByText("Counts by category")).toBeTruthy();
+  });
+});
 describe("injection resistance at the results surface", () => {
   test("I-12 markup in an interpretation renders as inert text, never as elements or handlers", async () => {
     const value = await envelope();
