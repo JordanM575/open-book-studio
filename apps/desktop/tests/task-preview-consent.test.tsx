@@ -36,7 +36,7 @@ function model(overrides: Partial<ModelInfo> & { id: string }): ModelInfo {
 function previewData(): TaskPreviewData {
   return {
     profiles: [
-      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, minContextLength: 32000 } }
+      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 } }
     ],
     catalogues: [
       {
@@ -90,7 +90,8 @@ describe("task preview consent", () => {
           data: previewData(),
           now: NOW,
           onClose: mock(() => {}),
-          onOpenModelPicker: mock(() => {})
+          onOpenModelPicker: mock(() => {}),
+          onUseForNextMessage: mock(() => {})
         })
       );
       await testing.within(document.body).findByTestId("task-preview");
@@ -98,6 +99,9 @@ describe("task preview consent", () => {
         await testing.fireEvent.click(view.getByText("Drafting"));
       });
       expect(view.getByText(CONTRIBUTOR_WARNING)).toBeDefined();
+      // The candidate is eligible, so the handoff action is offered — and only delegates.
+      const action = view.getByTestId("task-preview-use-next");
+      expect(action.textContent).toBe("Use for next message");
       expect(view.queryByRole("checkbox")).toBeNull();
       expect(view.queryByRole("switch")).toBeNull();
       expect(book.allowContributorTraining).toBe(false);

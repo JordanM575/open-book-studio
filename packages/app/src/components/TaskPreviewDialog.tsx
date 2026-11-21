@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { ConnectionSummary } from "@ai-book-studio/core/providers/types";
+import type { ConnectionSummary, ProviderId } from "@ai-book-studio/core/providers/types";
 import type {
   CandidateStatus,
   PreviewEvaluation,
@@ -18,7 +18,7 @@ import { Button } from "@ai-book-studio/ui/button";
 import { Dialog, DialogContent, DialogFooter } from "@ai-book-studio/ui/dialog";
 
 export interface TaskPreviewData {
-  profiles: TaskProfile[];
+  profiles: readonly TaskProfile[];
   catalogues: ProviderCatalogue[];
   connections: ConnectionSummary[];
   build: RoutingBuild;
@@ -32,11 +32,20 @@ interface Props {
   onClose: () => void;
   /** Open the existing model picker. The preview never preselects a model. */
   onOpenModelPicker: () => void;
+  /**
+   * Hand an author-chosen candidate to the one-turn picker. Only the provider and the model id
+   * travel with it. When absent, no candidate action is rendered.
+   */
+  onUseForNextMessage?: ((candidate: { provider: ProviderId; modelId: string }) => void) | undefined;
+  /** Static note about the shipped profile set, supplied by the host. */
+  profileSetNote?: string | undefined;
+  /** A handoff outcome, announced politely. Cleared by the host. */
+  status?: string | undefined;
 }
 
 const STATUS_LABEL: Record<CandidateStatus, string> = {
-  eligible: "Suitable",
-  excluded: "Not suitable",
+  eligible: "Known capability match",
+  excluded: "Does not meet known requirements",
   unknown: "Unknown",
   unavailable: "Unavailable"
 };
@@ -70,7 +79,7 @@ function inputProblem(data: TaskPreviewData): "no-catalogues" | "malformed" | nu
  * conversation, usage record or manuscript text. It never refreshes a catalogue, retries,
  * or chooses a model; the footer buttons are the author's existing manual flow.
  */
-export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker }: Props) {
+export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker, onUseForNextMessage, profileSetNote, status }: Props) {
   const [profileId, setProfileId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -80,9 +89,10 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
   const clock = now ?? Date.now();
   const profiles = Array.isArray(data.profiles) ? data.profiles : [];
   const profile = profiles.find((entry) => entry.id === profileId) ?? null;
+  const problem = inputProblem(data);
+  const noCatalogues = problem === "no-catalogues";
   const outcome: PreviewOutcome | null = useMemo(() => {
     if (!profile) return null;
-    const problem = inputProblem(data);
     if (problem) return { kind: problem };
     if (!taskProfileSchema.safeParse(profile).success) return { kind: "error" };
     try {
@@ -98,7 +108,7 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
     } catch {
       return { kind: "error" };
     }
-  }, [profile, data, clock]);
+  }, [profile, data, clock, problem]);
 
   const evaluation = outcome?.kind === "ready" ? outcome.evaluation : null;
   const eligible = evaluation?.candidates.filter((candidate) => candidate.status === "eligible") ?? [];
@@ -119,6 +129,11 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
           ) : (
             <div className="space-y-2">
               <p className="text-(length:--text-caption-size) font-medium text-muted-foreground">Task</p>
+              {profileSetNote ? (
+                <p className="text-(length:--text-caption-size) text-muted-foreground" data-testid="task-preview-profile-note">
+                  {profileSetNote}
+                </p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
                 {profiles.map((entry) => (
                   <button
@@ -140,13 +155,13 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
             </div>
           )}
 
-          {outcome?.kind === "no-catalogues" ? (
+          {noCatalogues ? (
             <div className="space-y-1" data-testid="task-preview-no-catalogues">
-              <p className="text-(length:--text-subheadline-size) font-medium">No catalogues to preview.</p>
+              <p className="text-(length:--text-subheadline-size) font-medium">No model list is loaded yet.</p>
               <p className="text-(length:--text-subheadline-size) text-muted-foreground">
-                Without catalogue data it is unknown which models match this task. Nothing here has
-                changed your model. Choose in the model picker below to continue by hand, or close
-                this preview.
+                This preview uses only a model list the model picker has already loaded. It never fetches one.
+                Nothing here has changed your model. Choose in the model picker to load your models, then return
+                to this preview, or close it.
               </p>
             </div>
           ) : null}
@@ -192,6 +207,9 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
                   change these matches.
                 </p>
               ) : null}
+              <p className="text-(length:--text-caption-size) text-muted-foreground" data-testid="task-preview-order-note">
+                Listed in catalogue order; this is not a ranking.
+              </p>
               {eligible.length === 0 ? (
                 <p className="text-(length:--text-subheadline-size) font-medium">No suitable candidate known.</p>
               ) : null}
@@ -233,16 +251,37 @@ export function TaskPreviewDialog({ open, data, now, onClose, onOpenModelPicker 
                     <p className="mt-0.5 text-(length:--text-caption-size) text-muted-foreground">
                       {catalogueAgeLine(candidate.source, clock)}
                     </p>
+                    {onUseForNextMessage && candidate.status === "eligible" ? (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className="mt-2"
+                        data-testid="task-preview-use-next"
+                        aria-label={`Use ${candidate.name} for the next message`}
+                        onClick={() => onUseForNextMessage({ provider: candidate.provider, modelId: candidate.modelId })}
+                      >
+                        Use for next message
+                      </Button>
+                    ) : null}
                   </div>
                 );
               })}
+              <p className="text-(length:--text-caption-size) text-muted-foreground" data-testid="task-preview-no-total">
+                No total is shown because the request size is unknown.
+              </p>
             </div>
           ) : null}
 
-          {!profile && profiles.length > 0 ? (
+          {!profile && profiles.length > 0 && !noCatalogues ? (
             <p className="text-(length:--text-subheadline-size) text-muted-foreground">Choose a task to preview.</p>
           ) : null}
         </div>
+
+        {status ? (
+          <p role="status" aria-live="polite" className="text-(length:--text-subheadline-size) text-muted-foreground" data-testid="task-preview-status">
+            {status}
+          </p>
+        ) : null}
 
         <DialogFooter>
           <Button variant="secondary" onClick={onClose}>

@@ -51,8 +51,8 @@ function host() {
 function frozenData(): TaskPreviewData {
   const input: TaskPreviewData = {
     profiles: [
-      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, minContextLength: 32000 } },
-      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false } }
+      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 } },
+      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false, requiresKnownContext: false } }
     ],
     catalogues: [
       { provider: "openrouter", catalogue: { models: [model({ id: "acme/large" })], fetchedAt: FRESH_AT } }

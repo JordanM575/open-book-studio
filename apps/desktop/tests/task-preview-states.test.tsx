@@ -37,8 +37,8 @@ function model(overrides: Partial<ModelInfo> & { id: string }): ModelInfo {
 function data(overrides: Partial<TaskPreviewData> = {}): TaskPreviewData {
   return {
     profiles: [
-      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, minContextLength: 32000 } },
-      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false } }
+      { id: "drafting", name: "Drafting", purpose: "Turn notes into prose.", version: 1, requirements: { requiresTools: true, requiresKnownContext: true, minContextLength: 32000 } },
+      { id: "notes", name: "Notes", purpose: "Sketch without tools.", version: 1, requirements: { requiresTools: false, requiresKnownContext: false } }
     ],
     catalogues: [
       {
@@ -78,11 +78,15 @@ describe("task preview states", () => {
   test("no catalogues say what is unknown and keep the manual flow", async () => {
     const { view } = openPreview(data({ catalogues: [] }));
     await testing.within(document.body).findByTestId("task-preview");
+    // The refusal is visible before any profile is chosen.
+    const immediate = await testing.within(document.body).findByTestId("task-preview-no-catalogues");
+    expect(immediate.textContent).toContain("No model list is loaded yet.");
     await testing.act(async () => {
       await testing.fireEvent.click(view.getByText("Drafting"));
     });
     const panel = testing.within(document.body).findByTestId("task-preview-no-catalogues");
-    expect((await panel).textContent).toContain("Without catalogue data it is unknown which models match this task.");
+    expect((await panel).textContent).toContain("This preview uses only a model list the model picker has already loaded.");
+    expect((await panel).textContent).toContain("It never fetches one.");
     manualFlowButtons(view);
     expect(view.queryByRole("button", { name: /refresh|retry|try again/i })).toBeNull();
   });
