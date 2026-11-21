@@ -6,6 +6,21 @@ Nothing here opens a Library, persists a conversation/report, calls a provider, 
 reads a clock, or gives a caller permission to send. Imports are leaf-relative until the integration
 owner adds package exports.
 
+## Ownership of this directory (2026-11-20)
+
+Ownership as recorded by the T001 reconciliation: `index.ts` and `repetition.ts` (the 034
+deterministic report and D-198 repetition-v1 scanner, with their tests) belong to
+`specs/034-manuscript-review`; everything else in this directory — the scoped-contract leaves
+(`contract.ts`, `sources.ts`, `envelope.ts`, `facade.ts`, `profiles.ts`, `wire-schema.ts`,
+`selection.ts`, `host-facts.ts`, `reader-api.ts`, `findings.ts`, `shared-verifier.ts`, `inline/`,
+the `campaign-*.ts` modules and the schema-1 record modules) — belongs to
+`specs/039-reader-continuity-review`. 037 owns no module here: it is the intended producer/consumer
+of the `guided-review` envelope kind, which is reserved in `envelope.ts` with no producer or
+consumer anywhere; 037's cadence/word-target/stage-role primitives live in
+`packages/core/src/authoring/contracts.ts`. The 034 and 039 report universes are deliberately
+separate, so file 039 defects against the leaves and 034 defects against `index.ts`/`repetition.ts`,
+never across. Moving any module between owners requires its own decision, not a docs edit.
+
 ## APIs
 
 | Module | Public operations |

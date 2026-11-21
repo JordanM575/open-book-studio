@@ -4,6 +4,16 @@
 
 ## Shape
 
+> **2026-11-20 pointer (T001 reconciliation):** the merged reader-review path did not follow this
+> section's seam sketch. The accepted implementation is the standalone transport in
+> `apps/desktop/src/main/review/transport.ts` (a single `generateText` call, `tools: {}`,
+> `maxRetries: 0`) behind the `readerReview:request` channel — not a foreground turn in
+> `apps/desktop/src/main/agent/runtime.ts`, which contains no review path. That mounted review is
+> owned by 039; 037's `guided-review` envelope kind has no producer or consumer anywhere, and Phase 1
+> (T003–T011) remains unbuilt. This section is retained as the unbuilt foreground-journey plan, not
+> as a description of merged code. Reconciling it wholesale is 037's own decision, not T001's;
+> until then, do not read it as the shape of the shipped reader review.
+
 Deliver Phase 1 as a foreground mode of the existing agent, not as a second agent runtime or report
 engine. Reuse the configured provider/model path, the studio-owned tool catalog and the open Library.
 Under D-193 / ADR 0018, reuse the lifecycle, not ordinary full-book prompt/history assembly. A

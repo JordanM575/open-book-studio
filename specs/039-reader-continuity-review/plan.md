@@ -27,9 +27,9 @@ approved scope. Credentials remain in the provider service; no renderer access o
 
 ## Sequence and gates
 
-Apply accepted D-193 / ADR 0018 for U-039-01/02/04. U-039-04 remains a prerequisite of T003's selected-source
-request assembly as well as T006's multi-book work; single-book input can overflow too. The proposed
-first delivery is a single-book volatile report, after those gates. Add cross-book inputs only through explicit selection;
+Apply accepted D-193 / ADR 0018 for U-039-01/02/04. U-039-04 was applied by T003's merged
+selected-source request assembly; it remains a prerequisite of T006's multi-book work. Single-book
+input can overflow too. The proposed first delivery is a single-book volatile report, after those gates. Add cross-book inputs only through explicit selection;
 030 is needed only when its proposed planning records are included. Existing manuscript sources do
 not wait for all of 030. 036 remains advisory and is not a dispatch prerequisite.
 
@@ -58,7 +58,14 @@ needed from implementation; D-193, not those earlier alternatives, supplies the 
 
 ## Delivery checkpoints
 
-1. **Contract inventory (T001):** map existing 034 snapshot/evidence types and 011/022 consent to
+**2026-11-20 update:** T002–T005, T007 and T008 are merged and checked in [tasks.md](tasks.md)
+(T003 PR #108 `03622b6`, T004 PR #112 `7ef30b5`, T005 PR #119 `9f78a10`, T008 PR #116 `8d71814`;
+T002 via the 2026-11-07/08 accepted-leaf integrations; T007's decision recorded as D-199 / ADR 0020).
+T001's reconciliation and acceptance-scope record is dated 2026-11-20. Checkpoints 2–4 are therefore
+partially delivered at the source/test level; checkpoint 5 (T007–T009) still awaits built-app
+acceptance, and T006 remains open.
+
+1. **Contract inventory (T001 — recorded complete 2026-11-20):** map existing 034 snapshot/evidence types and 011/022 consent to
    037's unfinished read-only boundary. Name the modules actually reusable and the missing contracts;
    keep 034 metrics, 037 conversation and 039 findings separate in the interface and test inventory.
 2. **One selected-source report (T002–T004/T008):** after acceptance of the schema/profile/overflow
@@ -81,9 +88,10 @@ needed from implementation; D-193, not those earlier alternatives, supplies the 
 
 `packages/core/src/review/{contract,sources,envelope,facade,profiles,wire-schema,findings}.ts`
 implements the accepted pure contracts. T002's finding/profile/version/run types, validators and
-synthetic tests are delivered. T003–T006 have reusable core portions but their whole runtime/UI
-tasks stay open. The existing 034 deterministic implementation remains separate; 037 uses a guided
-envelope rather than the 039 findings type. No new store, caller authority or provider exists.
+synthetic tests are delivered. T003–T006's state as of this date: T003–T005 were open here and have
+since merged (see the 2026-11-20 update below); T006 remains open. The existing 034 deterministic
+implementation remains separate; 037 uses a guided envelope rather than the 039 findings type. No
+new store, caller authority or provider exists.
 
 The focused source, envelope and reader test files under `packages/core/tests/review/scoped-*.test.ts`
 exercise sentinel exclusion, exact spans, byte/scalar/count boundaries, immutable attribution and
@@ -103,6 +111,22 @@ typechecks and 13-file lint. Added tests cover the independent core R1–R4 and 
 including getter-free input, complete terms and same-view failed-stop ownership. These are local
 automated correction results; T010 still requires fresh independent exact-head review. No mounted
 runtime, storage, native/device, live-provider or semantic-quality evidence is inferred.
+
+### Post-W10 merges (2026-11-20)
+
+T003 (PR #108 `03622b6`), T004 (PR #112 `7ef30b5`), T005 (PR #119 `9f78a10`) and T008 (PR #116
+`8d71814`) have merged and are checked in tasks.md; T002 was delivered through the 2026-11-07/08
+accepted-leaf integrations and T007's decision is recorded (D-199 / ADR 0020). The merged
+reader-review path is mounted (`WorkspaceView` → `ReaderReviewHost`) but the mounted journey is not
+independently accepted — that remains T009. The `continuation:checkin` channel refuses in production
+(`getCoordinatorIdentity()` defaults to `null`; no 037 coordinator session exists), so T018
+integration evidence ends at "channel refuses truthfully". The `guided-review` envelope kind has no
+producer or consumer anywhere; 037 Phase 1 remains unbuilt. No live-provider, built-app,
+packaged-app, device or semantic-quality evidence exists for any of the above; all counts recorded
+in tasks.md are builder/coordinator-reported, not re-run by reviewers. T006, T009 and T010–T019
+remain open; T001's reconciliation and acceptance scope are recorded in tasks.md (2026-11-20). The
+034 deterministic implementation remains separate; the 039 evidence baseline is the 2026-11-20 T001
+reconciliation audit (`reader-review-t001-reconciliation.md`, filed with the campaign evidence).
 
 Mock provider boundaries; use temporary synthetic multi-book fixtures. Test payload equality to
 disclosure, pre-start known/unknown price and data-use/training terms, missing-consent zero-call

@@ -1,6 +1,6 @@
 # Structured reader and continuity review
 
-**Status:** In progress — D-193 and D-197–D-199 accepted; T003's disclosed volatile selected-source prepare/start, T004's exact schema, quotation, citation-navigation and stale/unavailable states, T005's volatile profile attribution and explicit rerun comparison and T008's read-only enforcement proof are delivered at the source/test level. T001, T006, T009 and T010–T019 remain.
+**Status:** In progress — D-193 and D-197–D-199 accepted; T003's disclosed volatile selected-source prepare/start, T004's exact schema, quotation, citation-navigation and stale/unavailable states, T005's volatile profile attribution and explicit rerun comparison and T008's read-only enforcement proof are delivered at the source/test level. T001 was reconciled and recorded on 2026-11-20; T006, T009 and T010–T019 remain.
 **Number:** 039
 **Requirement:** REQ-REVIEW-003, REQ-REVIEW-004
 **Depends on:** 034 saved-source evidence contracts; 037 scoped read-only provider review;
@@ -101,11 +101,13 @@ the author-invoked checked application and 037's independently authorized workfl
 
 D-193 / [ADR 0018](../../docs/adr/0018-scoped-review-contracts.md) resolves the initial source, quote,
 profile and overflow contracts. D-197–D-199 / ADR 0020 select the inline/application/campaign and
-explicit-retention extensions. Accepted policy is not implemented behavior.
+explicit-retention extensions. Accepted policy is not automatically implemented behavior; which
+accepted pieces are merged at the source/test level is recorded in the Status line above and in
+[tasks.md](tasks.md), not here.
 
 | ID | Question / required evidence | Blocks |
 | --- | --- | --- |
-| U-039-01 | Accepted D-193: exact selected-source UTF-16 spans/quotes, no normalization/fuzzy matching, derived verification and bounded subjective findings. | T002/T004 implementation remains |
-| U-039-02 | Accepted D-193: fictional Alpha/Beta lenses, immutable IDs/versioned edits, full per-run snapshots and separate source/profile/provider change attribution. No completed user study is claimed. | T002/T005 implementation remains |
+| U-039-01 | Accepted D-193: exact selected-source UTF-16 spans/quotes, no normalization/fuzzy matching, derived verification and bounded subjective findings. | T002/T004 merged and checked |
+| U-039-02 | Accepted D-193: fictional Alpha/Beta lenses, immutable IDs/versioned edits, full per-run snapshots and separate source/profile/provider change attribution. No completed user study is claimed. | T002/T005 merged and checked |
 | U-039-03 | Accepted D-199/D-171: volatile default; explicit immutable save, checked dispositions/profiles, recoverable trash, no auto-pruning and ordinary archive/sync inclusion. | T007 decision resolved; T014–T015 formats/storage and acceptance remain |
 | U-039-04 | Accepted D-193: four books/64 items, 65,536 source-text bytes, 131,072 combined content bytes, 262,144 complete request/output bytes. Bounds are not token-fit claims; overflow refuses without clipping/splitting/fallback. Single-book work uses the same policy. | T003 applied the bounds; T006 still carries U-039-04 for multi-book scope; no single-book exemption |
