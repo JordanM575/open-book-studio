@@ -1,15 +1,17 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { BookDetail } from "@ai-book-studio/core/schema";
 import { validateReviewEnvelope, type CurrentSource, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { readerCurrentSources } from "@ai-book-studio/core/review/findings";
 import type { ReaderReviewApi, ReaderReviewStopResult } from "@ai-book-studio/core/review/reader-api";
 import { Button } from "@ai-book-studio/ui/button";
 import {
-  acceptPreparation, type PreparationOutcome, type StartOutcome
+  acceptPreparation, type PreparationOutcome, type ReaderReviewProps, type ReaderSourceCheck, type StartOutcome
 } from "./contracts";
 import { ReaderReviewPanel } from "./ReaderReviewPanel";
 import { reviewActionClass } from "./ReviewDisclosure";
 
 const LOAD_FAILED = "The saved chapters could not be read. Close and reopen the review to try again. No provider request started.";
+const unavailableNavigation: ReaderReviewProps["onNavigate"] = async () => "unavailable";
 
 export interface ReaderReviewHostProps {
   bookId: string;
@@ -17,6 +19,8 @@ export interface ReaderReviewHostProps {
   api?: ReaderReviewApi;
   /** Injected in focused tests; the workspace reads through the existing book read channel. */
   loadBook?: (bookId: string) => Promise<BookDetail>;
+  /** The workspace's existing editor selection seam; absent hosts cannot navigate. */
+  onNavigate?: ReaderReviewProps["onNavigate"] | undefined;
 }
 
 type Surface = "closed" | "checking" | "ready" | "unsupported" | "error";
@@ -39,7 +43,6 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
   const [selected, setSelected] = useState<readonly string[]>([]);
   const [prompt, setPrompt] = useState("");
   const [viewKey, setViewKey] = useState(newViewKey);
-  const [currentSources, setCurrentSources] = useState<readonly CurrentSource[]>([]);
   const opener = useRef<HTMLButtonElement>(null);
   const pendingPrepare = useRef<string | null>(null);
   const hasOpened = useRef(false);
@@ -68,7 +71,6 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
     setSelected([]);
     setLens("reader-alpha");
     setPrompt("");
-    setCurrentSources([]);
     const client = apiRef.current;
     if (!client) {
       setSurface("unsupported");
@@ -105,7 +107,6 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
     void disclosureRevision;
     const prepareId = pendingPrepare.current;
     pendingPrepare.current = null;
-    setCurrentSources([]);
     if (prepareId) void apiRef.current?.cancelPrepare({ prepareId }).catch(() => undefined);
   }, [disclosureRevision]);
 
@@ -121,7 +122,6 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
     setOpen(false);
     setSurface("closed");
     setDetail(null);
-    setCurrentSources([]);
   }
 
   function toggleChapter(chapterId: string) {
@@ -153,7 +153,6 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
     const prepared = acceptPreparation({
       envelope, terms: result.data.terms, connection: result.data.connection, priceFacts: result.data.priceFacts
     }, props.bookId);
-    setCurrentSources(envelope.sources.map((source) => ({ sourceId: source.sourceId, status: "available" as const, source })));
     return { kind: "ready", prepared };
   }
 
@@ -186,6 +185,20 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
     return result.ok ? "not-started" : "unconfirmed";
   }
 
+  async function checkSources(input: { envelopes: readonly ReviewEnvelope[]; signal: AbortSignal }): Promise<ReaderSourceCheck> {
+    // One explicit saved-source read for the whole check. No provider request and no durable write.
+    let detail: BookDetail;
+    try { detail = await loadRef.current(props.bookId); } catch { return { kind: "failed" }; }
+    if (input.signal.aborted) return { kind: "failed" };
+    const capturedAt = new Date().toISOString();
+    const byScopeDigest = new Map<string, readonly CurrentSource[]>();
+    for (const envelope of input.envelopes) {
+      byScopeDigest.set(envelope.scopeDigest, readerCurrentSources(envelope, detail, capturedAt));
+    }
+    return { kind: "checked", byScopeDigest };
+  }
+
+  const navigate = props.onNavigate ?? unavailableNavigation;
   const busy = surface === "checking";
   return <section aria-labelledby={headingId} className="glass mb-4 rounded-[var(--corner-lg)] p-4 text-(length:--text-body-size)">
     <h2 id={headingId} className="text-(length:--text-title-3-size) font-semibold">Reader review</h2>
@@ -194,8 +207,8 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
       <Button ref={opener} className={`${reviewActionClass} mt-3`} aria-expanded={false} aria-controls={contentId} onClick={openReview}>Open reader review</Button>
     </> : <div id={contentId} className="mt-3 space-y-4">
       {surface === "unsupported" ? <ReaderReviewPanel open bookId={props.bookId} viewKey={viewKey} disclosureRevision={disclosureRevision}
-        supported={false} prepareDisabled currentSources={[]} onPrepare={prepare} onStart={(input) => startReview(input.envelope)}
-        onStop={(input) => stopReview(input.requestId)} onNavigate={async () => "unavailable"} onClose={closeReview} /> : null}
+        supported={false} prepareDisabled onPrepare={prepare} onStart={(input) => startReview(input.envelope)}
+        onStop={(input) => stopReview(input.requestId)} onNavigate={navigate} onCheckSources={checkSources} onClose={closeReview} /> : null}
       {surface === "error" ? <p role="status" className="text-muted-foreground">{LOAD_FAILED}</p> : null}
       {surface === "checking" ? <p className="text-muted-foreground">Reading the saved chapter list…</p> : null}
       {surface === "ready" && detail ? <>
@@ -220,9 +233,9 @@ export function ReaderReviewHost(props: ReaderReviewHostProps) {
           <span className="block text-muted-foreground">This text is sent with the selected chapters. It cannot change the selected scope or tools.</span>
         </label>
         <ReaderReviewPanel open bookId={props.bookId} viewKey={viewKey} disclosureRevision={disclosureRevision}
-          supported={!busy} prepareDisabled={busy || selected.length === 0} currentSources={currentSources}
+          supported={!busy} prepareDisabled={busy || selected.length === 0}
           onPrepare={prepare} onStart={(input) => startReview(input.envelope)} onStop={(input) => stopReview(input.requestId)}
-          onNavigate={async () => "unavailable"} onClose={closeReview} />
+          onNavigate={navigate} onCheckSources={checkSources} onClose={closeReview} />
       </> : null}
     </div>}
   </section>;

@@ -2,13 +2,18 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import type { BookDetail, BookMeta } from "@ai-book-studio/core/schema";
 import { buildReviewEnvelope, reviewResourceUsage, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { buildReaderRun, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import { builtinReaderProfile } from "@ai-book-studio/core/review/profiles";
 import type { ReaderReviewApi, ReaderReviewPrepareResult } from "@ai-book-studio/core/review/reader-api";
 import type { Result } from "@ai-book-studio/core/ipc";
-import { input, saved, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
+import { captureChapterSource } from "@ai-book-studio/core/review/sources";
+import { citation, input, saved, selectedEnd, selectedStart, stamp } from "../../../packages/core/tests/review/scoped-fixtures";
+import { citationNavigationCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
 import { mountDom, unmountDom } from "./support/dom";
 
 let testing!: typeof import("@testing-library/react/pure");
+import type { ReaderReviewHostProps } from "@ai-book-studio/app/components/reader-review/ReaderReviewHost";
+
 let ReaderReviewHost!: typeof import("@ai-book-studio/app/components/reader-review/ReaderReviewHost").ReaderReviewHost;
 
 beforeAll(async () => {
@@ -33,9 +38,25 @@ const details: BookDetail = {
 
 async function envelope(consent = true): Promise<ReviewEnvelope> {
   const base = input();
+  const chapter = captureChapterSource({
+    sourceId: "source-1",
+    saved: { bookId: saved.bookId, chapterId: saved.chapterId, version: 3, hash: saved.hash, body: saved.body },
+    bookTitle: "Synthetic book", title: "The arrival", position: 1, capturedAt: stamp,
+    ranges: [{ start: selectedStart, end: selectedEnd }]
+  });
   return buildReviewEnvelope({
     ...base, kind: "reader-review", profile: await builtinReaderProfile("alpha"),
-    books: base.books.map((book) => ({ ...book, consentSatisfied: consent }))
+    books: base.books.map((book) => ({ ...book, consentSatisfied: consent })), sources: [chapter]
+  });
+}
+
+async function completed(value: ReviewEnvelope): Promise<ReaderRun> {
+  return buildReaderRun({
+    envelope: value, runId: value.requestId, startedAt: stamp, completedAt: stamp,
+    output: JSON.stringify({ runId: value.requestId, readerId: value.profile?.id, readerVersion: value.profile?.version,
+      findings: [{ findingId: "finding-1", category: "clarity", readerId: value.profile?.id,
+        readerVersion: value.profile?.version, runId: value.requestId, interpretation: "The arrival may feel abrupt.",
+        claim: "observation", evidence: [citation()] }] })
   });
 }
 
@@ -52,13 +73,13 @@ function prepareResult(value: ReviewEnvelope): ReaderReviewPrepareResult {
   };
 }
 
-function render(options: { value?: ReviewEnvelope; supported?: boolean } = {}) {
+function render(options: { value?: ReviewEnvelope; supported?: boolean; startData?: unknown; onNavigate?: Parameters<typeof ReaderReviewHost>[0]["onNavigate"] } = {}) {
   const value = options.value;
   const loadBook = mock(async () => details);
   const prepare = mock(async (): Promise<Result<ReaderReviewPrepareResult>> => value
     ? { ok: true, data: prepareResult(value) }
     : { ok: false, error: { code: "internal", message: "No prepared value" } });
-  const start = mock(async () => ({ ok: true as const, data: { kind: "blocked" as const, reason: "changed" as const } }));
+  const start = mock(async () => ({ ok: true as const, data: (options.startData ?? { kind: "blocked" as const, reason: "changed" as const }) }));
   const stop = mock(async () => ({ ok: true as const, data: "not-started" as const }));
   const cancelPrepare = mock(async () => ({ ok: true as const, data: "cancelled" as const }));
   const support = mock(async () => ({ ok: true as const, data: { supported: options.supported ?? true, reason: (options.supported ?? true) ? null : "unsupported-host" as const } }));
@@ -69,11 +90,15 @@ function render(options: { value?: ReviewEnvelope; supported?: boolean } = {}) {
     stop: stop as unknown as ReaderReviewApi["stop"],
     cancelPrepare: cancelPrepare as unknown as ReaderReviewApi["cancelPrepare"]
   };
-  const view = testing.render(<ReaderReviewHost bookId={saved.bookId} api={api} loadBook={loadBook} />);
+  const view = testing.render(<ReaderReviewHost bookId={saved.bookId} api={api} loadBook={loadBook} onNavigate={options.onNavigate} />);
   return { ...view, api, loadBook, prepare, start, stop, cancelPrepare, support };
 }
 function body() { return testing.within(document.body); }
 function click(name: string) { testing.fireEvent.click(body().getByRole("button", { name })); }
+function evidenceButton() {
+  const button = body().getByRole("button", { name: /^Show exact passage for / });
+  return button;
+}
 
 async function openAndWait(view: ReturnType<typeof render>) {
   click("Open reader review");
@@ -179,5 +204,66 @@ describe("mounted reader review entry and selected-source picker", () => {
     expect(body().getByRole("status").textContent).toContain("The selected source text is over 65,536 bytes.");
     expect(body().queryByRole("button", { name: /Start with/ })).toBeNull();
     expect(view.start).not.toHaveBeenCalled();
+  });
+});
+
+describe("explicit saved-source checks and navigation forwarding", () => {
+  async function started(options: { onNavigate?: Parameters<typeof ReaderReviewHost>[0]["onNavigate"] } = {}) {
+    const value = await envelope();
+    const run = await completed(value);
+    const view = render({ value, startData: { kind: "completed", run }, ...options });
+    await openAndWait(view);
+    testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
+    click("Prepare review");
+    await testing.waitFor(() => expect(body().getByRole("button", { name: "Start with Synthetic provider" })).toBeTruthy());
+    click("Start with Synthetic provider");
+    await testing.waitFor(() => expect(body().getByRole("article", { name: "Reader run request-1" })).toBeTruthy());
+    return { view, value, run };
+  }
+
+  test("no check reads the book automatically; the explicit check performs one read and no provider call", async () => {
+    const { view } = await started();
+    expect(view.loadBook).toHaveBeenCalledTimes(1);
+    expect(view.start).toHaveBeenCalledTimes(1);
+    click("Check current sources");
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(sourceCheckCopy.currentHistorical));
+    expect(view.loadBook).toHaveBeenCalledTimes(2);
+    expect(view.start).toHaveBeenCalledTimes(1);
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.current);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  test("a changed or failed check marks the report historical and disables navigation without a provider call", async () => {
+    const { view } = await started();
+    view.loadBook.mockImplementationOnce(async () => ({
+      ...details,
+      chapters: details.chapters.map((chapter) => chapter.id === saved.chapterId ? { ...chapter, version: 4 } : chapter)
+    }));
+    click("Check current sources");
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(sourceCheckCopy.staleOrUnavailable));
+    expect(body().getByRole("article").textContent).toContain(staleSourceStatusCopy(1, 1));
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(view.start).toHaveBeenCalledTimes(1);
+
+    view.loadBook.mockImplementationOnce(async () => { throw new Error("PRIVATE_CHECK_FAILURE_SENTINEL"); });
+    click("Check current sources");
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(sourceCheckCopy.failedHistorical));
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.checkFailed);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(document.body.textContent).not.toContain("PRIVATE_CHECK_FAILURE_SENTINEL");
+  });
+
+  test("a checked-current citation forwards one navigation request to the host seam", async () => {
+    const onNavigate = mock(async (_input: Parameters<NonNullable<ReaderReviewHostProps["onNavigate"]>>[0]) => "selected" as const);
+    const { view } = await started({ onNavigate });
+    click("Check current sources");
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(sourceCheckCopy.currentHistorical));
+    testing.fireEvent.click(evidenceButton());
+    await testing.waitFor(() => expect(body().getByRole("status").textContent).toBe(citationNavigationCopy.selected));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate.mock.calls[0]?.[0].citation).toEqual(citation());
+    expect(onNavigate.mock.calls[0]?.[0].run.runId).toBe("request-1");
+    expect(onNavigate.mock.calls[0]?.[0].signal).toBeInstanceOf(AbortSignal);
+    expect(view.start).toHaveBeenCalledTimes(1);
   });
 });

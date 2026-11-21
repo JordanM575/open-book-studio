@@ -1,7 +1,7 @@
 /// <reference types="bun" />
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Catalogue } from "@ai-book-studio/core/providers/models";
@@ -11,11 +11,14 @@ import type { ReaderReviewApi } from "@ai-book-studio/core/review/reader-api";
 import { Library } from "../src/main/library/store";
 import { ReaderReviewService, type ReviewProviders } from "../src/main/review/service";
 import type { ReviewTransport } from "../src/main/review/transport";
+import { citationNavigationCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
 import { mountDom, unmountDom } from "./support/dom";
 
 const stamp = "2026-11-07T12:00:00Z";
 const roots: string[] = [];
 let testing!: typeof import("@testing-library/react/pure");
+import type { ReaderReviewHostProps } from "@ai-book-studio/app/components/reader-review/ReaderReviewHost";
+
 let ReaderReviewHost!: typeof import("@ai-book-studio/app/components/reader-review/ReaderReviewHost").ReaderReviewHost;
 
 beforeAll(async () => {
@@ -67,14 +70,30 @@ class FakeTransport implements ReviewTransport {
   readonly calls: Array<{ envelope: ReviewEnvelope; credential: StoredCredential; signal: AbortSignal }> = [];
   error: unknown = null;
   pending: Promise<{ output: string }> | null = null;
+  output: ((envelope: ReviewEnvelope) => string) | null = null;
   started = deferred<void>();
   async run(input: { envelope: ReviewEnvelope; credential: StoredCredential; signal: AbortSignal }): Promise<{ output: string }> {
     this.calls.push(input);
     this.started.resolve();
     if (this.pending) return this.pending;
     if (this.error) throw this.error;
-    return { output: outputFor(input.envelope) };
+    return { output: this.output ? this.output(input.envelope) : outputFor(input.envelope) };
   }
+}
+
+function evidenceFor(envelope: ReviewEnvelope) {
+  const source = envelope.sources[0];
+  if (source?.kind !== "chapter") throw new Error("Missing synthetic chapter source");
+  const segment = source.segments[0];
+  if (!segment) throw new Error("Missing synthetic selected segment");
+  return { kind: "chapter" as const, sourceId: source.sourceId, identity: source.identity,
+    start: segment.start, end: segment.end, quote: segment.text };
+}
+function outputWithEvidence(envelope: ReviewEnvelope): string {
+  return JSON.stringify({ runId: envelope.requestId, readerId: envelope.profile?.id, readerVersion: envelope.profile?.version,
+    findings: [{ findingId: "finding-1", category: "clarity", readerId: envelope.profile?.id,
+      readerVersion: envelope.profile?.version, runId: envelope.requestId,
+      interpretation: "Synthetic reader impression.", claim: "observation", evidence: [evidenceFor(envelope)] }] });
 }
 
 async function fixture(options: { model?: Partial<ModelInfo>; allowContributorTraining?: boolean } = {}) {
@@ -92,7 +111,7 @@ async function fixture(options: { model?: Partial<ModelInfo>; allowContributorTr
   const providers = new FakeProviders([selectedConnection], { models: [selectedModel], fetchedAt: stamp });
   const transport = new FakeTransport();
   const service = new ReaderReviewService({ library: () => library, providers, transport, now: () => stamp });
-  const calls = { prepare: 0, start: 0, stop: 0, cancelPrepare: 0 };
+  const calls = { prepare: 0, start: 0, stop: 0, cancelPrepare: 0, loadBook: 0 };
   const api: ReaderReviewApi = {
     support: async () => ({ ok: true, data: await service.support() }),
     prepare: async (request) => { calls.prepare++; return { ok: true, data: await service.prepare({ operation: "prepare", ...request }) }; },
@@ -107,8 +126,12 @@ function body() { return testing.within(document.body); }
 function click(name: string) { testing.fireEvent.click(body().getByRole("button", { name })); }
 function status() { return body().getByRole("status").textContent ?? ""; }
 
-async function openAndSelect(f: Awaited<ReturnType<typeof fixture>>) {
-  testing.render(<ReaderReviewHost bookId={f.book.id} api={f.api} loadBook={(bookId) => f.library.readBook(bookId)} />);
+function evidenceButton() {
+  return body().getByRole("button", { name: /^Show exact passage for / });
+}
+async function openAndSelect(f: Awaited<ReturnType<typeof fixture>>, options: { onNavigate?: Parameters<typeof ReaderReviewHost>[0]["onNavigate"] } = {}) {
+  testing.render(<ReaderReviewHost bookId={f.book.id} api={f.api} onNavigate={options.onNavigate}
+    loadBook={async (bookId) => { f.calls.loadBook++; return f.library.readBook(bookId); }} />);
   click("Open reader review");
   await testing.waitFor(() => expect(body().getByRole("group", { name: "Saved chapters" })).toBeTruthy());
   testing.fireEvent.click(body().getByRole("checkbox", { name: /Chapter 1/ }));
@@ -231,5 +254,95 @@ describe("mounted selected-source reader journey", () => {
     expect(document.activeElement).toBe(body().getByRole("status"));
     expect(body().getAllByRole("radio")).toHaveLength(2);
     expect(body().getAllByRole("checkbox").length).toBeGreaterThan(0);
+  });
+});
+
+describe("explicit source check and editor navigation seam", () => {
+  test("no automatic check; one explicit read enables the exact current passage with one transport call and unchanged bytes", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    const onNavigate = mock(async (_input: Parameters<NonNullable<ReaderReviewHostProps["onNavigate"]>>[0]) => "selected" as const);
+    const before = await hashes(f);
+    await openAndSelect(f, { onNavigate });
+    expect(f.calls.loadBook).toBe(1);
+    await disclose();
+    expect(f.calls.loadBook).toBe(1);
+    await start();
+    expect(f.calls.loadBook).toBe(1);
+    expect(f.transport.calls).toHaveLength(1);
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.notChecked);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.currentHistorical));
+    expect(f.calls.loadBook).toBe(2);
+    expect(f.transport.calls).toHaveLength(1);
+    expect(body().getByRole("article").textContent).toContain(sourceStatusCopy.current);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+    testing.fireEvent.click(evidenceButton());
+    await testing.waitFor(() => expect(status()).toBe(citationNavigationCopy.selected));
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(onNavigate.mock.calls[0]?.[0].run.runId).toBe(f.transport.calls[0]?.envelope.requestId);
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(f.chapter.content);
+    expect(await hashes(f)).toEqual(before);
+    expect(f.transport.calls).toHaveLength(1);
+  });
+
+  test("stale, restored and missing sources stay historical; navigation disables without another provider call", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    const onNavigate = mock(async (_input: Parameters<NonNullable<ReaderReviewHostProps["onNavigate"]>>[0]) => "selected" as const);
+    const chapterPath = join(f.root, "books", f.book.id, "chapters", f.chapter.path);
+    const originalBytes = await readFile(chapterPath);
+    const before = await hashes(f);
+    await openAndSelect(f, { onNavigate });
+    await disclose();
+    await start();
+    const quote = body().getByRole("article").querySelector("blockquote")?.textContent;
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.currentHistorical));
+
+    await f.library.saveChapter(f.book.id, f.chapter.id, "Changed synthetic journey prose.", {
+      baseVersion: f.chapter.version, baseHash: f.chapter.hash
+    });
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.staleOrUnavailable));
+    expect(body().getByRole("article").textContent).toContain(staleSourceStatusCopy(1, 1));
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(quote);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+
+    await writeFile(chapterPath, originalBytes);
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.currentHistorical));
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(quote);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(false);
+    expect(await hashes(f)).toEqual(before);
+
+    await f.library.deleteChapter(f.book.id, f.chapter.id);
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.staleOrUnavailable));
+    expect(body().getByRole("article").textContent).toContain(unavailableSourceStatusCopy(1, 1));
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(quote);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(f.transport.calls).toHaveLength(1);
+  });
+
+  test("a host navigation refusal disables the link, keeps the quote and never sends again", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    const onNavigate = mock(async (_input: Parameters<NonNullable<ReaderReviewHostProps["onNavigate"]>>[0]) => "stale" as const);
+    const before = await hashes(f);
+    await openAndSelect(f, { onNavigate });
+    await disclose();
+    await start();
+    click("Check current sources");
+    await testing.waitFor(() => expect(status()).toBe(sourceCheckCopy.currentHistorical));
+    testing.fireEvent.click(evidenceButton());
+    await testing.waitFor(() => expect(status()).toBe(citationNavigationCopy.stale));
+    expect(body().getByRole("article").querySelector("blockquote")?.textContent).toBe(f.chapter.content);
+    expect((evidenceButton() as HTMLButtonElement).disabled).toBe(true);
+    expect(onNavigate).toHaveBeenCalledTimes(1);
+    expect(f.transport.calls).toHaveLength(1);
+    expect(await hashes(f)).toEqual(before);
   });
 });
