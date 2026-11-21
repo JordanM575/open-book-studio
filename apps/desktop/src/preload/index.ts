@@ -7,6 +7,7 @@ import {
   OPEN_CONVERSATION_EVENT_CHANNEL,
   SECOND_INSTANCE_EVENT_CHANNEL,
   SYNC_EVENT_CHANNEL,
+  VOICE_OPERATION_CHANNEL,
   type AgentEvent,
   type AgentPlanGuidanceRefresh,
   type AgentTurnInput,
@@ -17,7 +18,8 @@ import {
   type LibraryChangeEvent,
   type OpenConversationEvent,
   type SaveChapterInput,
-  type StudioApi
+  type StudioApi,
+  type VoiceOperationView
 } from "@ai-book-studio/core/ipc";
 import type { BookMeta } from "@ai-book-studio/core/schema";
 import type { ProviderId } from "@ai-book-studio/core/providers/types";
@@ -158,7 +160,13 @@ const api: StudioApi = {
     transcribe: (input) => invoke(IPC.voice.transcribe, input),
     speakers: () => invoke(IPC.voice.speakers),
     speak: (input) => invoke(IPC.voice.speak, input),
-    cancel: (input) => invoke(IPC.voice.cancel, input)
+    cancel: (input) => invoke(IPC.voice.cancel, input),
+    operation: (input) => invoke(IPC.voice.operation, input),
+    onOperation: (callback) => {
+      const listener = (_event: unknown, view: VoiceOperationView) => callback(view);
+      ipcRenderer.on(VOICE_OPERATION_CHANNEL, listener);
+      return () => ipcRenderer.removeListener(VOICE_OPERATION_CHANNEL, listener);
+    }
   },
   images: {
     list: (bookId) => invoke(IPC.images.list, bookId),

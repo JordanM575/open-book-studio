@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  chargeViewOfReceipt,
   initialTransportLedger, mayDispatch, reduceTransport, type Route, type TransportEvent,
   type TransportFacts, type TransportLedger, type TransportTransition,
 } from "../../src/voice-session";
@@ -233,6 +234,118 @@ test("planned counts and receipts are locally bounded", () => {
   expect(h.send({
     type: "begin", kind: "stt", planned: 1, facts: facts({ permitted: false }),
   }).ledger.reason).toContain("not ready");
+});
+
+test("refuse closes a pre-dispatch operation with a refusal receipt and no abort", () => {
+  const h = harness();
+  const operation = begin(h, "tts", 3);
+  h.send({ type: "chunk", operationId: operation.operationId });
+  const refused = h.send({ type: "refuse", operationId: operation.operationId, reason: "The route changed." });
+  expect(refused.effects).toEqual([]);
+  expect(refused.ledger.slots.tts).toBeNull();
+  const receipt = refused.ledger.receipts[0];
+  expect(receipt).toMatchObject({
+    outcome: "refusal", reportedUsd: 0, unknownChunks: 0, unsentChunks: 3, failure: "The route changed.",
+  });
+  expect(receipt?.operation.chunks.map((chunk) => chunk.state)).toEqual(["unsent"]);
+  expect(begin(h, "tts", 1).operationId).toBe(operation.operationId + 1);
+});
+
+test("refuse after dispatch is a no-op, and refuse for an unknown id is a no-op", () => {
+  const h = harness();
+  const { operationId } = dispatched(h, "stt", 1);
+  const before = structuredClone(h.ledger);
+  const afterDispatch = h.send({ type: "refuse", operationId, reason: "Too late." });
+  expect(afterDispatch.effects).toEqual([]);
+  expect(afterDispatch.ledger).toEqual(before);
+
+  const unknown = h.send({ type: "refuse", operationId: 9999, reason: "Nobody home." });
+  expect(unknown.effects).toEqual([]);
+  expect(unknown.ledger).toEqual(before);
+});
+
+test("refuse with one settled chunk keeps its reported charge and closes the rest as unsent", () => {
+  const h = harness();
+  const operation = begin(h, "tts", 2);
+  h.send({ type: "chunk", operationId: operation.operationId });
+  h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 1, facts: facts() });
+  h.send({ type: "settle", operationId: operation.operationId, chunkId: 1, outcome: "success", costUsd: 0.5 });
+  h.send({ type: "chunk", operationId: operation.operationId });
+  const refused = h.send({ type: "refuse", operationId: operation.operationId, reason: "The voice changed." });
+  const receipt = refused.ledger.receipts[0];
+  expect(refused.ledger.slots.tts).toBeNull();
+  expect(receipt).toMatchObject({ outcome: "refusal", reportedUsd: 0.5, unknownChunks: 0, unsentChunks: 1 });
+  expect(receipt?.finalChunkOutcome).toBe("success");
+});
+
+test("charge projection never invents a zero for an unpriced dispatch", () => {
+  // Never dispatched: no charge, no claim.
+  const refused = (() => {
+    const h = harness();
+    const operation = begin(h, "stt", 1);
+    h.send({ type: "chunk", operationId: operation.operationId });
+    return h.send({ type: "refuse", operationId: operation.operationId, reason: "No." }).ledger.receipts[0];
+  })();
+  expect(refused).toBeDefined();
+  expect(chargeViewOfReceipt(refused!)).toEqual({ state: "none" });
+
+  // Reported zero is a real zero, not a free pass for the unknown chunks beside it.
+  const reportedZero = (() => {
+    const h = harness();
+    const operation = begin(h, "tts", 2);
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 1, facts: facts() });
+    h.send({ type: "settle", operationId: operation.operationId, chunkId: 1, outcome: "success", costUsd: 0 });
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 2, facts: facts() });
+    return h.send({ type: "settle", operationId: operation.operationId, chunkId: 2, outcome: "success", costUsd: 0 }).ledger.receipts[0];
+  })();
+  expect(chargeViewOfReceipt(reportedZero!)).toEqual({ state: "reported", usd: 0 });
+
+  const mixed = (() => {
+    const h = harness();
+    const operation = begin(h, "tts", 2);
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 1, facts: facts() });
+    h.send({ type: "settle", operationId: operation.operationId, chunkId: 1, outcome: "success", costUsd: 0.25 });
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 2, facts: facts() });
+    return h.send({ type: "settle", operationId: operation.operationId, chunkId: 2, outcome: "success", costUsd: null }).ledger.receipts[0];
+  })();
+  expect(chargeViewOfReceipt(mixed!)).toEqual({ state: "mixed", reportedUsd: 0.25, unknownChunks: 1 });
+
+  // A reported zero beside an unknown chunk stays unknown; nothing is summed to zero.
+  const zeroPlusUnknown = (() => {
+    const h = harness();
+    const operation = begin(h, "tts", 2);
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 1, facts: facts() });
+    h.send({ type: "settle", operationId: operation.operationId, chunkId: 1, outcome: "success", costUsd: 0 });
+    h.send({ type: "chunk", operationId: operation.operationId });
+    h.send({ type: "dispatch", operationId: operation.operationId, chunkId: 2, facts: facts() });
+    return h.send({ type: "settle", operationId: operation.operationId, chunkId: 2, outcome: "success" }).ledger.receipts[0];
+  })();
+  expect(chargeViewOfReceipt(zeroPlusUnknown!)).toEqual({ state: "unknown" });
+
+  // All chunks dispatched without a report: unknown.
+  const allUnknown = (() => {
+    const h = harness();
+    const { operationId } = dispatched(h, "stt", 1);
+    return h.send({ type: "settle", operationId, chunkId: 1, outcome: "success" }).ledger.receipts[0];
+  })();
+  expect(chargeViewOfReceipt(allUnknown!)).toEqual({ state: "unknown" });
+});
+
+test("a cancelled operation keeps cancellation at the operation level while the late chunk keeps its own outcome", () => {
+  const h = harness();
+  const { operationId } = dispatched(h, "tts", 2);
+  h.send({ type: "cancel", operationId, reason: "Author stopped." });
+  h.send({ type: "settle", operationId, chunkId: 1, outcome: "failure", failure: "late failure", costUsd: null });
+  const receipt = h.ledger.receipts.find((entry) => entry.operation.operationId === operationId);
+  expect(receipt?.outcome).toBe("cancellation");
+  expect(receipt?.finalChunkOutcome).toBe("failure");
+  expect(receipt?.finalChunkFailure).toBe("late failure");
+  expect(receipt?.unknownChunks).toBe(1);
 });
 
 test("receipt capacity is reserved for an operation already in flight", () => {

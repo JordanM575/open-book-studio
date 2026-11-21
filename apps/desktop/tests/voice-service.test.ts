@@ -1,13 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryVault } from "@ai-book-studio/core/providers/credentials";
+import type { StoredCredential } from "@ai-book-studio/core/providers/types";
 import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
-import { META_SPEECH_MODEL } from "@ai-book-studio/core/providers/speech";
-import type { ProviderId, StoredCredential } from "@ai-book-studio/core/providers/types";
-import { ProviderService } from "../src/main/providers";
+import { META_SELECTION, metaCredential, voiceFixture, runTranscription } from "./support/voice-request-host";
 import { VoiceService } from "../src/main/voice";
-
-const KEY = "meta-test-key-123456";
-const META_SELECTION = { connectionId: "conn_meta0000001", model: META_SPEECH_MODEL };
 
 function wav(seconds = 1): Uint8Array {
   const sampleRate = 16_000;
@@ -31,20 +26,15 @@ function wav(seconds = 1): Uint8Array {
 }
 
 function credential(provider: StoredCredential["provider"] = "meta", id = "conn_meta0000001"): StoredCredential {
-  return {
-    id,
-    provider,
-    label: "Meta",
-    kind: "api-key",
-    createdAt: "2026-10-26T12:00:00.000Z",
-    secret: KEY,
-    ...(provider === "meta" ? { metadata: { baseUrl: "https://api.meta.ai/v1" } } : {})
-  };
+  const base = metaCredential({ provider, id });
+  if (provider === "meta") return base;
+  const { metadata: _dropped, ...rest } = base;
+  return rest;
 }
 
-function preferences(provider: ProviderId | null, connectionId: string | null): VoicePreferences {
+function preferences(provider: "meta" | "openrouter" | null, connectionId: string | null): VoicePreferences {
   if (provider === "meta") {
-    return { ...DEFAULT_VOICE_PREFERENCES, transcription: { connectionId, model: META_SPEECH_MODEL } };
+    return { ...DEFAULT_VOICE_PREFERENCES, transcription: { connectionId, model: "muse-voice-transcribe-1.0" } };
   }
   if (provider === "openrouter") {
     return { ...DEFAULT_VOICE_PREFERENCES, transcription: { connectionId, model: "openai/whisper-1" } };
@@ -52,18 +42,9 @@ function preferences(provider: ProviderId | null, connectionId: string | null): 
   return DEFAULT_VOICE_PREFERENCES;
 }
 
-function service(
-  fetchImpl: typeof fetch,
-  stored: StoredCredential[] = [credential()],
-  selected: VoicePreferences = preferences("meta", "conn_meta0000001")
-) {
-  const vault = new MemoryVault();
-  for (const entry of stored) void vault.set(entry);
-  const providers = new ProviderService(vault, async () => {}, (async () => {
-    throw new Error("provider catalogue must not be called");
-  }) as unknown as typeof fetch);
-  return new VoiceService(providers, fetchImpl, () => selected);
-}
+const neverFetch = (async () => {
+  throw new Error("the provider must not be called");
+}) as unknown as typeof fetch;
 
 describe("VoiceService", () => {
   test("posts the documented Meta form and returns the transcript", async () => {
@@ -73,103 +54,119 @@ describe("VoiceService", () => {
       captured.init = init;
       return Response.json({ transcript: " Hello there. ", audioDurationMs: 3000, turns: [] });
     }) as typeof fetch;
+    const fx = voiceFixture({ fetchImpl });
+    const service = new VoiceService(fx.providers, fx.fetchImpl);
+    const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection: { ...META_SELECTION } });
 
-    const result = await service(fetchImpl).transcribe({ audio: wav(), expectedSelection: META_SELECTION });
-
-    expect(result).toMatchObject({
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.transcript).toMatchObject({
       text: "Hello there.",
       provider: "meta",
       connectionLabel: "Meta",
       model: "muse-voice-transcribe-1.0",
       durationMs: 3000
     });
+    expect(outcome.receipt.status).toBe("success");
     expect(captured?.url).toBe("https://api.meta.ai/v1/asr/transcribe");
     const init = captured.init;
     if (!init) throw new Error("the provider was never called");
-    expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY}`);
-    const form = captured?.init?.body as FormData;
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer synthetic-meta-key");
+    const form = init.body as FormData;
     const request = JSON.parse(await (form.get("request") as Blob).text()) as Record<string, unknown>;
     expect(request).toMatchObject({ mode: "PUSH_TO_TALK", model: "muse-voice-transcribe-1.0", audioEncoding: "WAV" });
     expect(form.get("audio")).toBeInstanceOf(Blob);
+    expect(fx.events.map((view) => view.phase)).toEqual(["starting", "in-flight", "settled"]);
+    void service;
   });
 
   test("refuses non-WAV audio before any request", async () => {
-    let calls = 0;
-    const fetchImpl = (async () => {
-      calls += 1;
-      return Response.json({ transcript: "never" });
-    }) as unknown as typeof fetch;
-
-    await expect(service(fetchImpl).transcribe({ audio: new TextEncoder().encode("not audio"), expectedSelection: META_SELECTION })).rejects.toMatchObject({
-      code: "invalid-request"
-    });
-    expect(calls).toBe(0);
+    const fx = voiceFixture({ fetchImpl: neverFetch });
+    const outcome = await runTranscription(fx.host, fx.service, { audio: new TextEncoder().encode("not audio") });
+    expect(outcome.status).toBe("refusal");
+    if (outcome.status === "refusal") {
+      expect(outcome.receipt?.charge).toEqual({ state: "none" });
+    }
+    expect(fx.events.some((view) => view.phase === "in-flight")).toBe(false);
   });
 
   test("normalizes an auth failure without leaking the key", async () => {
     const fetchImpl = (async () =>
-      new Response(JSON.stringify({ error: `invalid key ${KEY}` }), { status: 401 })) as unknown as typeof fetch;
-
-    await expect(service(fetchImpl).transcribe({ audio: wav(), expectedSelection: META_SELECTION })).rejects.toMatchObject({
-      code: "auth",
-      message: "The provider rejected this connection. Reconnect or check the key."
-    });
+      new Response(JSON.stringify({ error: "invalid key synthetic-meta-key" }), { status: 401 })) as unknown as typeof fetch;
+    const fx = voiceFixture({ fetchImpl });
+    const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection: { ...META_SELECTION } });
+    expect(outcome.status).toBe("failure");
+    if (outcome.status !== "failure") return;
+    expect(outcome.message).toBe("The provider rejected this connection. Reconnect or check the key.");
+    expect(outcome.message).not.toContain("synthetic-meta-key");
+    expect(outcome.receipt?.charge).toEqual({ state: "unknown" });
+    expect(outcome.receipt?.message ?? "").not.toContain("synthetic-meta-key");
   });
 
   test("requires an explicit saved transcription connection", async () => {
-    await expect(
-      service(
-        (async () => {
-          throw new Error("must not call");
-        }) as unknown as typeof fetch,
-        [credential("openai", "conn_openai00001")],
-        DEFAULT_VOICE_PREFERENCES
-      ).transcribe({ audio: wav(), expectedSelection: META_SELECTION })
-    ).rejects.toMatchObject({ code: "invalid-request", message: expect.stringMatching(/Choose a transcription connection/i) });
+    const fx = voiceFixture({
+      fetchImpl: neverFetch,
+      stored: [],
+      preferences: DEFAULT_VOICE_PREFERENCES
+    });
+    const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection: { ...META_SELECTION } });
+    expect(outcome.status).toBe("refusal");
+    if (outcome.status === "refusal") {
+      expect(outcome.message).toMatch(/Choose a transcription connection/i);
+    }
   });
 
   test("lists only speech-capable connections", async () => {
-    const connections = await service(
-      (async () => {
-        throw new Error("must not call");
-      }) as unknown as typeof fetch,
-      [credential("openai", "conn_openai00001"), credential("meta", "conn_meta0000001")]
-    ).connections();
+    const fx = voiceFixture({
+      fetchImpl: neverFetch,
+      stored: [credential("openai", "conn_openai00001"), credential("meta", "conn_meta0000001")]
+    });
+    const service = new VoiceService(fx.providers, fx.fetchImpl);
+    const connections = await service.connections();
     expect(connections.map((entry) => entry.provider)).toEqual(["meta"]);
   });
 
   test("refuses when the saved connection is not speech-capable", async () => {
-    await expect(
-      service(
-        (async () => {
-          throw new Error("must not call");
-        }) as unknown as typeof fetch
-      , [credential("openai", "conn_openai00001")], preferences(null, null)
-      ).transcribe({ audio: wav(), expectedSelection: META_SELECTION })
-    ).rejects.toMatchObject({ code: "invalid-request" });
+    const fx = voiceFixture({
+      fetchImpl: neverFetch,
+      stored: [credential("openai", "conn_openai00001")],
+      preferences: preferences("meta", "conn_openai00001")
+    });
+    const outcome = await runTranscription(fx.host, fx.service, {
+      audio: wav(),
+      expectedSelection: { connectionId: "conn_openai00001", model: "muse-voice-transcribe-1.0" }
+    });
+    expect(outcome.status).toBe("refusal");
   });
 
   test("uses only the selected OpenRouter model and documented JSON/base64 body", async () => {
-    const selectedCredential = credential("openrouter", "conn_openrouter01");
-    const selectedPreferences = preferences("openrouter", selectedCredential.id);
-    selectedPreferences.transcription.model = "openai/whisper-large-v3-turbo";
+    const selected = { ...preferences("openrouter", "conn_openrouter01") };
+    selected.transcription.model = "openai/whisper-large-v3-turbo";
     const seen: { url?: string; init?: RequestInit } = {};
     const fetchImpl = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
       seen.url = String(url);
       if (init) seen.init = init;
       return Response.json({ text: " spoken words ", usage: { seconds: 1.5, cost: 0.0002 } });
     }) as typeof fetch;
-    const result = await service(fetchImpl, [selectedCredential], selectedPreferences).transcribe({
-      audio: wav(),
-      expectedSelection: { connectionId: selectedCredential.id, model: "openai/whisper-large-v3-turbo" }
+    const fx = voiceFixture({
+      fetchImpl,
+      stored: [credential("openrouter", "conn_openrouter01")],
+      preferences: selected
     });
-    expect(result).toMatchObject({
+    const outcome = await runTranscription(fx.host, fx.service, {
+      audio: wav(),
+      expectedSelection: { connectionId: "conn_openrouter01", model: "openai/whisper-large-v3-turbo" }
+    });
+    expect(outcome.status).toBe("success");
+    if (outcome.status !== "success") return;
+    expect(outcome.transcript).toMatchObject({
       text: "spoken words",
       provider: "openrouter",
       model: "openai/whisper-large-v3-turbo",
       durationMs: 1500,
       costUsd: 0.0002
     });
+    expect(outcome.receipt.charge).toEqual({ state: "reported", usd: 0.0002 });
     expect(seen?.url).toBe("https://openrouter.ai/api/v1/audio/transcriptions");
     expect(new Headers(seen?.init?.headers).get("content-type")).toBe("application/json");
     expect(JSON.parse(String(seen?.init?.body))).toMatchObject({
@@ -179,61 +176,87 @@ describe("VoiceService", () => {
   });
 
   test("a removed saved connection stops before any fetch", async () => {
-    let calls = 0;
-    const fetchImpl = (async () => {
-      calls += 1;
-      return Response.json({ text: "never" });
-    }) as unknown as typeof fetch;
-    await expect(service(fetchImpl, [], preferences("meta", "conn_meta0000001")).transcribe({ audio: wav(), expectedSelection: META_SELECTION }))
-      .rejects.toMatchObject({ code: "not-found", message: expect.stringMatching(/unavailable/i) });
-    expect(calls).toBe(0);
+    const fx = voiceFixture({ fetchImpl: neverFetch, stored: [], preferences: preferences("meta", "conn_meta0000001") });
+    const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection: { ...META_SELECTION } });
+    expect(outcome.status).toBe("refusal");
+    if (outcome.status === "refusal") expect(outcome.message).toMatch(/unavailable/i);
   });
 
   test("a retired transcription model stops before sending audio", async () => {
     const selected = preferences("meta", "conn_meta0000001");
     selected.transcription.model = "retired/transcription";
-    let calls = 0;
-    const fetchImpl = (async () => {
-      calls += 1;
-      return Response.json({ text: "never" });
-    }) as unknown as typeof fetch;
-    await expect(service(fetchImpl, [credential()], selected).transcribe({
-      audio: wav(), expectedSelection: { ...META_SELECTION, model: "retired/transcription" }
-    }))
-      .rejects.toMatchObject({ code: "invalid-request" });
-    expect(calls).toBe(0);
+    const fx = voiceFixture({ fetchImpl: neverFetch, stored: [credential()], preferences: selected });
+    const outcome = await runTranscription(fx.host, fx.service, {
+      audio: wav(),
+      expectedSelection: { connectionId: "conn_meta0000001", model: "retired/transcription" }
+    });
+    expect(outcome.status).toBe("refusal");
   });
 
   test("a changed connection or model refuses the recording before any provider request", async () => {
+    const selected = preferences("openrouter", "conn_openrouter01");
+    const fx = voiceFixture({
+      fetchImpl: neverFetch,
+      stored: [credential(), credential("openrouter", "conn_openrouter01")],
+      preferences: selected
+    });
+    for (const expectedSelection of [
+      { ...META_SELECTION },
+      { connectionId: "conn_openrouter01", model: "openai/whisper-large-v3" }
+    ]) {
+      const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection });
+      expect(outcome.status).toBe("refusal");
+      if (outcome.status === "refusal") expect(outcome.message).toMatch(/changed during dictation/i);
+    }
+  });
+
+  test("a route revision bump during the request refuses before dispatch", async () => {
+    const fx = voiceFixture({ fetchImpl: neverFetch });
+    const reservation = fx.host.reserve("stt", 1, 1, { ...META_SELECTION });
+    if (!reservation) throw new Error("reserve refused");
+    const begun = await fx.host.begin(reservation);
+    if (!begun.ok) throw new Error("begin refused");
+    // Any voice-settings write or connection removal bumps the revision; an A→B→A round trip still refuses.
+    fx.routes.bump();
+    const service = new VoiceService(fx.providers, fx.fetchImpl);
+    const outcome = await service.transcribe({ audio: wav() }, begun.scope);
+    expect(outcome.status).toBe("refusal");
+    if (outcome.status === "refusal") {
+      expect(outcome.message).toMatch(/changed/i);
+      expect(outcome.receipt?.charge).toEqual({ state: "none" });
+    }
+  });
+
+  test("the selection is not redirected when it changes while the request is resolving", async () => {
+    const fx = voiceFixture({
+      fetchImpl: neverFetch,
+      stored: [credential(), credential("openrouter", "conn_openrouter01")],
+      preferences: preferences("meta", "conn_meta0000001")
+    });
+    // Simulate the author switching the selection while the resolution is in flight.
+    const originalList = fx.providers.list.bind(fx.providers);
+    fx.providers.list = async () => {
+      fx.preferences.transcription = { connectionId: "conn_openrouter01", model: "openai/whisper-1" };
+      fx.routes.bump();
+      return originalList();
+    };
+    const outcome = await runTranscription(fx.host, fx.service, { audio: wav(), expectedSelection: { ...META_SELECTION } });
+    expect(outcome.status).toBe("refusal");
+    if (outcome.status === "refusal") expect(outcome.message).toMatch(/changed/i);
+  });
+
+  test("a refusal after pinning never reaches the provider", async () => {
     let calls = 0;
     const fetchImpl = (async () => {
       calls += 1;
-      return Response.json({ text: "never" });
+      return Response.json({ transcript: "never" });
     }) as unknown as typeof fetch;
-    const openrouter = credential("openrouter", "conn_openrouter01");
-    const selected = preferences("openrouter", openrouter.id);
-    for (const expectedSelection of [
-      META_SELECTION,
-      { connectionId: openrouter.id, model: "openai/whisper-large-v3" }
-    ]) {
-      await expect(service(fetchImpl, [credential(), openrouter], selected).transcribe({ audio: wav(), expectedSelection }))
-        .rejects.toMatchObject({ code: "invalid-request", message: expect.stringMatching(/changed during dictation/i) });
-    }
+    const fx = voiceFixture({ fetchImpl });
+    const outcome = await runTranscription(fx.host, fx.service, {
+      audio: wav(),
+      expectedSelection: { connectionId: "conn_meta0000001", model: "retired/transcription" }
+    });
+    expect(outcome.status).toBe("refusal");
     expect(calls).toBe(0);
-  });
-
-  test("a later preference update cannot redirect a request already resolving its connection", async () => {
-    const selected = preferences("meta", META_SELECTION.connectionId);
-    const urls: string[] = [];
-    const fetchImpl = (async (url: Parameters<typeof fetch>[0]) => {
-      urls.push(String(url));
-      return Response.json({ transcript: "Words", turns: [] });
-    }) as typeof fetch;
-    const pending = service(fetchImpl, [credential(), credential("openrouter", "conn_openrouter01")], selected)
-      .transcribe({ audio: wav(), expectedSelection: META_SELECTION });
-    selected.transcription.connectionId = "conn_openrouter01";
-    selected.transcription.model = "openai/whisper-1";
-    expect((await pending).provider).toBe("meta");
-    expect(urls).toEqual(["https://api.meta.ai/v1/asr/transcribe"]);
   });
 });

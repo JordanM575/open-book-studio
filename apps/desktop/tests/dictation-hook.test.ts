@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
+import type { VoiceOperationView } from "@ai-book-studio/core/ipc";
 
 /**
  * The microphone, through the hook the buttons and the hands-free mode both use.
@@ -96,21 +97,75 @@ interface Harness {
   start: () => Promise<void>;
   stop: () => void;
   cancel: () => void;
+  receipt: VoiceOperationView | null;
 }
 
-let harness: Harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {} };
+let harness: Harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {}, receipt: null };
 let texts: string[] = [];
 let errors: string[] = [];
 
-function configuredVoice(transcribe: (input: unknown) => Promise<unknown> = async () => ({ ok: true, data: { text: "Words." } })) {
+/** A settled or pending host view, filled in per test. */
+function operationView(overrides: Partial<VoiceOperationView> = {}): VoiceOperationView {
   return {
+    operationId: 42,
+    viewRevision: 1,
+    kind: "stt",
+    phase: "starting",
+    status: null,
+    cancelled: false,
+    connectionLabel: "Meta",
+    model: "muse-voice-transcribe-1.0",
+    voice: null,
+    plannedChunks: 1,
+    dispatchedChunks: 0,
+    settledChunks: 0,
+    unsentChunks: 0,
+    charge: { state: "pending" },
+    message: null,
+    finalChunkOutcome: null,
+    ...overrides
+  };
+}
+
+function successOutcome(text: string, receipt: VoiceOperationView = operationView({ phase: "settled", status: "success", charge: { state: "reported", usd: 0.01 }, settledChunks: 1, dispatchedChunks: 1 })) {
+  return {
+    ok: true as const,
+    data: {
+      status: "success" as const,
+      transcript: { text, provider: "meta" as const, connectionLabel: "Meta", model: "muse-voice-transcribe-1.0", durationMs: 1000, costUsd: 0.01, turns: [] },
+      receipt
+    }
+  };
+}
+
+type VoiceStub = {
+  settings: () => Promise<unknown>;
+  connections: () => Promise<unknown>;
+  transcribe: (input: unknown) => Promise<unknown>;
+  cancel: ReturnType<typeof mock>;
+  onOperation: (callback: (view: VoiceOperationView) => void) => () => void;
+  emit: (view: VoiceOperationView) => void;
+};
+
+function configuredVoice(transcribe: (input: unknown) => Promise<unknown> = async () => successOutcome("Words.")): VoiceStub {
+  const listeners = new Set<(view: VoiceOperationView) => void>();
+  const stub: VoiceStub = {
     settings: async () => ({ ok: true, data: {
       transcription: { connectionId: "conn_meta000001", model: "muse-voice-transcribe-1.0" },
       speaking: { connectionId: null, model: null, voice: null }
     } }),
     connections: async () => ({ ok: true, data: [{ id: "conn_meta000001", provider: "meta" }] }),
-    transcribe
+    transcribe,
+    cancel: mock(async (_input: { operationId: number }) => ({ ok: true, data: { operationId: _input.operationId, accepted: true, abortedLocally: true, released: false } })),
+    onOperation: (callback) => {
+      listeners.add(callback);
+      return () => listeners.delete(callback);
+    },
+    emit: (view) => {
+      for (const listener of [...listeners]) listener(view);
+    }
   };
+  return stub;
 }
 
 function Probe({ maxMs }: { maxMs?: number }) {
@@ -175,7 +230,7 @@ beforeEach(() => {
   FakeRecorder.instances = [];
   texts = [];
   errors = [];
-  harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {} };
+  harness = { state: "idle", elapsedMs: 0, start: async () => {}, stop: () => {}, cancel: () => {}, receipt: null };
   (window as { studio?: unknown }).studio = { voice: configuredVoice() };
 });
 
@@ -324,7 +379,7 @@ describe("finishing a recording", () => {
 
   test("a transcript reaches the caller and the state goes back to idle", async () => {
     withMicrophone();
-    stubVoice({ ok: true, data: { text: "The lamp would not turn." } });
+    stubVoice(successOutcome("The lamp would not turn."));
     mount();
     await testing.act(async () => {
       await harness.start();
@@ -338,7 +393,7 @@ describe("finishing a recording", () => {
 
   test("binds the recording to the transcription choice read before opening the microphone", async () => {
     withMicrophone();
-    const transcribe = mock(async (_input: unknown) => ({ ok: true, data: { text: "Words." } }));
+    const transcribe = mock(async (_input: unknown) => successOutcome("Words."));
     const voice = configuredVoice(transcribe);
     (window as { studio?: unknown }).studio = { voice };
     mount();
@@ -356,7 +411,7 @@ describe("finishing a recording", () => {
 
   test("every track is stopped when the recording ends, so the light goes out", async () => {
     const { stopped } = withMicrophone();
-    stubVoice({ ok: true, data: { text: "Words." } });
+    stubVoice(successOutcome("Words."));
     mount();
     await testing.act(async () => {
       await harness.start();
@@ -369,7 +424,7 @@ describe("finishing a recording", () => {
 
   test("a recording that produced nothing says so rather than sending silence", async () => {
     withMicrophone();
-    stubVoice({ ok: true, data: { text: "should not be asked" } });
+    stubVoice(successOutcome("should not be asked"));
     mount();
     await testing.act(async () => {
       await harness.start();
@@ -383,7 +438,7 @@ describe("finishing a recording", () => {
 
   test("a transcript with no speech in it is explained, not inserted", async () => {
     withMicrophone();
-    stubVoice({ ok: true, data: { text: "" } });
+    stubVoice(successOutcome(""));
     mount();
     await testing.act(async () => {
       await harness.start();
@@ -424,7 +479,7 @@ describe("finishing a recording", () => {
 describe("cancelling", () => {
   test("a cancel stops the microphone and inserts nothing", async () => {
     const { stopped } = withMicrophone();
-    const transcribe = mock(() => Promise.resolve({ ok: true, data: { text: "never" } }));
+    const transcribe = mock(() => Promise.resolve(successOutcome("never")));
     (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
     mount();
     await testing.act(async () => {
@@ -495,7 +550,7 @@ describe("cancelling", () => {
       value: { getUserMedia: async () => (++opens === 1 ? first.stream : second.stream) },
       configurable: true
     });
-    const transcribe = mock(async () => ({ ok: true, data: { text: "New words." } }));
+    const transcribe = mock(async () => successOutcome("New words."));
     (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
     mount();
     await testing.act(async () => { await harness.start(); });
@@ -525,7 +580,7 @@ describe("cancelling", () => {
       decodeAudioData = decode;
       async close() {}
     };
-    const transcribe = mock(async () => ({ ok: true, data: { text: "never" } }));
+    const transcribe = mock(async () => successOutcome("never"));
     (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
     mount();
     await testing.act(async () => { await harness.start(); });
@@ -552,13 +607,152 @@ describe("cancelling", () => {
     await testing.act(async () => { harness.cancel(); });
     await testing.act(async () => { await harness.start(); });
     await testing.act(async () => {
-      slow.resolve({ ok: true, data: { text: "Old words." } });
+      slow.resolve(successOutcome("Old words."));
       await slow.promise;
     });
     expect(texts).toEqual([]);
     expect(errors).toEqual([]);
     expect(harness.state).toBe("recording");
     expect(FakeRecorder.instances.at(-1)?.state).toBe("recording");
+  });
+});
+
+describe("stopping a host-minted transcription", () => {
+  const VIEW_ID = 42;
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  async function startTranscribing(view: VoiceOperationView = operationView({ operationId: VIEW_ID, phase: "starting" })) {
+    const started = deferred<unknown>();
+    const transcribe = mock((_input: unknown) => started.promise);
+    const voice = configuredVoice(transcribe);
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+    await testing.act(async () => {
+      await harness.start();
+    });
+    await testing.act(async () => {
+      FakeRecorder.instances.at(-1)?.emit(8);
+    });
+    await testing.waitFor(() => expect(transcribe).toHaveBeenCalledTimes(1));
+    return { voice, transcribe, started, view };
+  }
+
+  test("Stop during transcription cancels the host operation once and ignores the late reply", async () => {
+    withMicrophone();
+    const { voice, transcribe, started } = await startTranscribing();
+    // The host announces the operation; the hook adopts the id.
+    await testing.act(async () => {
+      voice.emit(operationView({ operationId: VIEW_ID, phase: "starting" }));
+    });
+    expect(harness.state).toBe("transcribing");
+
+    await testing.act(async () => {
+      harness.cancel();
+    });
+    expect(voice.cancel).toHaveBeenCalledTimes(1);
+    expect(voice.cancel).toHaveBeenCalledWith({ operationId: VIEW_ID });
+    expect(harness.state).toBe("cancelling");
+
+    // The late reply arrives after the stop: nothing is inserted, nothing is reported as an error.
+    const late = successOutcome("Late words.", operationView({ viewRevision: 3, phase: "settled", status: "success", charge: { state: "reported", usd: 0.5 }, settledChunks: 1, dispatchedChunks: 1 }));
+    await testing.act(async () => {
+      started.resolve(late);
+      await started.promise;
+    });
+    expect(texts).toEqual([]);
+    expect(errors).toEqual([]);
+    // The settle event closes the operation; the receipt is kept for the line under the button.
+    await testing.act(async () => {
+      voice.emit(operationView({ viewRevision: 3, phase: "settled", status: "cancellation", cancelled: true, charge: { state: "unknown" }, dispatchedChunks: 1, settledChunks: 1 }));
+    });
+    expect(harness.state).toBe("idle");
+    expect(harness.receipt?.status).toBe("cancellation");
+    expect(harness.receipt?.charge).toEqual({ state: "unknown" });
+    void transcribe;
+  });
+
+  test("a Stop pressed before the host announces the id cancels the moment it arrives", async () => {
+    withMicrophone();
+    const { voice, started } = await startTranscribing();
+    await testing.act(async () => {
+      harness.cancel();
+    });
+    expect(voice.cancel).not.toHaveBeenCalled();
+    await testing.act(async () => {
+      voice.emit(operationView({ operationId: VIEW_ID, phase: "starting" }));
+    });
+    expect(voice.cancel).toHaveBeenCalledTimes(1);
+    expect(voice.cancel).toHaveBeenCalledWith({ operationId: VIEW_ID });
+    started.resolve(successOutcome("never"));
+    await testing.act(async () => {
+      await started.promise;
+    });
+    expect(texts).toEqual([]);
+  });
+
+  test("Stop while recording sends nothing and shows no provider charge", async () => {
+    withMicrophone();
+    const { voice } = (() => {
+      const transcribe = mock(async () => successOutcome("never"));
+      (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
+      return { voice: (window as unknown as { studio: { voice: ReturnType<typeof configuredVoice> } }).studio.voice };
+    })();
+    mount();
+    await testing.act(async () => {
+      await harness.start();
+    });
+    await testing.act(async () => {
+      harness.cancel();
+    });
+    expect(voice.cancel).not.toHaveBeenCalled();
+    expect(harness.state).toBe("idle");
+    expect(harness.receipt).toBeNull();
+    expect(texts).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+
+  test("a second stop after the operation settled does not call the host again", async () => {
+    withMicrophone();
+    const transcribe = mock(async () => successOutcome("Words."));
+    const voice = configuredVoice(transcribe);
+    (window as { studio?: unknown }).studio = { voice };
+    mount();
+    await testing.act(async () => {
+      await harness.start();
+    });
+    await testing.act(async () => {
+      FakeRecorder.instances.at(-1)?.emit(8);
+    });
+    await testing.waitFor(() => expect(texts).toEqual(["Words."]));
+    await testing.act(async () => {
+      voice.emit(operationView({ operationId: VIEW_ID, phase: "settled", status: "success", charge: { state: "reported", usd: 0.01 }, settledChunks: 1, dispatchedChunks: 1, viewRevision: 5 }));
+    });
+    expect(harness.receipt?.status).toBe("success");
+    await testing.act(async () => {
+      harness.cancel();
+    });
+    expect(voice.cancel).not.toHaveBeenCalled();
+  });
+
+  test("a successful dictation shows the reported receipt", async () => {
+    withMicrophone();
+    const receipt = operationView({ operationId: 7, phase: "settled", status: "success", charge: { state: "reported", usd: 0.01 }, settledChunks: 1, dispatchedChunks: 1, viewRevision: 2 });
+    const transcribe = mock(async () => successOutcome("Receipt words.", receipt));
+    (window as { studio?: unknown }).studio = { voice: configuredVoice(transcribe) };
+    mount();
+    await testing.act(async () => {
+      await harness.start();
+    });
+    await testing.act(async () => {
+      FakeRecorder.instances.at(-1)?.emit(8);
+    });
+    await testing.waitFor(() => expect(texts).toEqual(["Receipt words."]));
+    expect(harness.receipt?.charge).toEqual({ state: "reported", usd: 0.01 });
   });
 });
 

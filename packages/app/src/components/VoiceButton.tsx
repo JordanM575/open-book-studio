@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Loader2, Mic, MicOff, Square } from "lucide-react";
 import { Button } from "@ai-book-studio/ui/button";
 import { dictationReadiness, useDictation } from "../hooks/use-dictation";
+import { voiceReceiptLine } from "../lib/voice-receipt";
 
 interface Props {
   onText: (text: string) => void;
@@ -20,11 +21,14 @@ function elapsed(ms: number): string {
 /**
  * The indicator follows the saved selection, not the presence of an unrelated connection. The
  * button can still be pressed when unavailable so its reason is announced through onError.
+ *
+ * While a transcription is in flight the button is a Stop control: it asks the host to cancel the
+ * request, keeps the slot honest, and shows the host's receipt — never a fabricated cost.
  */
 export function VoiceButton({ onText, onError, disabled = false, voiceStatusRevision = 0 }: Props) {
   const [availability, setAvailability] = useState<Availability>("checking");
   const [reason, setReason] = useState("Checking voice access…");
-  const { state, elapsedMs, start, stop } = useDictation({ onText, onError });
+  const { state, elapsedMs, start, stop, cancel, receipt } = useDictation({ onText, onError });
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: voiceStatusRevision triggers a fresh local settings check after the author changes Voice settings
   useEffect(() => {
@@ -42,9 +46,12 @@ export function VoiceButton({ onText, onError, disabled = false, voiceStatusRevi
     };
   }, [voiceStatusRevision]);
 
-  const busy = state === "requesting" || state === "transcribing";
   const recording = state === "recording";
+  const transcribing = state === "transcribing";
+  const cancelling = state === "cancelling";
+  const requesting = state === "requesting";
   const unavailable = availability !== "ready" || disabled;
+  const busy = requesting;
 
   return (
     <span className="inline-flex items-center gap-2">
@@ -53,24 +60,52 @@ export function VoiceButton({ onText, onError, disabled = false, voiceStatusRevi
         variant={recording ? "danger" : "outline"}
         size="icon"
         className="size-11"
-        aria-label={recording ? "Stop dictation" : "Start dictation"}
+        aria-label={recording ? "Stop dictation" : transcribing || cancelling ? "Stop transcription" : "Start dictation"}
         aria-pressed={recording}
-        title={unavailable ? reason : recording ? "Stop and transcribe" : "Start dictation"}
+        title={
+          unavailable && !recording
+            ? reason
+            : recording
+              ? "Stop and transcribe"
+              : transcribing || cancelling
+                ? "Stop the transcription request"
+                : "Start dictation"
+        }
         disabled={disabled || busy}
         onClick={() => {
           if (recording) stop();
+          else if (transcribing || cancelling) cancel();
           else void start();
         }}
       >
-        {busy ? <Loader2 size={17} className="animate-spin" /> : recording ? <Square size={15} /> : unavailable ? <MicOff size={17} /> : <Mic size={17} />}
+        {requesting ? (
+          <Loader2 size={17} className="animate-spin" />
+        ) : recording ? (
+          <Square size={15} />
+        ) : transcribing || cancelling ? (
+          cancelling ? <Loader2 size={17} className="animate-spin" /> : <Square size={15} />
+        ) : unavailable ? (
+          <MicOff size={17} />
+        ) : (
+          <Mic size={17} />
+        )}
       </Button>
       {recording ? (
         <span className="tabular text-(length:--text-caption-size) text-muted-foreground" role="status">
           {elapsed(elapsedMs)}
         </span>
-      ) : state === "transcribing" ? (
+      ) : transcribing ? (
         <span className="text-(length:--text-caption-size) text-muted-foreground" role="status">
           Transcribing…
+        </span>
+      ) : cancelling ? (
+        <span className="text-(length:--text-caption-size) text-muted-foreground" role="status">
+          Stopping…
+        </span>
+      ) : null}
+      {receipt ? (
+        <span className="max-w-64 text-(length:--text-caption-size) text-muted-foreground" role="status" data-testid="voice-receipt">
+          {voiceReceiptLine(receipt)}
         </span>
       ) : null}
     </span>

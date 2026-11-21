@@ -27,16 +27,20 @@ export interface FailureSettlement {
 const MAX_FAILURE = 65_536;
 const FALLBACK = "The external operation failed. Review its host receipt before continuing.";
 const CANCELLED = "The request was cancelled before a reply arrived.";
+/** A local deadline, distinct from a host stop. The provider may still have received the request. */
+export const TIMEOUT_FAILURE = "The request timed out. It may have reached the provider; the cost is unknown.";
 
-function abortCause(error: unknown): boolean {
+/** Which local clock ended the request, if any. The provider is never told which it was. */
+function abortCause(error: unknown): "abort" | "timeout" | null {
   let current: unknown = error;
   for (let depth = 0; depth < 3 && current && typeof current === "object"; depth += 1) {
     const name = (current as { name?: unknown }).name;
-    if (name === "AbortError" || name === "TimeoutError") return true;
+    if (name === "AbortError") return "abort";
+    if (name === "TimeoutError") return "timeout";
     current = (current as { options?: { cause?: unknown } }).options?.cause ??
       (current as { cause?: unknown }).cause;
   }
-  return false;
+  return null;
 }
 
 /**
@@ -52,7 +56,9 @@ export function settlementForFailure(
   error: unknown,
   options: { dispatched?: boolean } = {}
 ): FailureSettlement {
-  if (abortCause(error)) return { outcome: "cancellation", failure: CANCELLED };
+  const cause = abortCause(error);
+  if (cause === "abort") return { outcome: "cancellation", failure: CANCELLED };
+  if (cause === "timeout") return { outcome: "failure", failure: TIMEOUT_FAILURE };
   const code = error instanceof ProviderError ? error.code : null;
   const localRefusal = options.dispatched !== true &&
     (code === "invalid-request" || code === "not-found" || code === "unsupported");

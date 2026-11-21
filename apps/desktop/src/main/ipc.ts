@@ -8,9 +8,10 @@ import {
   type BridgeControl,
   type BridgeStatus,
   type Result,
-  type SpokenReply,
   type StudioError,
-  type VoiceSpeakers
+  type VoiceSpeakers,
+  type VoiceSpokenOutcome,
+  type VoiceTranscriptionOutcome
 } from "@ai-book-studio/core/ipc";
 import { idSchema, type BookChanges } from "@ai-book-studio/core/schema";
 import { MATTER_LIMITS, matterSchema } from "@ai-book-studio/core/matter";
@@ -81,8 +82,9 @@ import type { AgentRuntime } from "./agent/runtime";
 import type { VoiceService } from "./voice";
 import type { SpeechService } from "./speech";
 import type { VoiceCancelRegistry } from "./voice-cancel-registry";
-import { ttsCapability, ttsModels } from "@ai-book-studio/core/providers/tts";
-import { speechModels } from "@ai-book-studio/core/providers/speech";
+import { VoiceRequestHost, VOICE_BUSY_MESSAGE } from "./voice-request";
+import { ttsCapability, ttsModels, chunkForSpeech } from "@ai-book-studio/core/providers/tts";
+import { inspectWav, speechModels } from "@ai-book-studio/core/providers/speech";
 import { isValidStoredVoicePreferences, voicePreferencesSchema } from "@ai-book-studio/core/providers/voice-preferences";
 import type { ImageService } from "./images";
 import { MarkdownFolderCaptureError, MarkdownFolderHostService, MarkdownFolderPublishError, suggestMarkdownFolderName } from "./markdown-folder";
@@ -264,7 +266,12 @@ export function registerIpc(
     library: () => studio.requireLibrary(),
     providers,
     transport: new AiSdkReviewTransport()
-  })
+  }),
+  /**
+   * The host-owned voice request ledger bridge. Null only in tests that exercise the registry
+   * alone; every real launch passes one. When null, voice mutations are refused rather than sent.
+   */
+  voiceRequests: VoiceRequestHost | null = null
 ): void {
   /** What the plugin folder currently provides, for the settings panel. */
   const pluginStatus = async (): Promise<PluginStatus> => {
@@ -290,6 +297,31 @@ export function registerIpc(
     ipcMain.handle(channel, async (_event, payload: unknown): Promise<Result<T>> => {
       try {
         return ok(await handler(payload));
+      } catch (error) {
+        return fail(error);
+      }
+    });
+  };
+
+  /**
+   * Voice provider calls get the real sender, not a payload claim. The caller is the current
+   * studio window's top frame, or the call is refused before anything is minted.
+   */
+  const voiceOwnerOf = (event: { sender?: { id?: number } | null; senderFrame?: unknown }): { windowId: number } | null => {
+    const win = getWindow();
+    if (!win) return null;
+    if (!event.sender || event.sender.id !== win.webContents.id) return null;
+    const frame = (event as { senderFrame?: unknown }).senderFrame;
+    if (frame !== win.webContents.mainFrame) return null;
+    return { windowId: win.webContents.id };
+  };
+  const handleVoice = <T>(
+    channel: string,
+    handler: (owner: { windowId: number } | null, payload: unknown) => Promise<T> | T
+  ): void => {
+    ipcMain.handle(channel, async (event, payload: unknown): Promise<Result<T>> => {
+      try {
+        return ok(await handler(voiceOwnerOf(event as { sender?: { id?: number } | null; senderFrame?: unknown }), payload));
       } catch (error) {
         return fail(error);
       }
@@ -1093,6 +1125,8 @@ export function registerIpc(
   });
 
   handle(IPC.connections.remove, async (payload) => {
+    // Removing a connection invalidates every pinned route; bump before the removal is visible.
+    voiceRequests?.bumpRoutes();
     await providers.remove(connectionId.parse(payload));
     return null;
   });
@@ -1328,6 +1362,8 @@ export function registerIpc(
           preferences.speaking.voice === previous.speaking.voice,
         preferences.speaking.voice
       );
+      // Every voice-settings write invalidates any pinned route, even an A→B→A round trip.
+      voiceRequests?.bumpRoutes();
       await settings.update({ voicePreferences: preferences });
       return preferences;
     });
@@ -1347,14 +1383,48 @@ export function registerIpc(
     keywords: z.array(z.string().trim().min(1).max(80)).max(50).optional()
   }).strict();
 
-  handle(IPC.voice.transcribe, async (payload) => {
+  const voiceOperationInput = z.object({
+    operationId: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER)
+  }).strict();
+
+  handleVoice(IPC.voice.transcribe, async (owner, payload): Promise<VoiceTranscriptionOutcome> => {
     const input = voiceInput.parse(payload);
-    return voice.transcribe({
-      audio: new Uint8Array(input.audio),
-      expectedSelection: input.expectedSelection,
-      ...(input.languageBias?.length ? { languageBias: input.languageBias } : {}),
-      ...(input.keywords?.length ? { keywords: input.keywords } : {})
-    });
+    if (!owner) {
+      const message = "This voice request did not come from the studio window. Nothing was sent.";
+      return { status: "refusal", message, receipt: null };
+    }
+    const wav = inspectWav(new Uint8Array(input.audio));
+    if (!wav.ok) return { status: "refusal", message: wav.reason, receipt: null };
+    if (!voiceRequests) {
+      return { status: "refusal", message: "Voice requests are not available in this build.", receipt: null };
+    }
+    const reservation = voiceRequests.reserve("stt", 1, owner.windowId, input.expectedSelection);
+    if (!reservation) {
+      return { status: "refusal", message: VOICE_BUSY_MESSAGE, receipt: null };
+    }
+    const begun = await voiceRequests.begin(reservation, input.expectedSelection);
+    if (!begun.ok) {
+      return { status: begun.status, message: begun.message, receipt: begun.receipt };
+    }
+    try {
+      const outcome = await voice.transcribe({
+        audio: new Uint8Array(input.audio),
+        ...(input.languageBias?.length ? { languageBias: input.languageBias } : {}),
+        ...(input.keywords?.length ? { keywords: input.keywords } : {})
+      }, begun.scope);
+      if (outcome.receipt) voiceRequests.emitSettled(owner.windowId, outcome.receipt);
+      return outcome;
+    } catch (error) {
+      console.error("[voice] transcription failed:", redact(error instanceof Error ? error.message : String(error)));
+      const receipt = begun.scope.failUnexpected();
+      if (receipt) voiceRequests.emitSettled(owner.windowId, receipt);
+      const outcome: VoiceTranscriptionOutcome = {
+        status: "failure",
+        message: "The voice request failed unexpectedly.",
+        receipt
+      };
+      return outcome;
+    }
   });
 
   handle(IPC.voice.speakers, async (): Promise<VoiceSpeakers> => {
@@ -1386,38 +1456,75 @@ export function registerIpc(
     };
   });
 
-  handle(IPC.voice.speak, async (payload) => {
+  handleVoice(IPC.voice.speak, async (owner, payload): Promise<VoiceSpokenOutcome> => {
     const input = speakInput.parse(payload);
-    const result = await speech.speak({
-      text: input.text,
-      ...(input.speed !== undefined ? { speed: input.speed } : {})
-    });
-    // The audio goes back as a data URL so the renderer can play it without a second request.
-    const dataUrl = `data:${result.mimeType};base64,${Buffer.from(result.bytes).toString("base64")}`;
-    return {
-      dataUrl,
-      mimeType: result.mimeType,
-      characters: result.characters,
-      chunks: result.chunks,
-      connectionLabel: result.connectionLabel,
-      model: result.model,
-      voice: result.voice
-    } satisfies SpokenReply;
+    if (!owner) {
+      const message = "This voice request did not come from the studio window. Nothing was sent.";
+      return { status: "refusal", message, receipt: null };
+    }
+    const trimmed = input.text.trim();
+    const parts = trimmed.length === 0 ? [] : chunkForSpeech(trimmed);
+    if (parts.length === 0) {
+      return { status: "refusal", message: "There is nothing to say.", receipt: null };
+    }
+    if (parts.length > 256) {
+      return {
+        status: "refusal",
+        message: "That text is too long to speak in one request. Split it and try again.",
+        receipt: null
+      };
+    }
+    if (!voiceRequests) {
+      return { status: "refusal", message: "Voice requests are not available in this build.", receipt: null };
+    }
+    const reservation = voiceRequests.reserve("tts", parts.length, owner.windowId);
+    if (!reservation) {
+      return { status: "refusal", message: VOICE_BUSY_MESSAGE, receipt: null };
+    }
+    const begun = await voiceRequests.begin(reservation);
+    if (!begun.ok) {
+      return { status: begun.status, message: begun.message, receipt: begun.receipt };
+    }
+    try {
+      const outcome = await speech.speak({
+        text: trimmed,
+        ...(input.speed !== undefined ? { speed: input.speed } : {})
+      }, begun.scope);
+      if (outcome.receipt) voiceRequests.emitSettled(owner.windowId, outcome.receipt);
+      return outcome;
+    } catch (error) {
+      console.error("[voice] speaking failed:", redact(error instanceof Error ? error.message : String(error)));
+      const receipt = begun.scope.failUnexpected();
+      if (receipt) voiceRequests.emitSettled(owner.windowId, receipt);
+      const outcome: VoiceSpokenOutcome = {
+        status: "failure",
+        message: "The voice request failed unexpectedly.",
+        receipt
+      };
+      return outcome;
+    }
   });
 
-  handle(IPC.voice.cancel, (payload) => {
+  handleVoice(IPC.voice.cancel, (owner, payload) => {
     const input = voiceCancelInput.parse(payload);
+    if (!owner) {
+      return { operationId: input.operationId, accepted: false, abortedLocally: false, released: false };
+    }
+    if (voiceRequests) {
+      return voiceRequests.cancel(owner.windowId, input.operationId, input.reason);
+    }
     if (!voiceCancelRegistry) {
-      return {
-        operationId: input.operationId,
-        accepted: false,
-        abortedLocally: false,
-        released: false
-      };
+      return { operationId: input.operationId, accepted: false, abortedLocally: false, released: false };
     }
     return input.reason === undefined
       ? voiceCancelRegistry.cancel(input.operationId)
       : voiceCancelRegistry.cancel(input.operationId, input.reason);
+  });
+
+  handleVoice(IPC.voice.operation, (owner, payload) => {
+    const input = voiceOperationInput.parse(payload);
+    if (!owner || !voiceRequests) return null;
+    return voiceRequests.operation(owner.windowId, input.operationId);
   });
 
   /* -------------------------------------------------------------------- images */

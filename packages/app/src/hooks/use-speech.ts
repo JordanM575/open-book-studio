@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { VoiceSpeakers } from "@ai-book-studio/core/ipc";
+import type { VoiceOperationView, VoiceSpeakers } from "@ai-book-studio/core/ipc";
 import { toSpeechText } from "@ai-book-studio/core/speech-text";
+
+/** Where the speaking pipeline actually is, across the host operation and local playback. */
+export type SpeechPhase = "idle" | "synthesizing" | "playing" | "paused" | "cancelling";
 
 /**
  * Speaking.
@@ -27,6 +30,12 @@ export interface Speech {
   error: string | null;
   /** An explanation when the speaking status cannot yet be used. */
   statusMessage: string | null;
+  /** Which stage the voice is in. A cancel during `synthesizing` reaches the host; a stop during `playing` only stops playback. */
+  phase: SpeechPhase;
+  /** The last settled host operation, for the receipt line. Null for device speech and before any request. */
+  receipt: VoiceOperationView | null;
+  /** True right after the author stopped local playback, so the panel can say the settled receipt still stands. */
+  playbackStopped: boolean;
   /** The voices the service offers, when there is one. */
   voices: string[];
   /** Say something. Resolves false when nothing could be said. */
@@ -44,6 +53,12 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
   const [speakerStatus, setSpeakerStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [speaking, setSpeaking] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [phase, setPhase] = useState<SpeechPhase>("idle");
+  const [receipt, setReceipt] = useState<VoiceOperationView | null>(null);
+  const [playbackStopped, setPlaybackStopped] = useState(false);
+  const operationId = useRef<number | null>(null);
+  const operationRevision = useRef(0);
+  const cancelArmed = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const audio = useRef<HTMLAudioElement | null>(null);
   /** Which voice is saying the current utterance, so pause and resume hold the right one. */
@@ -83,6 +98,45 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
     };
   }, [voiceStatusRevision]);
 
+  // Host operation events: adopt the minted id, keep cancelling state honest, keep the receipt.
+  useEffect(() => {
+    const onOperation = window.studio?.voice?.onOperation;
+    if (!onOperation) return undefined;
+    return onOperation((view) => {
+      if (view.kind !== "tts") return;
+      if (operationId.current === null) {
+        if (view.phase !== "starting") return;
+        operationId.current = view.operationId;
+        operationRevision.current = view.viewRevision;
+        if (cancelArmed.current) {
+          cancelArmed.current = false;
+          void window.studio?.voice?.cancel?.({ operationId: view.operationId })?.catch(() => {});
+          setPhase("cancelling");
+        } else {
+          setPhase("synthesizing");
+        }
+        return;
+      }
+      if (view.operationId !== operationId.current) return;
+      if (view.viewRevision <= operationRevision.current) return;
+      operationRevision.current = view.viewRevision;
+      if (view.phase === "in-flight") {
+        setPhase("synthesizing");
+        return;
+      }
+      if (view.phase === "cancelling") {
+        setPhase("cancelling");
+        return;
+      }
+      if (view.phase === "settled") {
+        setReceipt(view);
+        operationId.current = null;
+        cancelArmed.current = false;
+        if (view.status === "cancellation") setPhase("idle");
+      }
+    });
+  }, []);
+
   const selectedUnavailable = speakers?.selected === true && !speakers.available;
   const using: VoiceSource = speakers?.available
     ? "tts"
@@ -112,7 +166,8 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
     }
   }, []);
 
-  const cancel = useCallback(() => {
+  /** Stop local playback and invalidate pending play promises; no host cancel is involved. */
+  const stopPlayback = useCallback(() => {
     token.current += 1;
     source.current = null;
     stopAudio();
@@ -121,6 +176,25 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
     setPaused(false);
     setError(null);
   }, [deviceSupported, stopAudio]);
+
+  const cancel = useCallback(() => {
+    const synthesisInFlight = operationId.current !== null || phase === "synthesizing" || phase === "cancelling";
+    stopPlayback();
+    if (synthesisInFlight) {
+      // Stopping synthesis: ask the host to cancel its request. The late reply is discarded.
+      cancelArmed.current = true;
+      const id = operationId.current;
+      if (id !== null) {
+        void window.studio?.voice?.cancel?.({ operationId: id })?.catch(() => {});
+      }
+      setPhase("cancelling");
+    } else {
+      // Stopping playback: the settled provider request stays settled; no cancel is sent.
+      cancelArmed.current = false;
+      setPhase("idle");
+      setPlaybackStopped(true);
+    }
+  }, [phase, stopPlayback]);
 
   const speakWithDevice = useCallback(
     (text: string, mine: number): boolean => {
@@ -132,16 +206,19 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
         source.current = null;
         setSpeaking(false);
         setPaused(false);
+        setPhase("idle");
       };
       utterance.onerror = () => {
         if (mine !== token.current || source.current !== "device") return;
         source.current = null;
         setSpeaking(false);
         setPaused(false);
+        setPhase("idle");
         setError("This device could not play the speech. Try reading again.");
       };
       source.current = "device";
       setSpeaking(true);
+      setPhase("playing");
       window.speechSynthesis.speak(utterance);
       return true;
     },
@@ -160,6 +237,7 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
       return;
     }
     setPaused(true);
+    setPhase("paused");
   }, [deviceSupported, paused, speaking]);
 
   const resume = useCallback(() => {
@@ -167,12 +245,14 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
     if (source.current === "device") {
       if (deviceSupported) window.speechSynthesis.resume();
       setPaused(false);
+      setPhase("playing");
       return;
     }
     const element = audio.current;
     if (!element || source.current !== "tts") {
       setPaused(false);
       setSpeaking(false);
+      setPhase("idle");
       return;
     }
     // Do not start two overlapping resumes on the same still-paused element.
@@ -188,6 +268,7 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
       source.current = null;
       setPaused(false);
       setSpeaking(false);
+      setPhase("idle");
       setError("The selected speaking service returned audio, but playback was blocked. Try reading again.");
     };
     try {
@@ -195,6 +276,7 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
         if (!current()) return;
         pendingResume.current = null;
         setPaused(false);
+        setPhase("playing");
       }, failed);
     } catch {
       failed();
@@ -206,8 +288,13 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
       // Speech reads every symbol it is given, so the markup goes first and the words are what is spoken.
       const trimmed = toSpeechText(text);
       if (!trimmed) return false;
-      cancel();
+      stopPlayback();
       const mine = token.current;
+      operationId.current = null;
+      operationRevision.current = 0;
+      cancelArmed.current = false;
+      setReceipt(null);
+      setPlaybackStopped(false);
 
       let currentSpeakers: VoiceSpeakers | null = null;
       const read = ++speakerRead.current;
@@ -253,7 +340,15 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
           // A newer request arrived while this one was being spoken; drop this one.
           if (mine !== token.current) return false;
           if (result.ok) {
-            const element = new Audio(result.data.dataUrl);
+            const outcome = result.data;
+            if (outcome.receipt) setReceipt(outcome.receipt);
+            if (outcome.status !== "success") {
+              setPhase("idle");
+              // A deliberate cancel is not an error; a refusal or failure is.
+              if (outcome.status !== "cancellation") setError(outcome.message);
+              return false;
+            }
+            const element = new Audio(outcome.reply.dataUrl);
             audio.current = element;
             element.onended = () => {
               if (mine !== token.current || audio.current !== element || source.current !== "tts") return;
@@ -261,6 +356,7 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
               source.current = null;
               setSpeaking(false);
               setPaused(false);
+              setPhase("idle");
             };
             element.onerror = () => {
               if (mine !== token.current || audio.current !== element || source.current !== "tts") return;
@@ -268,10 +364,12 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
               source.current = null;
               setSpeaking(false);
               setPaused(false);
+              setPhase("idle");
               setError("The selected speaking service returned audio that could not be played.");
             };
             source.current = "tts";
             setSpeaking(true);
+            setPhase("playing");
             const attempt = ++playAttempt.current;
             try {
               await element.play();
@@ -282,15 +380,18 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
               source.current = null;
               setSpeaking(false);
               setPaused(false);
+              setPhase("idle");
               setError("The selected speaking service returned audio, but playback was blocked. Try reading again.");
               return false;
             }
             return mine === token.current;
           }
+          setPhase("idle");
           if (mine === token.current) setError(result.error.message);
           return false;
         } catch (caught) {
           if (mine === token.current) {
+            setPhase("idle");
             setError(caught instanceof Error ? caught.message : "The selected speaking service could not be reached.");
           }
           return false;
@@ -304,7 +405,7 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
 
       return speakWithDevice(trimmed, mine);
     },
-    [cancel, speakWithDevice, stopAudio]
+    [stopPlayback, speakWithDevice, stopAudio]
   );
 
   // Leaving the screen must not leave a voice talking.
@@ -320,6 +421,9 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
     using,
     speaking,
     paused,
+    phase,
+    receipt,
+    playbackStopped,
     error,
     statusMessage,
     voices: speakers?.voices ?? [],

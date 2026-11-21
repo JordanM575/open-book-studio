@@ -122,10 +122,42 @@ let speakersAvailable = false;
 let speakersSelected = false;
 let startRefusal: string | null = null;
 let speakFails = false;
+/** When set, the fake speak waits on this gate before resolving, to hold the synthesis phase open. */
+let speakGate: { promise: Promise<void>; resolve: () => void } | null = null;
 /** When false, utterances stay open until a test ends them, which makes pausing observable. */
 let utteranceAutoEnd = true;
 let pendingEnds: Array<() => void> = [];
 let pendingErrors: Array<() => void> = [];
+
+/** A host operation view for the fixture, filled in per test. */
+function voiceView(overrides: Record<string, unknown> = {}) {
+  return {
+    operationId: 42,
+    viewRevision: 1,
+    kind: "stt",
+    phase: "starting",
+    status: null,
+    cancelled: false,
+    connectionLabel: "Meta",
+    model: "muse-voice-transcribe-1.0",
+    voice: null,
+    plannedChunks: 1,
+    dispatchedChunks: 0,
+    settledChunks: 0,
+    unsentChunks: 0,
+    charge: { state: "pending" },
+    message: null,
+    finalChunkOutcome: null,
+    ...overrides
+  };
+}
+
+function settledReceipt(overrides: Record<string, unknown> = {}) {
+  return voiceView({ phase: "settled", status: "success", charge: { state: "reported", usd: 1.25 }, dispatchedChunks: 1, settledChunks: 1, viewRevision: 9, ...overrides });
+}
+
+let operationListenersSet: Array<(view: ReturnType<typeof voiceView>) => void> = [];
+
 let synthesisPauseCalls = 0;
 let synthesisResumeCalls = 0;
 /** The voice the room had before a test replaced it with the fake service reply. */
@@ -201,8 +233,19 @@ function studio() {
       } }),
       connections: async () => ({ ok: true, data: [{ id: "conn_meta000001", provider: "meta" }] }),
       transcribe: async () => {
-        if (transcribeFails) return { ok: false, error: { code: "invalid", message: "The key was rejected." } };
-        return { ok: true, data: { text: transcript } };
+        if (transcribeFails) return { ok: true, data: { status: "failure", message: "The key was rejected.", receipt: settledReceipt({ status: "failure", charge: { state: "unknown" }, message: "The voice was rejected." }) } };
+        return { ok: true, data: { status: "success", transcript: { text: transcript, provider: "meta", connectionLabel: "Meta", model: "muse-voice-transcribe-1.0", durationMs: 1000, costUsd: null, turns: [] }, receipt: settledReceipt() } };
+      },
+      cancel: async (input: { operationId: number }) => ({ ok: true, data: { operationId: input.operationId, accepted: true, abortedLocally: true, released: false } }),
+      operation: async () => ({ ok: true, data: null }),
+      onOperation: (callback: (view: ReturnType<typeof voiceView>) => void) => {
+        operationListenersSet.push(callback);
+        return () => {
+          operationListenersSet = operationListenersSet.filter((entry) => entry !== callback);
+        };
+      },
+      emitOperation: (view: ReturnType<typeof voiceView>) => {
+        for (const entry of [...operationListenersSet]) entry(view);
       },
       // No speaking connection unless a test asks for one, which is what most authors have on day one.
       speakers: async () => ({ ok: true, data: {
@@ -215,8 +258,9 @@ function studio() {
       } }),
       speak: async (input: { text: string }) => {
         voiceSpoken.push(input.text);
-        if (speakFails) return { ok: false, error: { code: "invalid", message: "The voice was rejected." } };
-        return { ok: true, data: { dataUrl: "data:audio/mpeg;base64," } };
+        if (speakGate) await speakGate.promise;
+        if (speakFails) return { ok: true, data: { status: "failure", message: "The voice was rejected.", receipt: settledReceipt({ status: "failure", charge: { state: "unknown" }, message: "The voice was rejected." }) } };
+        return { ok: true, data: { status: "success", reply: { dataUrl: "data:audio/mpeg;base64,", mimeType: "audio/mpeg", characters: input.text.length, chunks: 1, connectionLabel: "OpenAI", model: "gpt-4o-mini-tts", voice: "alloy" }, receipt: settledReceipt() } };
       }
     }
   };
@@ -234,6 +278,8 @@ beforeEach(() => {
   startRefusal = null;
   turnId = "turn_amb000001";
   speakFails = false;
+  speakGate = null;
+  operationListenersSet = [];
   utteranceAutoEnd = true;
   pendingEnds = [];
   pendingErrors = [];
@@ -1159,5 +1205,113 @@ describe("reading the prose", () => {
       reply.end();
     });
     await testing.waitFor(() => expect(view.queryByTestId("ambient-pause")).toBeNull());
+  });
+});
+
+describe("the voice receipt line", () => {
+  function emitVoice(view: ReturnType<typeof voiceView>) {
+    const voice = (window as unknown as { studio: { voice: { emitOperation: (v: ReturnType<typeof voiceView>) => void } } }).studio.voice;
+    voice.emitOperation(view);
+  }
+
+  test("a provider read-aloud settles into a receipt line with the reported cost", async () => {
+    speakersAvailable = true;
+    installFakeAudio();
+    const { view } = render();
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    await testing.waitFor(() => expect(FakeAudio.instances.length).toBe(1));
+    const receipt = view.getByTestId("ambient-voice-receipt");
+    expect(receipt.textContent).toBe("Provider-reported cost: $1.25.");
+  });
+
+  test("device speech shows no provider receipt line", async () => {
+    speakersAvailable = false;
+    const { view } = render();
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    expect(spoken).toEqual(["The Light. The storm came in low."]);
+    expect(view.queryByTestId("ambient-voice-receipt")).toBeNull();
+  });
+
+  test("stopping synthesis asks the host to cancel and never plays audio", async () => {
+    speakersAvailable = true;
+    installFakeAudio();
+    const cancelMock = mock(async (input: { operationId: number }) => ({ ok: true, data: { operationId: input.operationId, accepted: true, abortedLocally: true, released: false } }));
+    const gate = (() => {
+      let resolve!: () => void;
+      const promise = new Promise<void>((done) => { resolve = done; });
+      return { promise, resolve };
+    })();
+    speakGate = gate;
+    const { view } = render();
+    (window as unknown as { studio: { voice: Record<string, unknown> } }).studio.voice.cancel = cancelMock;
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    // The host announces the operation; the panel enters the synthesizing phase.
+    await testing.act(async () => {
+      emitVoice(voiceView({ kind: "tts", operationId: 42, viewRevision: 1, phase: "starting" }));
+    });
+    const stop = view.getByTestId("ambient-stop-speaking");
+    await testing.act(async () => {
+      await testing.fireEvent.click(stop);
+    });
+    expect(cancelMock).toHaveBeenCalledTimes(1);
+    expect(cancelMock).toHaveBeenCalledWith({ operationId: 42 });
+    // The synthesis resolves late; no audio element may appear and no playback may start.
+    gate.resolve();
+    await testing.act(async () => {
+      await gate.promise;
+    });
+    expect(FakeAudio.instances.length).toBe(0);
+    await testing.act(async () => {
+      emitVoice(voiceView({ kind: "tts", operationId: 42, viewRevision: 2, phase: "settled", status: "cancellation", cancelled: true, charge: { state: "unknown" }, dispatchedChunks: 1, settledChunks: 1 }));
+    });
+    expect(view.getByTestId("ambient-voice-receipt").textContent).toContain("unknown");
+  });
+
+  test("stopping playback does not cancel the settled operation and keeps the receipt", async () => {
+    speakersAvailable = true;
+    installFakeAudio();
+    const cancelMock = mock(async (input: { operationId: number }) => ({ ok: true, data: { operationId: input.operationId, accepted: true, abortedLocally: false, released: false } }));
+    const { view } = render();
+    (window as unknown as { studio: { voice: Record<string, unknown> } }).studio.voice.cancel = cancelMock;
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    await testing.waitFor(() => expect(FakeAudio.instances.length).toBe(1));
+    const reply = FakeAudio.instances[0] as FakeAudio;
+    expect(view.getByTestId("ambient-voice-receipt").textContent).toBe("Provider-reported cost: $1.25.");
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-stop-speaking"));
+    });
+    expect(cancelMock).not.toHaveBeenCalled();
+    expect(reply.pausedCount).toBe(1);
+    expect(view.getByTestId("ambient-voice-receipt").textContent).toBe("Stopped playing. No further provider request was made. Provider-reported cost: $1.25.");
+  });
+
+  test("a refusal with parts dispatched reports them as not played rather than as sent", async () => {
+    speakersAvailable = true;
+    installFakeAudio();
+    speakFails = true;
+    const { view } = render();
+    await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toContain("Chapter One"));
+    await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+    await testing.act(async () => {
+      await testing.fireEvent.click(view.getByTestId("ambient-action-read_aloud"));
+    });
+    await testing.waitFor(() => expect(view.getByTestId("ambient-voice-receipt").textContent).toContain("The voice was rejected."));
+    expect(FakeAudio.instances.length).toBe(0);
   });
 });

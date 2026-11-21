@@ -46,6 +46,7 @@
     "tests/voice-settings.test.tsx",
     "tests/dictation-hook.test.ts",
     "tests/ambient-panel.test.ts",
+    "tests/voice-cancel-journey.test.tsx",
     "tests/notice.test.tsx",
     "tests/error-boundary.test.tsx",
     "tests/manuscript-import-preview.test.tsx",
