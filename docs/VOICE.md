@@ -20,8 +20,14 @@ Before a request, the desktop app checks the recording is a complete RIFF/WAVE f
 documented multipart `request` and WAV parts. OpenRouter receives its documented JSON/base64 WAV
 request. Audio stays in memory and is discarded after the request; it is not saved to a book, profile
 or temporary file. The transcript follows the existing author-triggered insertion flow.
-Cancelling before the transcription call prevents sending; cancelling after a request has started
-ignores its result but cannot recall audio already sent.
+
+Every voice request is minted by the main process before it can touch the network, and the button
+that started it stays a Stop control while it runs. The renderer can ask the host to cancel; it
+cannot cancel anything else, and it cannot see the route, the credential or the internal ids.
+Cancellation before a request is sent stops it without a charge. Cancellation after a request was
+sent asks the host to stop it locally; the provider may still have received it, and whether it cost
+anything stays unknown. A late reply is recorded against the request but never delivered to the
+editor or played aloud. Cancelling a recording before it becomes a request simply discards it.
 
 ## Read-aloud and spoken agent replies
 
@@ -55,6 +61,19 @@ selection may use the computer's local speech synthesis, which is separate from 
 saved selection that has become unavailable, a provider refusal, or a playback failure does **not**
 silently switch to another provider or voice. The safe error is shown and the words remain visible.
 
+## Stop controls and what a request costs
+
+While a dictation or a spoken reply is in flight, its button reads **Stop**. Stop asks the desktop
+host to cancel the request; it does not call anything else and it does not promise the provider
+stopped. Before anything was sent, the receipt says no request was sent and there is no provider
+charge. After a request was sent, the receipt keeps the unknown honest: either no amount was
+reported, a reported subtotal for the parts that reported one, or an exact amount the provider
+reported. An unknown charge is never shown as `$0.00`, and a reported zero is shown as
+`Provider-reported cost: $0.00.` because the provider said so. A request that was split into parts
+reports what was sent, what was not, and which parts remain uncharged. Stopping during playback
+stops playback only; the settled receipt stays. TTS endpoints that report no usage keep reporting an
+unknown cost; nothing is estimated and no cap is implied.
+
 ## Local preferences and browser behavior
 
 Voice preferences are stored in the desktop app's local `studio.json` profile, not in book files,
@@ -70,7 +89,9 @@ is separate and does not imply browser access to provider credentials.
 
 - `bun test packages/core/tests/speech.test.ts packages/core/tests/tts.test.ts` — catalogs, request
   contracts, WAV validation and audio handling.
-- `bun test apps/desktop/tests/voice-service.test.ts apps/desktop/tests/speech.test.ts apps/desktop/tests/voice-settings.test.tsx` — selected providers, safe failures, preference controls and no provider probes from Settings.
+- `bun test packages/core/tests/voice-session/` — pure ledger contracts, including refusal and charge projection.
+- `bun test apps/desktop/tests/voice-service.test.ts apps/desktop/tests/speech.test.ts apps/desktop/tests/voice-transport.test.ts apps/desktop/tests/voice-request.test.ts apps/desktop/tests/voice-cancel-registry.test.ts apps/desktop/tests/voice-cancel-ipc.test.ts apps/desktop/tests/voice-settings.test.tsx` — selected providers, safe failures, preference controls and no provider probes from Settings.
+- `bun test apps/desktop/tests/dictation-hook.test.ts apps/desktop/tests/ambient-panel.test.ts apps/desktop/tests/voice-receipt.test.ts apps/desktop/tests/voice-cancel-journey.test.tsx` — the renderer stop, receipt line and cancellation journeys.
 - `bun run typecheck`, `bun run verify` and `bun run smoke` — repository checks and hidden desktop
   profile/preload round-trip.
 

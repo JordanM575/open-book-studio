@@ -187,4 +187,127 @@ describe("voice cancel registry", () => {
     expect(host.accounting()).toEqual(before);
     expect(host.accounting().slots.stt?.operationId).toBe(operationId);
   });
+
+  test("a bound public id maps to the internal id and projects a safe view", () => {
+    const host = registry();
+    const internalId = begin(host, "stt");
+    host.bind(4242, internalId, { ownerWindowId: 7, kind: "stt", connectionLabel: "Meta", model: "muse-voice-transcribe-1.0", voice: null });
+
+    const starting = host.view(4242);
+    expect(starting).toMatchObject({
+      operationId: 4242,
+      kind: "stt",
+      phase: "starting",
+      status: null,
+      cancelled: false,
+      connectionLabel: "Meta",
+      model: "muse-voice-transcribe-1.0",
+      voice: null,
+      plannedChunks: 1,
+      dispatchedChunks: 0,
+      settledChunks: 0,
+      charge: { state: "pending" }
+    });
+
+    const chunkId = queue(host, internalId);
+    host.dispatch(internalId, chunkId, facts);
+    const inFlight = host.view(4242);
+    expect(inFlight?.phase).toBe("in-flight");
+    expect(inFlight?.dispatchedChunks).toBe(1);
+    expect(inFlight?.charge).toEqual({ state: "pending" });
+
+    host.settle(internalId, chunkId, { outcome: "success", costUsd: 0 });
+    const settled = host.view(4242);
+    expect(settled).toMatchObject({
+      operationId: 4242,
+      phase: "settled",
+      status: "success",
+      charge: { state: "reported", usd: 0 }
+    });
+    expect(settled?.message).toBeNull();
+  });
+
+  test("refuse before dispatch releases the slot and records the refusal, without an abort", () => {
+    const host = registry();
+    const internalId = begin(host, "tts", 2);
+    queue(host, internalId);
+    host.bind(4243, internalId, { ownerWindowId: 7, kind: "tts", connectionLabel: "OpenAI", model: "gpt-4o-mini-tts", voice: "nova" });
+    host.refuse(internalId, "The route changed.");
+    const view = host.view(4243);
+    expect(view).toMatchObject({
+      phase: "settled",
+      status: "refusal",
+      plannedChunks: 2,
+      settledChunks: 0,
+      unsentChunks: 2,
+      charge: { state: "none" },
+      message: "The route changed."
+    });
+    expect(abortCalls).toEqual([]);
+    expect(host.accounting().slots.tts).toBeNull();
+  });
+
+  test("refuse is a no-op once a chunk is dispatched", () => {
+    const host = registry();
+    const internalId = begin(host, "stt");
+    const chunkId = queue(host, internalId);
+    host.dispatch(internalId, chunkId, facts);
+    host.bind(4244, internalId, { ownerWindowId: 7, kind: "stt", connectionLabel: "Meta", model: "m", voice: null });
+    host.refuse(internalId, "Too late.");
+    expect(host.accounting().slots.stt?.operationId).toBe(internalId);
+    expect(host.view(4244)?.status).toBeNull();
+  });
+
+  test("cancelRequest refuses a foreign owner and keeps the binding for the owner", () => {
+    const host = registry();
+    const internalId = begin(host, "stt");
+    queue(host, internalId);
+    host.bind(4245, internalId, { ownerWindowId: 7, kind: "stt", connectionLabel: "Meta", model: "m", voice: null });
+
+    const foreign = host.cancelRequest(4245, 8);
+    expect(foreign).toEqual({ operationId: 4245, accepted: false, abortedLocally: false, released: false });
+    expect(host.accounting().slots.stt?.cancelled).toBe(false);
+
+    const own = host.cancelRequest(4245, 7, "Stop.");
+    expect(own).toEqual({ operationId: 4245, accepted: true, abortedLocally: false, released: true });
+
+    // The settled view stays readable by id; the receipt names the public id.
+    expect(host.view(4245)?.status).toBe("cancellation");
+  });
+
+  test("a late result cannot release a newer slot and the receipt stays cancellation", () => {
+    const host = registry();
+    const first = begin(host, "stt");
+    const firstChunk = queue(host, first);
+    host.dispatch(first, firstChunk, facts);
+    host.bind(4246, first, { ownerWindowId: 7, kind: "stt", connectionLabel: "Meta", model: "m", voice: null });
+    host.cancelRequest(4246, 7, "Stop.");
+    // A cancelled STT op keeps its slot until its outcome lands, so a second STT waits;
+    // an independent kind may start. Either way the late result must not release the newer slot.
+    expect(host.begin("stt", 1, facts)).toBeNull();
+    const other = begin(host, "tts");
+    host.settle(first, firstChunk, { outcome: "success", costUsd: 0.5 });
+    expect(host.accounting().slots.tts?.operationId).toBe(other);
+    expect(host.view(4246)?.status).toBe("cancellation");
+    expect(host.view(4246)?.charge).toEqual({ state: "reported", usd: 0.5 });
+    expect(host.view(4246)?.finalChunkOutcome).toBe("success");
+  });
+
+  test("ledger history capacity refuses new operations instead of evicting", () => {
+    const host = registry();
+    for (let index = 0; index < 255; index += 1) {
+      const id = begin(host, "stt", 1);
+      const chunkId = host.queue(id);
+      if (chunkId === null) throw new Error("queue refused");
+      host.dispatch(id, chunkId, facts);
+      host.settle(id, chunkId, { outcome: "success", costUsd: 0 });
+    }
+    expect(host.accounting().receipts).toHaveLength(255);
+    // One more slot may begin; the one after is refused and nothing is evicted.
+    const last = begin(host, "stt", 1);
+    expect(host.begin("stt", 1, facts)).toBeNull();
+    expect(host.beginRefusal()).toContain("history is full");
+    expect(host.accounting().receipts).toHaveLength(255);
+    host.settle(last, 1, { outcome: "success", costUsd: 0 });
+  });
 });

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Mic, MicOff, Pause, Play, Volume2 } from "lucide-react";
+import { ChevronDown, ChevronUp, Mic, MicOff, Pause, Play, Square, Volume2 } from "lucide-react";
 import type { AmbientStatus } from "@ai-book-studio/core/agent/ambient";
 import type { AgentEvent } from "@ai-book-studio/core/agent";
 import { Button } from "@ai-book-studio/ui/button";
 import { must } from "../lib/utils";
 import { useSpeech } from "../hooks/use-speech";
 import { useDictation } from "../hooks/use-dictation";
+import { voiceReceiptLine, playbackStoppedLine } from "../lib/voice-receipt";
 
 interface Props {
   bookId: string;
@@ -271,6 +272,17 @@ export function AmbientPanel({
 
   const actions = status?.actions ?? [];
   const dictating = dictation.state === "recording";
+  const transcribing = dictation.state === "transcribing" || dictation.state === "cancelling";
+  // The voice receipt is its own line, never folded into the agent note: a stop is not a failure,
+  // and an unreported charge is not a free one.
+  const voiceReceipt = speech.receipt ?? dictation.receipt;
+  const voiceReceiptText = voiceReceipt
+    ? speech.playbackStopped && voiceReceipt === speech.receipt
+      ? playbackStoppedLine(voiceReceipt)
+      : voiceReceiptLine(voiceReceipt)
+    : null;
+  const synthesising = speech.phase === "synthesizing" || speech.phase === "cancelling";
+  const speaking = synthesising || speech.phase === "playing" || speech.phase === "paused";
 
   return (
     <section
@@ -307,6 +319,11 @@ export function AmbientPanel({
               {[outcomeNote, note].filter(Boolean).join(" · ")}
             </p>
           ) : null}
+          {voiceReceiptText ? (
+            <p className="mt-1 text-(length:--text-caption-size) text-muted-foreground" role="status" data-testid="ambient-voice-receipt">
+              {voiceReceiptText}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -323,6 +340,19 @@ export function AmbientPanel({
               data-testid="ambient-pause"
             >
               {speech.paused ? <Play size={16} /> : <Pause size={16} />}
+            </Button>
+          ) : null}
+          {speaking ? (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => speech.cancel()}
+              aria-label="Stop speaking"
+              title={synthesising ? "Stop the speaking request" : "Stop playback"}
+              disabled={speech.phase === "cancelling"}
+              data-testid="ambient-stop-speaking"
+            >
+              <Square size={16} />
             </Button>
           ) : null}
           <Button
@@ -381,28 +411,30 @@ export function AmbientPanel({
               onClick={() => {
                 if (dictating) {
                   dictation.stop();
+                } else if (transcribing) {
+                  dictation.cancel();
                 } else {
                   setHeard(null);
                   void dictation.start();
                 }
               }}
-              // Disabled mid-transcription so a second press cannot start a second recording, and
-              // never while the agent is writing, because the answer would arrive mid-sentence.
-              disabled={dictation.state === "transcribing" || dictation.state === "requesting" || running}
-              aria-label={dictating ? "Stop and send what you said" : "Speak to the agent"}
+              // Disabled only before the request can be cancelled; mid-transcription the same
+              // press asks the host to stop the request without sending anything further.
+              disabled={(dictation.state === "requesting" || dictation.state === "cancelling") || running}
+              aria-label={dictating ? "Stop and send what you said" : transcribing ? "Stop transcription" : "Speak to the agent"}
               aria-pressed={dictating}
               title={
                 dictation.state === "requesting"
                   ? "Waiting for the microphone…"
-                  : dictation.state === "transcribing"
-                    ? "Turning what you said into text…"
+                  : transcribing
+                    ? "Stop the transcription request"
                     : dictating
                       ? "Stop and send"
                       : "Speak to the agent"
               }
               data-testid="ambient-mic"
             >
-              {dictating ? <MicOff size={14} /> : <Mic size={14} />}
+              {dictating ? <MicOff size={14} /> : transcribing ? <Square size={14} /> : <Mic size={14} />}
             </Button>
             <input
               className="min-w-0 flex-1 rounded-[var(--corner-md)] border border-border bg-[var(--secondary)] px-3 py-2 text-(length:--text-subheadline-size) outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
@@ -435,7 +467,9 @@ export function AmbientPanel({
                 ? "Waiting for the microphone…"
                 : dictation.state === "transcribing"
                   ? "Turning what you said into text…"
-                  : `Listening… ${(dictation.elapsedMs / 1000).toFixed(1)}s`}
+                  : dictation.state === "cancelling"
+                    ? "Stopping…"
+                    : `Listening… ${(dictation.elapsedMs / 1000).toFixed(1)}s`}
             </p>
           ) : null}
           {speech.using === "device" ? (

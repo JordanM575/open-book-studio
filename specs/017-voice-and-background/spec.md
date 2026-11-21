@@ -1,6 +1,6 @@
 # Voice notes and background runs
 
-**Status:** In progress — PTT/background first slice implemented; D-200 hands-free extension accepted
+**Status:** In progress — T016 delivered at source/test level (synthetic evidence); T017 hands-free and device/packaged evidence remain open; D-200 hands-free extension accepted
 **Number:** 017
 **Depends on:** [011](../011-model-access/spec.md) provider connections, [002](../002-studio-v1/spec.md)
 agent runtime and threads, [010](../010-web-target/spec.md) build split.

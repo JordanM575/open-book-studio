@@ -171,6 +171,10 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
         Promise.resolve(
           failure("invalid", "EPUB export is available in the desktop app. Export the library archive instead.")
         ),
+      exportCancel: () =>
+        Promise.resolve(
+          failure("invalid", "Export cancellation is available in the desktop app. Export the library archive instead.")
+        ),
       exportImages: () =>
         Promise.resolve(
           failure("invalid", "Image export is available in the desktop app. Export the library archive instead.")
@@ -395,7 +399,15 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
             "unsupported",
             "Cancelling a voice request is available in the desktop app."
           )
-        )
+        ),
+      operation: () =>
+        Promise.resolve(
+          failure(
+            "unsupported",
+            "Voice request receipts are available in the desktop app."
+          )
+        ),
+      onOperation: () => () => {}
     },
     images: {
       list: () => safe(async () => ({ manifest: { schemaVersion: 1, images: [] }, warning: null })),

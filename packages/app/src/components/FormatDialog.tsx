@@ -1,10 +1,12 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, Download, Trash2 } from "lucide-react";
 import type {
+  ManuscriptExportOutcome,
   MarkdownFolderCaptureResult,
   MarkdownFolderWarningView,
   Result
 } from "@ai-book-studio/core/ipc";
+import { validateMarkdownFolderName } from "@ai-book-studio/core/markdown-folder/name";
 import {
   MATTER_KINDS,
   MATTER_LIMITS,
@@ -32,7 +34,7 @@ import { Button } from "@ai-book-studio/ui/button";
 import { Dialog, DialogContent, DialogFooter } from "@ai-book-studio/ui/dialog";
 import { NativeSelect, NativeSelectOption } from "@ai-book-studio/ui/components/native-select";
 import { Textarea } from "@ai-book-studio/ui/components/textarea";
-import { exportBlockedMessage, exportReceipt, type ManuscriptExportReceipt } from "../lib/export-save";
+import { exportBlockedMessage, exportReceipt, isCancelledOutcome } from "../lib/export-save";
 import { must } from "../lib/utils";
 import type { SaveStatus } from "./ManuscriptEditor";
 
@@ -58,17 +60,20 @@ const TARGET_COPY: Record<FormatTarget, { name: string; note: string }> = {
   Markdown: { name: "Markdown", note: "Plain text with chapter headings. The typography below does not apply." },
   "Markdown folder": {
     name: "Markdown folder",
-    note: "A folder of Markdown files in book order, with copied images. The typography below does not apply."
+    note: "A folder of Markdown files in book order, with copied images. The typography below does not apply. Creates a new folder. An existing folder is not replaced."
   }
 };
 
 type SingleFileTarget = Exclude<FormatTarget, "Markdown folder">;
 
-const EXPORTS: Record<SingleFileTarget, (bookId: string) => Promise<Result<string | ManuscriptExportReceipt | null>>> = {
-  DOCX: (bookId) => window.studio.books.exportDocx(bookId),
-  PDF: (bookId) => window.studio.books.exportPdf(bookId),
-  EPUB: (bookId) => window.studio.books.exportEpub(bookId),
-  Markdown: (bookId) => window.studio.books.exportMarkdown(bookId)
+const EXPORTS: Record<
+  SingleFileTarget,
+  (bookId: string, attemptId: string) => Promise<Result<ManuscriptExportOutcome | null>>
+> = {
+  DOCX: (bookId, attemptId) => window.studio.books.exportDocx(bookId, attemptId),
+  PDF: (bookId, attemptId) => window.studio.books.exportPdf(bookId, attemptId),
+  EPUB: (bookId, attemptId) => window.studio.books.exportEpub(bookId, attemptId),
+  Markdown: (bookId, attemptId) => window.studio.books.exportMarkdown(bookId, attemptId)
 };
 
 type ReadyFolderCapture = Extract<MarkdownFolderCaptureResult, { status: "ready" }>;
@@ -78,7 +83,14 @@ type FolderPhase =
   | { kind: "capturing" }
   | { kind: "consent"; capture: ReadyFolderCapture; superseded: boolean }
   | { kind: "publishing"; capture: ReadyFolderCapture }
-  | { kind: "published"; capture: ReadyFolderCapture; destinationPath: string; files: string[]; warnings: MarkdownFolderWarningView[] }
+  | {
+      kind: "published";
+      capture: ReadyFolderCapture;
+      destinationPath: string;
+      files: string[];
+      warnings: MarkdownFolderWarningView[];
+      cleanupLeftover?: { name: string; path: string };
+    }
   | { kind: "cancelled"; message: string }
   | { kind: "unknown"; message: string; destinationPath: string | null }
   | { kind: "error"; message: string };
@@ -101,7 +113,11 @@ function legacyReasonText(reason: ReadyFolderCapture["excludedLegacy"][number]["
 
 
 
-type ExportNote = { kind: "saved"; message: string; path: string; warnings: string[]; target: string } | { kind: "error"; message: string };
+type ExportNote =
+  | { kind: "saved"; message: string; path: string; warnings: string[]; target: string }
+  | { kind: "error"; message: string }
+  | { kind: "cancelled"; message: string }
+  | { kind: "status"; message: string };
 
 const LINE_HEIGHT: Record<ManuscriptSettings["lineSpacing"], number> = {
   Single: 1,
@@ -208,6 +224,11 @@ export function FormatDialog({
   const [folder, setFolder] = useState<FolderPhase>({ kind: "idle" });
   const folderPending = useRef<string | null>(null);
   const [folderCancelling, setFolderCancelling] = useState(false);
+  const [folderName, setFolderName] = useState("");
+  const [folderNotice, setFolderNotice] = useState<string | null>(null);
+  const singleAttemptId = useRef<string | null>(null);
+  const [singleAttemptActive, setSingleAttemptActive] = useState(false);
+  const [exportCancelling, setExportCancelling] = useState(false);
   const [matter, setMatter] = useState<BookMatter | null>(() => readMatter(book).matter);
   const [kind, setKind] = useState<MatterKind>("copyright");
   const [removing, setRemoving] = useState<string | null>(null);
@@ -243,6 +264,11 @@ export function FormatDialog({
     setFolder({ kind: "idle" });
     folderPending.current = null;
     setFolderCancelling(false);
+    setFolderName("");
+    setFolderNotice(null);
+    singleAttemptId.current = null;
+    setSingleAttemptActive(false);
+    setExportCancelling(false);
     return () => { exportGeneration.current++; };
   }, [open, bookId]);
 
@@ -421,6 +447,7 @@ export function FormatDialog({
     setExporting(true);
     setNote(null);
     setFolderCancelling(false);
+    setFolderNotice(null);
     setFolder({ kind: "capturing" });
     try {
       await prepareExport();
@@ -446,6 +473,8 @@ export function FormatDialog({
       }
       const superseded = hadPending !== null && hadPending !== capture.attemptId;
       folderPending.current = capture.attemptId;
+      setFolderName(capture.suggestedFolderName);
+      setFolderNotice(null);
       setFolder({ kind: "consent", capture, superseded });
     } catch (error) {
       if (currentExport()) setFolder({ kind: "error", message: error instanceof Error ? error.message : String(error) });
@@ -460,15 +489,28 @@ export function FormatDialog({
   /** Publish the consented collection. A cancelled picker returns to the same consent with nothing written. */
   const publishFolder = async (capture: ReadyFolderCapture): Promise<void> => {
     if (exportPending.current || !open) return;
+    const validated = validateMarkdownFolderName(folderName.trim() ? folderName : capture.suggestedFolderName);
+    if (!validated.ok) {
+      setFolderNotice(validated.message);
+      setFolder({ kind: "consent", capture, superseded: false });
+      return;
+    }
     const generation = ++exportGeneration.current;
     const originId = bookId;
     const currentExport = () => exportGeneration.current === generation && isOpen.current && shownBookId.current === originId;
     exportPending.current = true;
     setExporting(true);
     setFolderCancelling(false);
+    setFolderNotice(null);
     setFolder({ kind: "publishing", capture });
     try {
-      const outcome = await must(window.studio.books.exportMarkdownFolderPublish({ bookId, attemptId: capture.attemptId }));
+      const outcome = await must(
+        window.studio.books.exportMarkdownFolderPublish({
+          bookId,
+          attemptId: capture.attemptId,
+          folderName: validated.name
+        })
+      );
       if (!currentExport()) return;
       if (outcome === null) {
         setFolder({ kind: "consent", capture, superseded: false });
@@ -476,10 +518,20 @@ export function FormatDialog({
       }
       if (outcome.status === "published") {
         folderPending.current = null;
-        setFolder({ kind: "published", capture, destinationPath: outcome.destinationPath, files: outcome.files, warnings: outcome.warnings });
+        setFolder({
+          kind: "published",
+          capture,
+          destinationPath: outcome.destinationPath,
+          files: outcome.files,
+          warnings: outcome.warnings,
+          ...(outcome.cleanupLeftover ? { cleanupLeftover: outcome.cleanupLeftover } : {})
+        });
       } else if (outcome.status === "cancelled") {
         folderPending.current = null;
         setFolder({ kind: "cancelled", message: outcome.message });
+      } else if (outcome.status === "name-conflict" || outcome.status === "name-invalid") {
+        setFolderNotice(outcome.message);
+        setFolder({ kind: "consent", capture, superseded: false });
       } else {
         folderPending.current = null;
         setFolder({ kind: "unknown", message: outcome.message, destinationPath: outcome.destinationPath });
@@ -500,7 +552,12 @@ export function FormatDialog({
       const result = await must(window.studio.books.exportMarkdownFolderCancel({ bookId, attemptId: capture.attemptId }));
       folderPending.current = null;
       if (result.status === "too-late") {
-        setFolder({ kind: "unknown", message: "Cancellation arrived after publication began, so the outcome could not be confirmed as cancelled. Check the destination folder before trying again.", destinationPath: null });
+        setFolder({
+          kind: "unknown",
+          message:
+            "Cancellation arrived after publication began. The export is finishing; it will report whether the folder was published.",
+          destinationPath: null
+        });
         return;
       }
       setFolder({ kind: "cancelled", message: "The Markdown folder export was cancelled. Nothing was published." });
@@ -513,7 +570,12 @@ export function FormatDialog({
   const cancelFolderPublishing = async (capture: ReadyFolderCapture): Promise<void> => {
     setFolderCancelling(true);
     try {
-      await must(window.studio.books.exportMarkdownFolderCancel({ bookId, attemptId: capture.attemptId }));
+      const reply = await must(window.studio.books.exportMarkdownFolderCancel({ bookId, attemptId: capture.attemptId }));
+      if (reply.status === "too-late") {
+        setFolderNotice(
+          "Cancellation arrived after publication began. The export is finishing; it will report whether the folder was published."
+        );
+      }
     } catch {
       // The publish reply that is still in flight reports the real settlement.
     }
@@ -528,6 +590,10 @@ export function FormatDialog({
     exportPending.current = true;
     setExporting(true);
     setNote(null);
+    setSingleAttemptActive(false);
+    setExportCancelling(false);
+    const attemptId = crypto.randomUUID();
+    singleAttemptId.current = attemptId;
     try {
       await prepareExport();
       if (!currentExport()) return;
@@ -542,16 +608,46 @@ export function FormatDialog({
         setNote({ kind: "error", message: exportBlockedMessage(saved) });
         return;
       }
-      const receipt = exportReceipt(await must(EXPORTS[target as SingleFileTarget](bookId)));
+      setSingleAttemptActive(true);
+      const outcome = await must(EXPORTS[target as SingleFileTarget](bookId, attemptId));
+      if (!currentExport()) return;
+      if (isCancelledOutcome(outcome)) {
+        setNote({ kind: "cancelled", message: outcome.message });
+        return;
+      }
+      const receipt = exportReceipt(outcome);
       // A cancelled picker or a declined replacement wrote nothing, so there is nothing to say.
-      if (currentExport() && receipt) setNote({ kind: "saved", message: `Saved ${receipt.path.split(/[\\/]/).pop() ?? receipt.path}`, ...receipt, target: TARGET_COPY[target].name });
+      if (receipt) setNote({ kind: "saved", message: `Saved ${receipt.path.split(/[\\/]/).pop() ?? receipt.path}`, ...receipt, target: TARGET_COPY[target].name });
     } catch (error) {
       if (currentExport()) setNote({ kind: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       if (currentExport()) {
         exportPending.current = false;
+        singleAttemptId.current = null;
+        setSingleAttemptActive(false);
+        setExportCancelling(false);
         setExporting(false);
       }
+    }
+  };
+
+  /** Ask the main process to stop this single-file export before publication. */
+  const cancelSingleExport = async (): Promise<void> => {
+    const attemptId = singleAttemptId.current;
+    if (!attemptId || exportCancelling) return;
+    setExportCancelling(true);
+    try {
+      const reply = await must(window.studio.books.exportCancel({ bookId, attemptId }));
+      if (reply.status === "too-late") {
+        setNote({
+          kind: "status",
+          message:
+            "Cancellation arrived after publication began. The export is finishing; it will report whether the file was published."
+        });
+      }
+    } catch (error) {
+      // A failed cancel request claims nothing; the export reply settles the real outcome.
+      setNote({ kind: "status", message: error instanceof Error ? error.message : String(error) });
     }
   };
 
@@ -587,6 +683,11 @@ export function FormatDialog({
     </section>
   );
   const section = (item: MatterSection) => page(item.id, item.title, item.text, MATTER_STYLE[item.kind]);
+  const effectiveFolderName =
+    folder.kind === "consent" || folder.kind === "publishing"
+      ? (folderName.trim() ? folderName : folder.capture.suggestedFolderName)
+      : folderName;
+  const folderNameCheck = folder.kind === "consent" ? validateMarkdownFolderName(effectiveFolderName) : null;
 
   return (
     // The dialog stays open while an export runs, so its outcome is never shown to a closed dialog.
@@ -614,17 +715,38 @@ export function FormatDialog({
                   {note.message}
                 </p>
               ) : null}
+              {note?.kind === "cancelled" ? (
+                <p role="status" data-testid="format-export-cancelled">
+                  {note.message}
+                </p>
+              ) : null}
+              {note?.kind === "status" ? (
+                <p role="status" data-testid="format-export-status">
+                  {note.message}
+                </p>
+              ) : null}
             </div>
-            <Button
-              variant="primary"
-              className="shrink-0"
-              onClick={() => void runExport()}
-              disabled={!canExport || exporting}
-              data-testid="format-export"
-            >
-              <Download size={15} />
-              {exporting ? "Exporting…" : `Export ${TARGET_COPY[target].name}`}
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              {target !== "Markdown folder" && singleAttemptActive ? (
+                <Button
+                  data-testid="format-export-cancel"
+                  disabled={exportCancelling}
+                  onClick={() => void cancelSingleExport()}
+                >
+                  {exportCancelling ? "Cancelling…" : "Cancel export"}
+                </Button>
+              ) : null}
+              <Button
+                variant="primary"
+                className="shrink-0"
+                onClick={() => void runExport()}
+                disabled={!canExport || exporting}
+                data-testid="format-export"
+              >
+                <Download size={15} />
+                {exporting ? "Exporting…" : `Export ${TARGET_COPY[target].name}`}
+              </Button>
+            </div>
           </DialogFooter>
         }
       >
@@ -679,6 +801,28 @@ export function FormatDialog({
                       A new collection replaced the previous one. The earlier choice no longer applies. Review this collection before continuing.
                     </p>
                   ) : null}
+                  {folderNotice ? (
+                    <p role="status" data-testid="markdown-folder-notice" className={SMALL}>
+                      {folderNotice}
+                    </p>
+                  ) : null}
+                  <label className={LABEL}>
+                    Folder name
+                    <input
+                      className={FIELD}
+                      value={folderName}
+                      onChange={(event) => setFolderName(event.target.value)}
+                      data-testid="markdown-folder-name"
+                    />
+                  </label>
+                  <p className={`${SMALL} text-muted-foreground`}>
+                    Creates a new folder. An existing folder is not replaced.
+                  </p>
+                  {folderNameCheck && !folderNameCheck.ok ? (
+                    <p role="alert" data-testid="markdown-folder-name-error" className={ALERT}>
+                      {folderNameCheck.message}
+                    </p>
+                  ) : null}
                   {folder.capture.warnings.length > 0 ? (
                     <div>
                       <p className="font-medium">Warnings</p>
@@ -706,7 +850,12 @@ export function FormatDialog({
                     </div>
                   ) : null}
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="primary" data-testid="markdown-folder-continue" onClick={() => void publishFolder(folder.capture)}>
+                    <Button
+                      variant="primary"
+                      data-testid="markdown-folder-continue"
+                      disabled={folderNameCheck ? !folderNameCheck.ok : false}
+                      onClick={() => void publishFolder(folder.capture)}
+                    >
                       {folder.capture.excludedLegacy.length > 0 ? "Continue without them" : "Continue"}
                     </Button>
                     <Button data-testid="markdown-folder-cancel" onClick={() => void cancelFolderConsent(folder.capture)}>
@@ -716,13 +865,29 @@ export function FormatDialog({
                 </div>
               ) : null}
               {folder.kind === "publishing" ? (
-                <div className={`${BOX} flex flex-wrap items-center gap-3`} data-testid="markdown-folder-progress">
-                  <p role="status" className={SMALL}>
-                    {folderCancelling ? "Cancelling the Markdown folder export…" : "Publishing the Markdown folder…"}
-                  </p>
-                  <Button data-testid="markdown-folder-cancel-export" disabled={folderCancelling} onClick={() => void cancelFolderPublishing(folder.capture)}>
-                    Cancel export
-                  </Button>
+                <div className={`${BOX} space-y-2`} data-testid="markdown-folder-progress">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <p role="status" className={SMALL}>
+                      {folderCancelling ? "Cancelling the Markdown folder export…" : "Publishing the Markdown folder…"}
+                    </p>
+                    <Button data-testid="markdown-folder-cancel-export" disabled={folderCancelling} onClick={() => void cancelFolderPublishing(folder.capture)}>
+                      Cancel export
+                    </Button>
+                  </div>
+                  {folderNotice ? (
+                    <p role="status" data-testid="markdown-folder-cancel-note" className={SMALL}>
+                      {folderNotice}
+                    </p>
+                  ) : null}
+                  <label className={LABEL}>
+                    Folder name
+                    <input
+                      className={FIELD}
+                      value={effectiveFolderName}
+                      disabled
+                      data-testid="markdown-folder-name"
+                    />
+                  </label>
                 </div>
               ) : null}
               {folder.kind === "published" ? (
@@ -736,6 +901,12 @@ export function FormatDialog({
                   <p className={SMALL}>
                     Saved data collected for this export. Changes made while collecting can mix observations, and edits after collection are not included.
                   </p>
+                  {folder.cleanupLeftover ? (
+                    <p role="status" data-testid="markdown-folder-cleanup" className={`${SMALL} break-words`}>
+                      Published. Every listed file was written. One temporary folder could not be removed:{" "}
+                      {folder.cleanupLeftover.path}. You can delete it.
+                    </p>
+                  ) : null}
                   <div>
                     <p className="font-medium">Written files</p>
                     <ul aria-label="Written files" data-testid="markdown-folder-files" className="mt-1 list-disc space-y-1 pl-5">

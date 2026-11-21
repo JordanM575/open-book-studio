@@ -1,11 +1,23 @@
-import type { ManuscriptExportReceipt } from "@ai-book-studio/core/ipc";
+import type { ManuscriptExportOutcome, ManuscriptExportReceipt } from "@ai-book-studio/core/ipc";
 import type { SaveStatus } from "../components/ManuscriptEditor";
 
-export type { ManuscriptExportReceipt } from "@ai-book-studio/core/ipc";
+export type { ManuscriptExportOutcome, ManuscriptExportReceipt } from "@ai-book-studio/core/ipc";
+
+/** A single-file export the author cancelled before publication; no file was written. */
+export function isCancelledOutcome(
+  outcome: string | ManuscriptExportOutcome | null
+): outcome is Extract<ManuscriptExportOutcome, { status: "cancelled" }> {
+  return typeof outcome === "object" && outcome !== null && "status" in outcome && outcome.status === "cancelled";
+}
 
 /** Retain path-only fixture compatibility; production IPC returns the shared receipt. */
-export function exportReceipt(result: string | ManuscriptExportReceipt | null): ManuscriptExportReceipt | null {
-  return typeof result === "string" ? { path: result, warnings: [] } : result;
+export function exportReceipt(
+  result: string | ManuscriptExportOutcome | null
+): ManuscriptExportReceipt | null {
+  if (result === null) return null;
+  if (typeof result === "string") return { path: result, warnings: [] };
+  if (isCancelledOutcome(result)) return null;
+  return result;
 }
 
 /**

@@ -89,7 +89,7 @@ using a microphone. New work does not close 038 T022 or the remaining manual/dev
   register/replace/revoke/clear, window-close/quit revocation) is checked through pure
   `permitsAudio`/`activeAudioGrant`; 37 synthetic host tests pass. Actual OS grants/microphone,
   mounted hands-free capture, owned-track stop and T022–T024 remain unclaimed.
-- [ ] T016 Add host-owned cancellable STT/TTS request IDs, per-chunk route checks and honest unknown-charge state.
+- [x] T016 Add host-owned cancellable STT/TTS request IDs, per-chunk route checks and honest unknown-charge state.
   Partial: monotonic operation and chunk ids, one-slot backpressure, an exact session, route and
   permission recheck immediately before each dispatch, and honest success, refusal, failure,
   cancellation, unsent, reported and unknown charge remain in the pure ledger. The desktop host now
@@ -101,6 +101,38 @@ using a microphone. New work does not close 038 T022 or the remaining manual/dev
   The browser build refuses it. Existing dictation and speaking calls are not routed through the
   registry. Nothing here shows that a remote provider observed the cancel, and there is no live
   call or device evidence. This task stays open.
+  Record (2026-11-20/21): delivered and merged. PR #122 merged as
+  5799142c8437b725a43984f02f9636ff5631a5e8. Independent exact-head build review ACCEPTed at
+  14e6ba7450ee0858e091fa03ac2fbfc74df88ecd (+4319/-603, 36 files); its re-run of the focused suites
+  in a temporary sibling copy passed 413/413 (voice-session 171, voice-cancel-registry/-ipc/
+  -request/-service/-transport 56, speech/dictation-hook/ambient-panel/voice-receipt/
+  voice-cancel-journey 118, ipc-handlers + browser-api 68), `tsconfig.node.json` clean,
+  `tsconfig.web.json` exit 1 with only the known pre-existing WorkspaceView TS2322
+  (`BoundChapterHistoryApi | null` vs `ChapterHistoryApi`). Independent merge review ACCEPTed at
+  3cf4e48 (read-only): 35 of 36 merged files blob-identical to the accepted build, `CHANGELOG.md`
+  the sole difference (union of both parents, intact), no task box moved vs origin/main, the only
+  checkbox delta vs the accepted head being 039 T005 `- [ ]` -> `- [x]` arrived byte-identical from
+  origin/main. What landed: host-minted public operation ids (minted before any route resolution;
+  the renderer never sees the internal ledger id), reservation-before-mint with a bounded
+  reservation set, per-send/per-chunk route rechecks (saved selection, connection, provider/model/
+  voice, endpoint identity `endpoint:<sha256[:16]>`, host revision bumped on every voice-settings
+  write and connection removal, session token and permission) that refuse with zero provider calls,
+  typed success/refusal/failure/cancellation outcomes, honest none/reported/unknown/mixed charge
+  states (a reported zero renders as `Provider-reported cost: $0.00.`; unknown never renders as
+  zero), an additive `voice.operation` IPC channel plus `voice:operation-event` and a browser-build
+  refusal, renderer Stop controls and `role="status"` receipt lines (`voice-receipt` /
+  `ambient-voice-receipt`). No persistence was added: receipts are memory-only and a restart
+  honestly forgets them. Disclosed deviations, all judged benign by review: the `live-checks.ts`
+  signature-only adaptation for the manual diagnostic; the `ipc-handlers.test.ts` migration to the
+  scope contract; the one-line tsconfig include/exclude for the new DOM journey test; and the
+  `stateOf` type-narrowing helper in `voice-request.ts`. Non-blocking notes carried forward: stale
+  `refuse` doc comments in `transport.ts`/`voice-cancel-registry.ts`; `use-speech` has no
+  pre-`starting` cancel-arm path (guarded by UI phase; the token guard still applies); the
+  `voice.cancel` legacy fallback without an owner check when no request host is attached; and
+  `VoiceCancelRegistry.view()` mints a fresh `viewRevision` per call. Evidence is synthetic-only:
+  fake mic/recorder, in-memory vault, scripted fetch; no live provider, microphone, device,
+  packaged app or real manuscript was exercised or claimed. 038 T022 stays unchecked and out of
+  scope; T017-T024 remain open.
 - [ ] T017 Mount session/transcript/correct/confirm/stop controls with actual Discuss/book/chapter/thread binding.
   Partial: the Discuss panel mounts an explicit hands-free bar and a host-neutral controller
   (`packages/app/src/lib/hands-free.ts`, `components/HandsFreeBar.tsx`,

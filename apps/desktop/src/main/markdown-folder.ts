@@ -294,30 +294,37 @@ export interface MarkdownFolderAttempt {
   destinationPath: string | null;
 }
 
+/** An accepted author cancel won the commit-window decision. Nothing was created. */
+export class MarkdownFolderCommitCancelled extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MarkdownFolderCommitCancelled";
+  }
+}
+
+/** A new capture or a replaced plan won the commit-window decision. Nothing was created. */
+export class MarkdownFolderCommitSuperseded extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "MarkdownFolderCommitSuperseded";
+  }
+}
+
 /** Truthful settlement of one attempt. Known pre-commit refusals throw instead of settling here. */
 export type MarkdownFolderSettlement =
-  | { status: "published"; destinationPath: string; files: string[]; warnings: MarkdownFolderPlan["warnings"] }
+  | {
+      status: "published";
+      destinationPath: string;
+      files: string[];
+      warnings: MarkdownFolderPlan["warnings"];
+      cleanupLeftover?: { name: string; path: string };
+    }
+  | { status: "name-conflict"; message: string }
   | { status: "cancelled"; message: string }
   | { status: "unknown"; message: string; destinationPath: string | null };
 
 /** A safe folder name for the destination picker, derived from the book title in the main process. */
-export function suggestMarkdownFolderName(title: string): string {
-  const slug = title
-    .normalize("NFC")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/^-+|-+$/g, "");
-  let kept = "";
-  let bytes = 0;
-  const encoder = new TextEncoder();
-  for (const character of Array.from(slug).slice(0, 60)) {
-    bytes += encoder.encode(character).byteLength;
-    if (bytes > 180) break;
-    kept += character;
-  }
-  return `${kept.replace(/-+$/, "") || "untitled-book"}-markdown`;
-}
+export { suggestMarkdownFolderName } from "@ai-book-studio/core/markdown-folder/name";
 
 export class MarkdownFolderHostService {
   private admittedSequences = new Map<string, number>();
@@ -777,9 +784,15 @@ export class MarkdownFolderHostService {
 
   /**
    * Publish one captured attempt to a destination the main process chose. The internal staging
-   * hook checks cancellation and consent currency before the commit; it is never an IPC input.
+   * hook is the single synchronous decision point: an accepted cancel, a superseded consent or a
+   * replaced plan is refused before the destination is created. The third argument is a
+   * test-only seam and is never reachable from IPC.
    */
-  async publishAttempt(attemptId: string, destinationPath: string): Promise<MarkdownFolderSettlement> {
+  async publishAttempt(
+    attemptId: string,
+    destinationPath: string,
+    testOverrides: MarkdownFolderAttemptTestOverrides = {}
+  ): Promise<MarkdownFolderSettlement> {
     const attempt = this.attempts.get(attemptId);
     if (!attempt) {
       captureRefusal("attempt-not-found", "That collection is no longer available. Collect the book again before exporting.");
@@ -796,17 +809,40 @@ export class MarkdownFolderHostService {
     }
     attempt.phase = "publishing";
     attempt.destinationPath = destinationPath;
+    const publishOverrides = testOverrides.publish ?? {};
     try {
       const result = await publishMarkdownFolder(attempt.plan, destinationPath, {
         libraryRoot: this.host.libraryRoot,
         protectedPaths: [this.host.libraryRoot, join(this.host.libraryRoot, "books", attempt.bookId)],
         overrides: {
+          ...publishOverrides,
           onStaging: async (event) => {
-            if (event.stage === "commit-started") attempt.phase = "commit-started";
-            if ((event.stage === "file-written" || event.stage === "staging-complete") && attempt.cancelRequested) {
-              throw new Error("Markdown folder publication cancelled by the author.");
+            if (event.stage === "commit-started") {
+              // One synchronous decision point: no destination or move happens before it returns.
+              if (attempt.cancelRequested) {
+                throw new MarkdownFolderCommitCancelled(MARKDOWN_FOLDER_CANCELLED_MESSAGE);
+              }
+              if (!this.isConsentCurrent(attempt.consent)) {
+                throw new MarkdownFolderCommitSuperseded(MARKDOWN_FOLDER_SUPERSEDED_MESSAGE);
+              }
+              if (this.planForConsent.get(attempt.consent) !== attempt.plan) {
+                throw new MarkdownFolderCommitSuperseded(MARKDOWN_FOLDER_SUPERSEDED_MESSAGE);
+              }
+              attempt.phase = "commit-started";
+              await publishOverrides.onStaging?.(event);
+              return;
             }
-            if (event.stage === "staging-complete") this.assertConsentCurrent(attempt.consent);
+            if (attempt.cancelRequested) {
+              throw new MarkdownFolderCommitCancelled(MARKDOWN_FOLDER_CANCELLED_MESSAGE);
+            }
+            if (event.stage === "staging-complete") {
+              this.assertConsentCurrent(attempt.consent);
+              if (this.planForConsent.get(attempt.consent) !== attempt.plan) {
+                throw new MarkdownFolderCommitSuperseded(MARKDOWN_FOLDER_SUPERSEDED_MESSAGE);
+              }
+              await testOverrides.afterStagingComplete?.();
+            }
+            await publishOverrides.onStaging?.(event);
           }
         }
       });
@@ -816,29 +852,61 @@ export class MarkdownFolderHostService {
         status: "published",
         destinationPath: result.destinationPath,
         files: [...result.files],
-        warnings: attempt.plan.warnings
+        warnings: attempt.plan.warnings,
+        ...(result.cleanupLeftover ? { cleanupLeftover: result.cleanupLeftover } : {})
       };
     } catch (error) {
       const phaseAtCatch: string = attempt.phase;
-      if (attempt.cancelRequested && phaseAtCatch !== "commit-started") {
+      const leftover = error instanceof MarkdownFolderPublishError ? error.cleanupLeftoverPath : null;
+      const leftoverNote = leftover
+        ? ` Temporary staging could not be removed: ${leftover}. You can delete it.`
+        : "";
+      if (error instanceof MarkdownFolderCommitCancelled || (attempt.cancelRequested && phaseAtCatch !== "commit-started")) {
         attempt.phase = "cancelled";
-        return { status: "cancelled", message: "The Markdown folder export was cancelled. Nothing was published." };
+        return { status: "cancelled", message: `${MARKDOWN_FOLDER_CANCELLED_MESSAGE}${leftoverNote}` };
       }
-      if (phaseAtCatch !== "commit-started" && !this.isConsentCurrent(attempt.consent)) {
-        captureRefusal("consent-superseded", "The saved book was collected again after this choice. Nothing was published.");
+      if (
+        error instanceof MarkdownFolderCommitSuperseded ||
+        (phaseAtCatch !== "commit-started" &&
+          (!this.isConsentCurrent(attempt.consent) || this.planForConsent.get(attempt.consent) !== attempt.plan))
+      ) {
+        throw new MarkdownFolderCaptureError("consent-superseded", `${MARKDOWN_FOLDER_SUPERSEDED_MESSAGE}${leftoverNote}`);
       }
-      if (phaseAtCatch === "commit-started") {
+      if (
+        error instanceof MarkdownFolderPublishError &&
+        (error.code === "destination-exists" || error.code === "destination-appeared")
+      ) {
+        // Nothing was published; the attempt stays usable for another name or parent.
+        attempt.phase = "captured";
+        attempt.destinationPath = null;
+        return { status: "name-conflict", message: MARKDOWN_FOLDER_NAME_CONFLICT_MESSAGE };
+      }
+      if (error instanceof MarkdownFolderPublishError && error.verdict === "unknown") {
         attempt.phase = "unknown";
-        const detail = error instanceof Error ? error.message : "The Markdown folder publication could not be confirmed.";
         return {
           status: "unknown",
-          message: `${detail} Whether the folder was published could not be confirmed. Check the destination folder before trying again.`,
-          destinationPath: attempt.destinationPath
+          message: `${error.message} Check the destination folder before trying again.`,
+          destinationPath: error.cleanupLeftoverPath ?? attempt.destinationPath
         };
       }
       throw error;
     }
   }
+}
+
+const MARKDOWN_FOLDER_CANCELLED_MESSAGE = "The Markdown folder export was cancelled. Nothing was published.";
+const MARKDOWN_FOLDER_SUPERSEDED_MESSAGE =
+  "The saved book was collected again after this choice. Nothing was published.";
+const MARKDOWN_FOLDER_NAME_CONFLICT_MESSAGE =
+  "That folder already exists. This export creates a new folder and does not replace one. Nothing was published. " +
+  "Choose another folder name or another parent folder.";
+
+/** Test-only seams for the commit window and the cleanup boundaries; never reachable from IPC. */
+export interface MarkdownFolderAttemptTestOverrides {
+  /** Holds the window after `staging-complete` and before `commit-started`. */
+  afterStagingComplete?: () => Promise<void> | void;
+  /** Publisher faults used to reach commit and cleanup outcomes with a real attempt. */
+  publish?: MarkdownFolderPublishOverrides;
 }
 
 /* ------------------------------------------------------------------ publication */
@@ -857,14 +925,23 @@ export type MarkdownFolderPublishErrorCode =
   | "retrieval-refused";
 
 export class MarkdownFolderPublishError extends Error {
+  readonly verdict: "not-published" | "unknown";
+  readonly cleanupLeftoverPath: string | null;
   constructor(
     readonly code: MarkdownFolderPublishErrorCode,
     message: string,
     readonly cleanupLeftover: string | null = null,
-    readonly originalCode: string | null = null
+    readonly originalCode: string | null = null,
+    options: {
+      verdict?: "not-published" | "unknown";
+      cleanupLeftoverPath?: string | null;
+      cause?: unknown;
+    } = {}
   ) {
-    super(message);
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "MarkdownFolderPublishError";
+    this.verdict = options.verdict ?? "not-published";
+    this.cleanupLeftoverPath = options.cleanupLeftoverPath ?? null;
   }
 }
 
@@ -892,6 +969,8 @@ export interface MarkdownFolderPublishResult {
   retrievalRequests: number;
   retrievalBytes: number;
   stagingName: string;
+  /** Present only when post-publication staging removal failed; the folder is still published. */
+  cleanupLeftover?: { name: string; path: string };
 }
 
 const STAGING_MARKER = ".markdown-folder-staging-owned";
@@ -984,7 +1063,7 @@ export async function publishMarkdownFolder(
     await fsLstat(destination);
     publishRefusal(
       "destination-exists",
-      "That folder already exists. Replacing an existing folder is not part of this export yet; choose a new folder name."
+      "That folder already exists. This export creates a new folder and does not replace one. Nothing was published. Choose another folder name or another parent folder."
     );
   } catch (error) {
     if (error instanceof MarkdownFolderPublishError) throw error;
@@ -1013,15 +1092,17 @@ export async function publishMarkdownFolder(
     }
   }
 
-  const cleanupStaging = async (): Promise<string | null> => {
+  const cleanupStaging = async (): Promise<{ name: string; path: string } | null> => {
     try {
       const marker = await readFile(join(stagingPath, STAGING_MARKER), "utf8");
       const stat = await fsLstat(stagingPath);
-      if (marker !== stagingToken || !stat.isDirectory() || stat.isSymbolicLink()) return stagingName;
+      if (marker !== stagingToken || !stat.isDirectory() || stat.isSymbolicLink()) {
+        return { name: stagingName, path: stagingPath };
+      }
       await fsRm(stagingPath, { recursive: true, force: false });
       return null;
     } catch {
-      return stagingName;
+      return { name: stagingName, path: stagingPath };
     }
   };
   const failWithCleanup = async (
@@ -1033,9 +1114,10 @@ export async function publishMarkdownFolder(
     if (leftover) {
       throw new MarkdownFolderPublishError(
         "cleanup-failed",
-        `${message} Temporary staging could not be removed: ${leftover}. Remove that temporary folder when it is no longer needed.`,
-        leftover,
-        originalCode
+        `${message} Temporary staging could not be removed: ${leftover.path}. Remove that temporary folder when it is no longer needed.`,
+        leftover.name,
+        originalCode,
+        { verdict: "not-published", cleanupLeftoverPath: leftover.path }
       );
     }
     throw new MarkdownFolderPublishError(code, message, null, originalCode);
@@ -1088,7 +1170,22 @@ export async function publishMarkdownFolder(
   }
 
   /* Genuine no-replace commit: exclusive destination creation, then moves into the owned folder. */
-  await overrides.onStaging?.({ stage: "commit-started", stagingPath, destinationPath: destination, filesWritten });
+  try {
+    await overrides.onStaging?.({ stage: "commit-started", stagingPath, destinationPath: destination, filesWritten });
+  } catch (error) {
+    // The host's decision point threw. Clean the staging this call owns; no destination exists yet.
+    const leftover = await cleanupStaging();
+    if (leftover) {
+      throw new MarkdownFolderPublishError(
+        "cleanup-failed",
+        `${error instanceof Error ? error.message : String(error)} Temporary staging could not be removed: ${leftover.path}.`,
+        leftover.name,
+        null,
+        { verdict: "not-published", cleanupLeftoverPath: leftover.path, cause: error }
+      );
+    }
+    throw error;
+  }
   try {
     const parentNow = await fsLstat(parentReal);
     if (parentNow.dev !== parentIdentity.dev || parentNow.ino !== parentIdentity.ino) {
@@ -1109,14 +1206,15 @@ export async function publishMarkdownFolder(
       if (leftover) {
         throw new MarkdownFolderPublishError(
           "cleanup-failed",
-          `That folder appeared while the export was being prepared, so nothing was published. Temporary staging could not be removed: ${leftover}.`,
-          leftover,
-          "EEXIST"
+          `That folder appeared while the export was being prepared, so nothing was published. Temporary staging could not be removed: ${leftover.path}.`,
+          leftover.name,
+          "EEXIST",
+          { verdict: "not-published", cleanupLeftoverPath: leftover.path }
         );
       }
       publishRefusal(
         "destination-appeared",
-        "That folder appeared while the export was being prepared. Nothing was published; the folder that appeared was left as it was."
+        "That folder already exists. This export creates a new folder and does not replace one. Nothing was published. Choose another folder name or another parent folder."
       );
     }
     const code = errorCodeOf(error);
@@ -1134,7 +1232,7 @@ export async function publishMarkdownFolder(
     }
   } catch (error) {
     // Roll back only the destination this call created, proven by its recorded identity.
-    let leftover: string | null = null;
+    let destinationUnproven = false;
     try {
       const stat = await fsLstat(destination);
       if (
@@ -1146,19 +1244,32 @@ export async function publishMarkdownFolder(
       ) {
         await fsRm(destination, { recursive: true, force: false });
       } else {
-        leftover = name;
+        destinationUnproven = true;
       }
-    } catch {
-      leftover = name;
+    } catch (rollbackError) {
+      // ENOENT means the destination this call created is already gone: nothing is left there.
+      destinationUnproven = errorCodeOf(rollbackError) !== "ENOENT";
     }
     const stagingLeftover = await cleanupStaging();
-    const shown = leftover ?? stagingLeftover;
-    if (shown) {
+    if (destinationUnproven) {
+      const stagingNote = stagingLeftover
+        ? ` Temporary staging also could not be removed: ${stagingLeftover.path}.`
+        : "";
+      throw new MarkdownFolderPublishError(
+        "commit-failed",
+        `The export could not be published and whether the destination is complete could not be confirmed: ${destination}.${stagingNote} Check that folder before trying again.`,
+        name,
+        errorCodeOf(error),
+        { verdict: "unknown", cleanupLeftoverPath: destination, cause: error }
+      );
+    }
+    if (stagingLeftover) {
       throw new MarkdownFolderPublishError(
         "cleanup-failed",
-        `The export could not be published and part of its temporary output could not be removed: ${shown}. Nothing is claimed published.`,
-        shown,
-        errorCodeOf(error)
+        `The export could not be published. Temporary staging could not be removed: ${stagingLeftover.path}. Remove that temporary folder when it is no longer needed.`,
+        stagingLeftover.name,
+        errorCodeOf(error),
+        { verdict: "not-published", cleanupLeftoverPath: stagingLeftover.path, cause: error }
       );
     }
     publishRefusal("commit-failed", "The export could not be published. Nothing was published.", null, errorCodeOf(error));
@@ -1171,20 +1282,14 @@ export async function publishMarkdownFolder(
     // Publication already happened; directory-sync support varies by filesystem (atomic.ts).
   }
   const stagingLeftover = await cleanupStaging();
-  if (stagingLeftover) {
-    // Files are published; report the owned leftover truthfully instead of claiming clean success.
-    throw new MarkdownFolderPublishError(
-      "cleanup-failed",
-      `The export was published, but its temporary staging could not be removed: ${stagingLeftover}. Remove that temporary folder when it is no longer needed.`,
-      stagingLeftover
-    );
-  }
   return {
     destinationPath: destination,
     files: plan.files.map((f) => f.path),
     retrievalRequests: filesWritten,
     retrievalBytes,
-    stagingName
+    stagingName,
+    // Publication is proven; a staging leftover is a warning on the published result, never unknown.
+    ...(stagingLeftover ? { cleanupLeftover: { name: stagingLeftover.name, path: stagingLeftover.path } } : {})
   };
 }
 

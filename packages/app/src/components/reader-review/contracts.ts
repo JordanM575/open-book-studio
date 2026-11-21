@@ -7,6 +7,59 @@ import type {
 import type { SavedIdentity } from "@ai-book-studio/core/review/sources";
 import type { ReviewPersistence } from "./SaveReviewControl";
 
+export type ReaderRunOutcome =
+  | { readonly kind: "completed"; readonly run: ReaderRun }
+  | { readonly kind: "failed"; readonly reason: ReviewFailure }
+  | { readonly kind: "stopped" }
+  | { readonly kind: "invalid-result" }
+  | { readonly kind: "unknown" };
+
+/**
+ * One volatile attempt in the open review view. `envelope` is the accepted prepared disclosure for
+ * non-completed attempts and the accepted run envelope for completed attempts. `connection` is the
+ * accepted preparation's display facts, captured before Start; it is renderer memory only and is
+ * never serialized, saved or sent. Absent only for the legacy `runs` compatibility path.
+ */
+export interface VolatileReaderRun {
+  readonly requestId: string;
+  readonly envelope: ReviewEnvelope;
+  readonly connection?: ReaderReviewConnection;
+  readonly outcome: ReaderRunOutcome;
+}
+
+/** Append-only bound for the open view; a ninth attempt is refused locally and never evicts. */
+export const maxVolatileAttempts = 8;
+export const attemptCapCopy = "This view keeps up to 8 attempts, including failed and stopped attempts. Close the review to discard this volatile history and start a new view. Nothing is prepared or sent.";
+export const completedRerunCopy = "Review completed · Subjective findings, with historical evidence. The latest two completed runs are compared below; earlier runs remain in this view.";
+
+export const attemptOutcomeHeading: Record<Exclude<ReaderRunOutcome["kind"], "completed">, string> = {
+  failed: "Failed",
+  stopped: "Stopped",
+  "invalid-result": "Result not accepted",
+  unknown: "Outcome unknown"
+};
+
+export const comparisonCopy = {
+  noAttempts: "No runs yet · No comparison. Prepare the selected saved scope and inspect the disclosure before Start.",
+  oneCompleted: "One completed run · No comparison yet. A second completed run in this view compares sources, profile, provider and request facts.",
+  oneCompletedWithAttempts: (attempts: number) =>
+    `One completed run and ${attempts === 1 ? "one attempt" : `${attempts} attempts`} without findings · No comparison. A second completed run compares the input facts.`,
+  noneCompleted: "No completed runs to compare. Attempts remain listed with their disclosure and attribution.",
+  latestNotCompleted: (id: string) =>
+    `The latest attempt (${id}) did not complete. This comparison uses the latest two completed runs; the attempt remains listed below with its attribution.`,
+  heading: "Compare the latest two runs",
+  intro: (beforeId: string, afterId: string, completed: number) =>
+    `Run ${beforeId} → Run ${afterId} · ${completed} completed runs in this view. Earlier runs remain below and are not replaced.`,
+  identicalNoVisibleChange: "Inputs: Identical · No visible difference in the returned findings.",
+  identicalChanged: "Inputs: Identical · Interpretation or evidence changed. Same-input model variation, not an improvement score.",
+  changed: (facets: string) => `Inputs: Changed · ${facets}. This compares input facts; it is not an improvement score.`,
+  partialEvidence: (count: number) =>
+    `Partial evidence · ${count} quotations withheld or insufficient across these runs. Counts describe returned findings, not manuscript coverage.`,
+  standardNote: "Counts describe returned findings, not manuscript coverage or quality.",
+  capturedOnly: "Compared from captured revisions · Check current sources separately.",
+  notComparable: "Not comparable · The run facts could not be validated here. No delta is shown; attribution and historical quotations remain."
+} as const;
+
 export type ReviewRefusal =
   | "unavailable" | "permission" | "no-model" | "invalid-selection" | "scope-too-large" | "consent" | "terms" | "changed";
 export type ReviewFailure = "provider" | "overflow" | "malformed" | "refused";
@@ -108,6 +161,14 @@ export const failureCopy: Record<ReviewFailure, string> = {
   malformed: "The review result could not be validated. The review is incomplete. Prepare a new request to try again.",
   refused: "The provider refused this request. The review is incomplete. Review your scope before preparing a new request."
 };
+
+export const attemptOutcomeCopy = {
+  failed: (reason: ReviewFailure): string =>
+    `${failureCopy[reason]} No findings were retained for this attempt. Its disclosure and attribution remain; nothing was replaced.`,
+  stopped: "Stopped · Incomplete. Stopping prevents later dispatch best-effort; text already sent cannot be recalled. No findings were retained for this attempt.",
+  invalidResult: `${revalidationFailureCopy} Its disclosure remains for attribution; no findings were retained.`,
+  unknown: "The request outcome is unknown. The request may have been sent; text already sent cannot be recalled. No findings were retained here."
+} as const;
 
 export function refusalMessage(reason: unknown): string {
   return typeof reason === "string" && Object.hasOwn(refusalCopy, reason) ? refusalCopy[reason as ReviewRefusal] : refusalCopy.unavailable;

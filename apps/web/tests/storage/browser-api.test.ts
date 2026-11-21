@@ -294,10 +294,14 @@ describe("what the browser build cannot do yet says so plainly", () => {
       await studio.images.remove("book_any", "img_any"),
       await studio.voice.transcribe({} as never),
       await studio.voice.speak({} as never),
-      await studio.voice.cancel({ operationId: 1 })
+      await studio.voice.cancel({ operationId: 1 }),
+      await studio.voice.operation({ operationId: 1 })
     ]) {
       expect(refusal(result)).toContain("desktop app");
     }
+    const unsubscribe = studio.voice.onOperation(() => {});
+    expect(typeof unsubscribe).toBe("function");
+    expect(() => unsubscribe()).not.toThrow();
     expect(value(await studio.voice.connections())).toEqual([]);
     expect(value(await studio.voice.speakers()).available).toBe(false);
   });

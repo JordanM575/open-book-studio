@@ -151,6 +151,35 @@ push-to-talk from hands-free `getUserMedia`.
    insertion/replacement still needs checked editor mutation/undo. There is deliberately no unchecked
    replace-selection helper here.
 
+## Request reservations, refusals and the renderer view (T016)
+
+The desktop host (`apps/desktop/src/main/voice-request.ts`) closes the loop between this ledger and
+the renderer. One mint per request, owned by the host:
+
+- The IPC boundary mints a **public** operation id from its own monotonic counter before any route
+  resolution happens, and emits `voice:operation-event` with `phase: "starting"`. The ledger's own
+  internal id stays inside the host; the renderer only ever sees the public id. A slow reservation
+  cannot reorder a faster operation's internal sequence.
+- The renderer may cancel as soon as it sees `starting`. A cancel before the route resolves closes
+  the reservation locally: nothing is sent, no slot is opened, and `voice.operation` returns null
+  for that id. A cancel after dispatch goes through the ledger's abort; the slot stays held until
+  the exact local outcome arrives.
+- Refusals before dispatch are recorded by the ledger itself (`refuse`): every planned chunk
+  becomes `unsent`, no abort is emitted, the outcome is `refusal` and the slot is released. A
+  refusal after a chunk is dispatched changes nothing — the dispatched chunk must settle first.
+- Every operation projects a renderer-safe `VoiceOperationView`: phase, status, planned/dispatched/
+  settled/unsent counts and a `VoiceChargeView` (`pending | none | reported | unknown | mixed`).
+  Unknown never renders as zero; `mixed` keeps a reported subtotal and counts the unpriced
+  chunks. The view carries no endpoint, secret, session or draft text, and the host emits it only
+  for the window that owns the operation.
+- Route facts are pinned at reservation time and re-checked before every send: connection,
+  provider, model, voice, endpoint identity (`endpoint:<sha256[:16]>`), a host-side revision counter
+  bumped on every voice-settings write and every connection removal (including A→B→A), the session
+  token and the audio permission. A changed fact refuses the request with zero provider calls. No
+  fallback, substitution, retry or provider-hop is ever attempted.
+- Receipts are memory-only, like everything else in this file. There is no persisted voice usage
+  record, and restarting the app forgets every pending request honestly.
+
 ## Cancellable transport ledger (T016, partial)
 
 `transport.ts` is the pure host-neutral half of ADR 0021 item 6. It holds no audio, text, promise
@@ -180,15 +209,17 @@ host to execute once, and it never calls a provider.
   accounting record separately.
 
 `apps/desktop/src/main/voice-transport.ts` is the typed edge: it maps a provider-reported cost to
-`reported`/`unknown`, maps `ProviderError`/abort to refusal, failure or cancellation with bounded
-copy, and combines a host `AbortSignal` with the existing per-request deadline. `VoiceService` and
-`SpeechService` accept an optional `signal`; `SpeechService` rechecks it before every chunk and
-neither service retries or falls back. The desktop host now keeps a main-process registry of
-cancellable speech-to-text and text-to-speech ids and exposes a best-effort local cancel through
-IPC and the preload bridge. Cancellation is local: the owned slot stays until the local outcome
-is recorded, an unknown charge stays unknown, and nothing here proves a provider observed the
-cancel. There is still no live provider call, microphone, or device evidence. T016 remains
-unchecked.
+`reported`/`unknown`, maps `ProviderError`/aborts to refusal, failure, cancellation or deadline
+failure with bounded copy, and combines a host `AbortSignal` with the existing per-request deadline.
+`VoiceService` and `SpeechService` accept a host-created scope and re-check the saved route through
+it before every dispatched chunk; neither service retries or falls back. The desktop host keeps a
+main-process registry of cancellable speech-to-text and text-to-speech ids and exposes a typed,
+owner-checked cancel plus a renderer-safe operation view through IPC and the preload bridge. The
+voice services return typed outcomes (`success | refusal | failure | cancellation`) with the view
+attached, so a failure or cancel carries its receipt in one round trip. Cancellation is local: the
+owned slot stays until the local outcome is recorded, an unknown charge stays unknown, and nothing
+here proves a provider observed the cancel. There is still no live provider call, microphone, or
+device evidence. T016 remains unchecked until exact-head review and merge.
 
 ## PCM/VAD adapter and bounds
 
