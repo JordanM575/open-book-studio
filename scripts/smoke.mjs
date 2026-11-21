@@ -79,6 +79,8 @@ updatedAt: ${now}
 The lighthouse keeper counted the gulls and wrote the number in the margin.
 
 By evening the count was wrong again, and the light was the only thing that still agreed with him.
+
+The lighthouse keeper waited.
 `;
 
 const chapterTwo = `---
