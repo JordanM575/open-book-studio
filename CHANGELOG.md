@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Routing taxonomy and handoff decisions
+- The 2026-11-07 delivery authority accepts spec 036's four Phase-0 decisions as D-204–D-207: three author-selected writing-task profiles requiring tools and a known catalogue context; no ranking or single suggestion; no local request-size estimator or total cost; and only a two-step handoff from an author-chosen candidate to the existing one-turn picker. T015, T017 and the new-total portions of T008/T018 are recorded as deliberately not selected, and T016 remains unchecked and unblocked only for the narrow handoff. Two acceptance conditions close the packet premises: every writing-agent profile must require a known context so the preview never marks a model eligible that `canRunAgent` would refuse, and a future production mount must use catalogues already loaded by an explicit picker/refresh or a read-only cached-summary seam rather than calling `ProviderService.models()` on open. No preview mount, provider call, route store, estimator or product code is added.
+
 ### Reader review focus and provider errors
 - Opening the Reader review now moves focus to the Structured reader review heading after the panel mounts, and the focus test asserts the active element instead of page text. AI SDK transport failures are normalized through the shared provider-error mapping, so context maps to overflow and refusal maps to refused; the remaining provider failures stay the generic provider reason.
 

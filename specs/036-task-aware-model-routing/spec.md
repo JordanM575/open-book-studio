@@ -6,8 +6,17 @@ clauses remain binding for this offline preview. Workflow execution/attribution 
 no automatic model replacement, ranking, fallback or ambiguous retry is selected. The preview leaf
 still needs its production mount; policy acceptance is not runtime evidence.
 
+**Decision record, November 20:** under the 2026-11-07 delivery authority, the four Phase-0 decisions
+are accepted as D-204–D-207. The initial taxonomy is three author-selected profiles, each requiring
+tools and a known catalogue context (D-204); candidates stay unranked with no single suggestion (D-205);
+there is no local request-size estimator or total cost (D-206); and only a two-step handoff to the
+existing one-turn picker is allowed, with no persistence (D-207). T015, T017 and the new-total portions
+of T008/T018 are deliberately not selected; T016 remains unchecked and unblocked only for the narrow
+author-chosen-candidate handoff. T019 stays separately gated, and the preview still has no production
+mount. These decisions do not add a mount, provider call, route store or estimator.
+
 **Feature Branch**: `036-task-aware-model-routing`  
-**Status**: In progress — offline preview leaf exists; production mount and selected workflow routing remain open.
+**Status**: In progress — offline preview leaf exists; D-204–D-207 accepted; T015/T017 and the new-total portion of T018 deliberately not selected, T016 narrow handoff unchecked; production mount and selected workflow routing remain open.
 **Depends on**: [011](../011-model-access/spec.md) provider access and model selection; [022](../022-provider-compatibility/spec.md) provider compatibility and Contributor consent; [002](../002-studio-v1/spec.md) writing-agent behavior.
 
 ## Overview
@@ -154,8 +163,8 @@ zero writes, and unchanged fixture selection and chapter contents.
   described in spec 002. It MUST NOT classify a task by reading prompts, manuscript text, tool output,
   or conversation history.
 - **FR-002**: Task profiles MUST be data with a display name, plain-language purpose, and explicit
-  capability/context requirements. Their initial names, scope, and evidence source are unresolved until
-  recorded as public decisions; no unapproved taxonomy may be presented as settled policy.
+  capability/context requirements. D-204 records the initial names, scope, and evidence source; no
+  unapproved taxonomy may be presented as settled policy.
 - **FR-003**: Candidate evaluation MUST consume the existing spec 011 provider registry, catalogue,
   connection availability, and capability facts. It MUST NOT create another provider registry or
   override provider-reported facts.
@@ -179,7 +188,8 @@ zero writes, and unchanged fixture selection and chapter contents.
 - **FR-009**: Price data MUST come from the existing catalogue and retain its provenance. Missing or
   unknown input/output prices MUST remain unknown and MUST NOT be interpreted as zero or free.
 - **FR-010**: A total price estimate MAY be shown only when both the price basis and a documented token
-  estimate are available. It MUST be labelled an estimate and MUST identify its basis.
+  estimate are available. It MUST be labelled an estimate and MUST identify its basis. D-206 deliberately
+  does not select a total for this preview; this clause governs only a future separately accepted estimate.
 - **FR-011**: Under accepted D-116, this offline preview MUST NOT implement or
   claim an enforceable per-turn/session ceiling, reject a turn based on an estimated amount, or describe
   an informational cost-helper warning as a ceiling.
@@ -230,35 +240,46 @@ zero writes, and unchanged fixture selection and chapter contents.
 - **SC-006**: No preview or suggestion bypasses spec 011's provider availability/capability rules or
   spec 022's Contributor consent guard.
 
-## Unresolved public decisions
+## Public decision status
 
-These are open questions, not accepted decisions. Before dependent implementation, record the outcome
-in the public decision register (and an ADR where appropriate). A blocker applies only to work that
-depends on that answer; it does not block independent offline preview work.
+These decisions constrain the feature. The four Phase-0 decisions were accepted on 2026-11-20 under
+the 2026-11-07 delivery authority; dependent implementation remains separate.
 
-1. **Task taxonomy and profile evidence**: Which writing-agent task labels ship first, and what source
-   supports each profile's capability, context, and output-size requirements? This blocks final profile
-   data, not a read-only preview shell.
-2. **Suggestion and ranking policy**: Whether to show one suggestion when several models qualify, what
-   author preference is available, and what evidence supports any quality/speed weighting. Until
-   accepted, candidates remain unranked. This blocks ranking, not candidate explanation.
-3. **Context and estimate basis**: Whether a reliable local estimator and profile token budgets are in
-   scope, and how uncertainty is presented. Until accepted, show catalogue context limits and only
-   show a total estimate when its documented inputs are known. This blocks actual-request fit claims,
-   not catalogue facts.
-4. **Suggestion confirmation and persistence**: Whether a later explicit action may populate the
-   existing one-turn override, and whether any task/decision data belongs in a turn record. Until
-   accepted, the preview is transient and selection-neutral. This blocks selection integration and
-   persistence, not preview display.
+1. **Task taxonomy and profile evidence — accepted (D-204).** Three author-selected version-1 profiles:
+   Discuss the book, Draft new prose and Revise existing prose. Each requires tool support and a known
+   catalogue context; none has a quality tier, numeric context minimum, output-size target or
+   provider/model tier. Final profile data, the known-context requirement and profile-specific tests
+   remain follow-up work.
+2. **Suggestion and ranking policy — accepted as no ranking (D-205).** Zero, one or many known
+   capability matches appear in stable catalogue order with statuses, reasons and a visible
+   not-a-ranking note. No score, quality/speed/price order or single suggestion is shown. T015 is
+   deliberately not selected; a later ranking needs a new decision naming its evidence and
+   deterministic rule.
+3. **Context and estimate basis — accepted as no estimator or total (D-206).** Catalogue context limits
+   and unit prices are shown with provenance; actual request fit stays unknown; missing prices stay
+   unknown and a published zero stays a known zero. No total, range, ceiling or rejection is shown, and
+   the preview says the request size is unknown. The new total-estimate portion of T008 and the
+   total-estimate scope of T018 are deliberately not selected.
+4. **Suggestion confirmation and persistence — accepted as a two-step handoff only (D-207).** An explicit
+   action on an author-chosen candidate opens the existing one-turn picker; author confirmation is
+   required; only the existing one-turn override is set. No book default, consent, send or persistence
+   change. T017 is deliberately not selected; T016 remains unchecked and unblocked only for this narrow
+   handoff.
 5. **D-116 cost enforcement**: Accepted ADR 0019 distinguishes finite operation mode (not a money
    cap) from qualified strict money with conservative durable reservations and provider-enforceable
    all-charge limits. Unknown/unresolved charges block strict mode. Implementation and adapter
    qualification remain; current informational warnings/catalog estimates are not ceilings.
-6. **Dispatch and recovery policy**: Whether future task routing may dispatch directly, automatically
-   switch models, retry, or fall back, and how stop, partial writes, uncertain charges, and provider
-   failures are handled. This blocks those behaviors only; this spec's preview never dispatches or
-   falls back. D-196 now selects explicitly pinned workflow-role dispatch, zero automatic retries
-   and no fallback under the separate 037 grant; ordinary preview authority stays unchanged.
+6. **Dispatch and recovery policy — T019 separately gated**: Whether future task routing may dispatch
+   directly, automatically switch models, retry, or fall back, and how stop, partial writes, uncertain
+   charges, and provider failures are handled. D-196 selects explicitly pinned workflow-role dispatch,
+   zero automatic retries and no fallback under the separate 037 grant. Ordinary preview authority stays
+   unchanged, and T019 still requires its own implementation plan.
+
+**Acceptance conditions.** Every writing-agent profile must require a known catalogue context, so the
+preview never marks a model eligible that `canRunAgent` would refuse (D-204). A future production mount
+must use catalogues already loaded by an explicit picker or refresh action, or a read-only cached-summary
+seam; calling `ProviderService.models()` when the preview opens would fetch on a cache miss and violate
+FR-012 and SC-001. Neither condition is implemented here.
 
 ## Assumptions
 

@@ -52,6 +52,10 @@ each entry still needs its own recorded outcome before dependent implementation.
 | D-161 | Provider settings shows each connection's status from the author's last explicit Test only, with a volatile check time that clears when Settings closes; opening Settings never probes. Voice shows configured availability from `voice.connections()`/`voice.speakers()` with no check time and states it is never tested automatically. A stored health fact would need its own sync (FR-001), background checks would violate the no-background-network-call non-goal, and probing voice via TTS/transcribe would send author text or audio. The protected-storage availability read on open is awaited, but for at most 2 seconds; an answer that has not arrived, or that fails, reads as unavailable and points at Check keychain. | spec 028 |
 | D-162 | Biome is the configured linter; `bun run lint` fails on errors and runs first in `verify`. Warnings stay advisory debt, headed by non-null assertions; suppressions name the reason and sit on the diagnostic line. | spec 012 T002 |
 | D-192 | Voice provider/model/voice choices are explicit, catalog-validated profile preferences; voice requests never switch to another paid connection | ADR 0015 |
+| D-204 | Three author-selected writing-task profiles; each requires tools and a known catalogue context, with no tiers or numeric minimums | `DECISIONS.md` §D-204 |
+| D-205 | Candidates stay unranked with no single suggestion, in stable catalogue order with a visible not-a-ranking note | `DECISIONS.md` §D-205 |
+| D-206 | No request-size estimator or total cost; catalogue context and unit prices only, with request fit always unknown | `DECISIONS.md` §D-206 |
+| D-207 | Only a two-step handoff, through the existing one-turn picker, for an author-chosen candidate; no persistence | `DECISIONS.md` §D-207 |
 
 ## Open decisions
 
@@ -924,6 +928,113 @@ destination and storage class needs its own qualification evidence, as does cras
 with its paired positive and adversarial tests (including change-during-capture and substituted-record
 cases); T014-U mounts the journey only after the planner and host interfaces agree. Spec 035 T014,
 T014-Q0, T014-Q, T014-U, T016, T017 and T019 stay unchecked by this recording.
+
+### D-204 · Initial writing-task taxonomy and required facts
+
+D-204–D-207 record the accepted scope of the 2026-11-07 routing decision packet. They accept
+decisions and dependent task wording, not the preview mount, a provider call, a route store, an
+estimator or any other product code. No separate ADR is written: the register and spec 036 carry the
+record, as with D-202 and D-203.
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-20, under the 2026-11-07 delivery authority) |
+| **Question** | Which author-selected writing-task labels ship first, and which catalogue facts may each require? |
+| **Decision** | Ship three version-1 profiles for the existing writing agent: **Discuss the book**, **Draft new prose** and **Revise existing prose**. The author selects one explicitly; the studio never infers it. Each profile requires tool support and a known catalogue context size. None requires image input, a numeric context minimum, an output-size target, a provider tier or a model tier. |
+
+**Scope.** This accepts profile data and its evidence, not an implementation. Discuss asks questions,
+checks continuity and plans without editing; Draft writes new prose through the editing tools; Revise
+rewrites, tightens or restructures existing text. Because all three share the same requirements in v1,
+the preview may show the same matches for each and must say so rather than invent a quality difference.
+The evidence is spec 002's writing-agent journeys, the existing Discuss/Edit modes and tool vocabulary,
+the spec 011 `canRunAgent` gate and spec 022's consent boundary, not provider marketing or model names.
+The decision does not rank models, estimate request size, change selection, persist a task choice or
+authorize dispatch.
+
+**Known context.** Every writing-agent profile requires a known catalogue context. A model whose
+`contextLength` is null evaluates as unknown, never eligible, so the preview cannot mark a model
+eligible that `canRunAgent` would refuse. No numeric context minimum is invented. Adding the profiles,
+this requirement and matching tests to `packages/core/src/routing/` is separate work; T007 stays checked
+for the generic evaluator it delivered, and the accepted profile data is not retroactively part of that
+delivery.
+
+### D-205 · Candidate presentation without ranking
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-20, under the 2026-11-07 delivery authority) |
+| **Question** | May candidates be ranked, or a single suggestion shown, before a public ranking policy exists? |
+| **Decision** | Select no ranking and no single suggestion. The preview shows zero, one or many known capability matches in stable catalogue order, with statuses and plain-language reasons, and a visible note that the order is not a ranking. It does not score, sort by quality, speed, price, popularity, provider tier or model name, label a “best” or “recommended” model, or show a single suggestion. |
+
+**Presentation.** The positive status describes evidence, not fitness: “Known capability match” (or
+“Matches known requirements”) rather than “Suitable”. Unknown facts never count as a match, and every
+status and reason remains visible. A matching negative-copy change such as “Does not meet known
+requirements” is permitted for consistency.
+
+**Not selected.** T015 is deliberately not selected. Do not implement a ranking, and do not record it
+as shipped. A later ranking or single-suggestion policy requires a new decision that names its evidence
+and deterministic rule and explains why it is not a quality claim. Until then, zero matches are
+reported as no suitable candidate with reasons, not as a substitute pick.
+
+**Effect on T016.** Its wording becomes “author-chosen candidate” and its dependency becomes this
+no-ranking decision plus D-207's handoff decision. T015 is not a prerequisite. T016 remains unchecked.
+
+### D-206 · No request-size estimate or total cost
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-20, under the 2026-11-07 delivery authority) |
+| **Question** | Is a local request-size/token estimator in scope, and how should uncertainty be disclosed? |
+| **Decision** | No local request-size estimator and no total cost are in scope for the 036 preview. Show catalogue context limits as catalogue data and unit prices with provenance. Actual request fit is always unknown. Missing prices stay unknown; a published zero stays a known zero. Show no total, range, “from” price, cheaper-than claim, ceiling, rejection or guarantee, and say plainly: “No total is shown because the request size is unknown.” |
+
+**Why.** The existing cost helper needs a token count, and the available estimate helper needs prompt
+text the preview must not read. Catalogue prices are provider-published fields, not a verified tariff,
+and D-116's bounded-operation mode is not a dollar cap. This preserves FR-005/FR-010/FR-018 and avoids
+a false fit or bill impression.
+
+**Not selected.** The new total-estimate portion of T008 and the total-estimate scope of T018 are
+deliberately not selected. T008's delivered unit-price and catalogue-context presentation stands and
+remains checked; no new total is authorized or verified. A later illustrative budget would need a
+separate decision with fixed, author-visible token assumptions and an “Example only — not your request”
+label; it still could not claim request fit or a spending cap.
+
+### D-207 · Two-step candidate handoff and no persistence
+
+| | |
+| --- | --- |
+| **Status** | Accepted (2026-11-20, under the 2026-11-07 delivery authority) |
+| **Question** | May a later explicit action populate the existing one-turn override, and may task or route details be persisted? |
+| **Decision** | Authorize only a two-step handoff. An explicit “Use for next message” action on an author-chosen candidate opens the existing one-turn model picker; the author confirms there; only the existing one-turn override is set. The preview never writes composer state directly, changes the book default, active connection or later-turn model, sets or infers Contributor consent, sends, queues, retries or falls back, or persists task/profile/route data. |
+
+**Author control.** The action is a named control on a candidate the author chose, not a row click,
+hover, keyboard default or automatic highlight. If one usable connection exists, the picker may
+preselect that connection and the candidate for confirmation; if several exist, the author chooses and
+the first credential is never taken silently. Revalidation happens on opening the picker and on
+confirmation; a vanished model or unusable connection refuses with a reason and leaves selection
+unchanged. Cancel or close leaves the book default, one-turn override, connection, conversation and
+manuscript unchanged, with no queued request. Send remains the only dispatch trigger, and spec 011's
+actual turn attribution remains authoritative for what ran.
+
+**Not selected.** T017 is deliberately not selected. No book, thread or usage schema, route store or
+task record is added. A future persistence proposal needs its own decision covering schema, ownership,
+privacy, versioning, migration, retention and how a previewed choice is distinguished from the model
+actually used.
+
+**Effect on T016.** T016 is amended to this narrow author-chosen-candidate handoff and depends on D-205
+plus this decision. It remains unchecked; no implementation or mount is authorized by this record.
+T010's existing zero-argument picker link and neutrality proof are unchanged, and the optional handoff
+affordance is separate from it.
+
+**Acceptance conditions for D-204–D-207 closing the packet premises.**
+
+1. **Known-context eligibility.** Every writing-agent profile must require a known catalogue context,
+   as D-204 states. The preview must never mark a model eligible that `canRunAgent` would refuse. This
+   is an acceptance condition on future profile and evaluator work; this record implements no code.
+2. **Production mount source.** A future production mount must receive catalogues already loaded by an
+   explicit picker or refresh action, or use a read-only cached-summary seam. Calling
+   `ProviderService.models()` when the preview opens would fetch on a cache miss, touch the vault and
+   violate the zero-call rule. This is an acceptance and mount condition; no mount or seam is
+   implemented or authorized here.
 
 ## Resolved browser decisions
 
