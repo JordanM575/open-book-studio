@@ -149,12 +149,13 @@ describe("markdown folder IPC journey", () => {
     if (capture.status !== "ready") throw new Error("expected ready capture");
     const parent = await temp("studio-md-folder-ipc-out-");
     answers.open.push({ canceled: true, filePaths: [] });
-    expect(await data(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: capture.attemptId })).toBeNull();
+    expect(await data(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: capture.attemptId, folderName: "the-salt-road-markdown" })).toBeNull();
     expect(await readdir(parent)).toEqual([]);
     answers.open.push({ canceled: false, filePaths: [parent] });
     const outcome = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
       bookId,
-      attemptId: capture.attemptId
+      attemptId: capture.attemptId,
+      folderName: "the-salt-road-markdown"
     });
     expect(outcome.status).toBe("published");
     if (outcome.status !== "published") throw new Error("expected published outcome");
@@ -171,10 +172,10 @@ describe("markdown folder IPC journey", () => {
     if (capture.status !== "ready") throw new Error("expected ready capture");
     const parent = await temp("studio-md-folder-ipc-refused-");
     for (const payload of [
-      { bookId, attemptId: capture.attemptId, destinationPath: join(parent, "chosen-by-renderer") },
-      { bookId, attemptId: capture.attemptId, overrides: { writeFile: "fault" } },
-      { bookId, attemptId: "not-a-uuid" },
-      { bookId: "../outside", attemptId: capture.attemptId }
+      { bookId, attemptId: capture.attemptId, folderName: "renderer-name", destinationPath: join(parent, "chosen-by-renderer") },
+      { bookId, attemptId: capture.attemptId, folderName: "renderer-name", overrides: { writeFile: "fault" } },
+      { bookId, attemptId: "not-a-uuid", folderName: "renderer-name" },
+      { bookId: "../outside", attemptId: capture.attemptId, folderName: "renderer-name" }
     ]) {
       expect(await call(IPC.books.exportMarkdownFolderPublish, payload)).toMatchObject({ ok: false, error: { code: "invalid" } });
     }
@@ -192,7 +193,7 @@ describe("markdown folder IPC journey", () => {
     ).toEqual({ status: "accepted", attemptId: first.attemptId });
     const parent = await temp("studio-md-folder-ipc-cancel-");
     answers.open.push({ canceled: false, filePaths: [parent] });
-    expect(await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: first.attemptId })).toMatchObject({
+    expect(await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: first.attemptId, folderName: "the-salt-road-markdown" })).toMatchObject({
       ok: false,
       error: { code: "attempt-cancelled" }
     });
@@ -202,7 +203,7 @@ describe("markdown folder IPC journey", () => {
     if (stale.status !== "ready") throw new Error("expected ready capture");
     await data(IPC.books.exportMarkdownFolderCapture, bookId);
     answers.open.push({ canceled: false, filePaths: [parent] });
-    expect(await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: stale.attemptId })).toMatchObject({
+    expect(await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: stale.attemptId, folderName: "the-salt-road-markdown" })).toMatchObject({
       ok: false,
       error: { code: "consent-superseded" }
     });
@@ -215,10 +216,93 @@ describe("markdown folder IPC journey", () => {
     const capture = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
     if (capture.status !== "ready") throw new Error("expected ready capture");
     answers.open.push({ canceled: false, filePaths: [root] });
-    const result = await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: capture.attemptId });
+    const result = await call(IPC.books.exportMarkdownFolderPublish, { bookId, attemptId: capture.attemptId, folderName: "the-salt-road-markdown" });
     expect(result).toMatchObject({ ok: false, error: { code: "destination-aliases-source" } });
     expect(await readdir(join(root, "the-salt-road-markdown")).catch(() => null)).toBeNull();
     await writeFile(join(root, "probe.txt"), "probe");
     await rm(join(root, "probe.txt"));
+  });
+
+  test("a validated folder name creates exactly that name under the chosen parent", async () => {
+    const { library } = await setup();
+    const bookId = await bookWithLegacy(library);
+    const capture = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
+    if (capture.status !== "ready") throw new Error("expected ready capture");
+    expect(capture.suggestedFolderName).toBe("the-salt-road-markdown");
+    const parent = await temp("studio-md-folder-ipc-name-");
+    answers.open.push({ canceled: false, filePaths: [parent] });
+    const outcome = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+      bookId,
+      attemptId: capture.attemptId,
+      folderName: "Second Crossing"
+    });
+    expect(outcome.status).toBe("published");
+    if (outcome.status !== "published") throw new Error("expected published outcome");
+    expect(outcome.destinationPath).toBe(join(parent, "Second Crossing"));
+    expect(askedOpen.at(-1)).toEqual(
+      expect.objectContaining({ message: "The folder “Second Crossing” will be created in the folder you choose." })
+    );
+    expect(await readdir(parent)).toEqual(["Second Crossing"]);
+  });
+
+  test("the same name twice is a name conflict, and a different name publishes beside the first", async () => {
+    const { library } = await setup();
+    const bookId = await bookWithLegacy(library);
+    const parent = await temp("studio-md-folder-ipc-repeat-");
+    const first = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
+    if (first.status !== "ready") throw new Error("expected ready capture");
+    answers.open.push({ canceled: false, filePaths: [parent] });
+    const published = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+      bookId,
+      attemptId: first.attemptId,
+      folderName: "repeat-folder"
+    });
+    expect(published.status).toBe("published");
+    const firstReadme = await readFile(join(parent, "repeat-folder", "README.md"), "utf8");
+
+    const second = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
+    if (second.status !== "ready") throw new Error("expected ready capture");
+    answers.open.push({ canceled: false, filePaths: [parent] });
+    const conflict = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+      bookId,
+      attemptId: second.attemptId,
+      folderName: "repeat-folder"
+    });
+    expect(conflict).toEqual({
+      status: "name-conflict",
+      message:
+        "That folder already exists. This export creates a new folder and does not replace one. Nothing was published. Choose another folder name or another parent folder."
+    });
+    expect(await readFile(join(parent, "repeat-folder", "README.md"), "utf8")).toBe(firstReadme);
+    expect((await readdir(parent)).sort()).toEqual(["repeat-folder"]);
+
+    answers.open.push({ canceled: false, filePaths: [parent] });
+    const secondPublish = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+      bookId,
+      attemptId: second.attemptId,
+      folderName: "repeat-folder-two"
+    });
+    expect(secondPublish.status).toBe("published");
+    expect((await readdir(parent)).sort()).toEqual(["repeat-folder", "repeat-folder-two"]);
+  });
+
+  test("a path-like, reserved or empty name is refused before the picker", async () => {
+    const { library } = await setup();
+    const bookId = await bookWithLegacy(library);
+    const capture = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
+    if (capture.status !== "ready") throw new Error("expected ready capture");
+    const parent = await temp("studio-md-folder-ipc-invalid-");
+    for (const folderName of ["../outside", "CON", "", "bad/name", ".hidden"]) {
+      const outcome = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+        bookId,
+        attemptId: capture.attemptId,
+        folderName
+      });
+      expect(outcome.status).toBe("name-invalid");
+      if (outcome.status !== "name-invalid") throw new Error("expected name-invalid outcome");
+      expect(outcome.message.length).toBeGreaterThan(0);
+    }
+    expect(askedOpen).toHaveLength(0);
+    expect(await readdir(parent)).toEqual([]);
   });
 });

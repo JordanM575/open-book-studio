@@ -211,7 +211,7 @@ describe("markdown folder attempt journey", () => {
     expect(await snapshotTree(bookDir)).toEqual(before);
   });
 
-  test("a destination that appears during staging settles as unknown, never as success", async () => {
+  test("a destination that appears during staging settles as a name conflict, never as success", async () => {
     const { host, bookId, outParent } = await makeHost({ withImage: true });
     const attempt = await readyAttempt(host, bookId);
     const destination = join(outParent, "appeared-folder");
@@ -225,13 +225,13 @@ describe("markdown folder attempt journey", () => {
     await mkdir(destination);
     await writeFile(join(destination, "actor.txt"), "another actor");
     const settlement = await pending;
-    expect(settlement.status).toBe("unknown");
-    if (settlement.status !== "unknown") throw new Error("expected unknown settlement");
-    expect(settlement.message).toContain("could not be confirmed");
-    expect(settlement.destinationPath).toBe(destination);
+    expect(settlement.status).toBe("name-conflict");
+    if (settlement.status !== "name-conflict") throw new Error("expected name-conflict settlement");
+    expect(settlement.message).toContain("does not replace one");
     expect(await readFile(join(destination, "actor.txt"), "utf8")).toBe("another actor");
     expect((await readdir(destination)).sort()).toEqual(["actor.txt"]);
-    expect(host.requestCancel(attempt.attemptId)).toEqual({ status: "already-settled", attemptId: attempt.attemptId });
+    expect((await readdir(outParent)).sort()).toEqual(["appeared-folder"]);
+    expect(host.requestCancel(attempt.attemptId)).toEqual({ status: "accepted", attemptId: attempt.attemptId });
   });
 
   test("cancellation after the commit begins is too late", async () => {

@@ -1,7 +1,7 @@
 # Plan: book formatting and export
 
 **Spec:** [spec.md](spec.md) · **Tasks:** [tasks.md](tasks.md)
-**Status:** In progress. Phase 1, the D-108 renderers and ordered matter (T007–T013, D-169 and D-170 accepted 2026-11-04) are implemented; the Markdown folder contract is recorded by D-202 (2026-11-09), its pure planner is implemented and accepted, and its host protocol and production policy are specified by D-203 (T014-Q0), while capture, publication and the journey (T014-Q, T014-U) and the rest of Phase 4 are open.
+**Status:** In progress. Phase 1, the D-108 renderers and ordered matter (T007–T013, D-169 and D-170 accepted 2026-11-04) are implemented; the Markdown folder contract is recorded by D-202 (2026-11-09), its pure planner is implemented and accepted, its host protocol and production policy are specified by D-203 (T014-Q0), and capture, publication and the journey are implemented on the desktop local-folder target; T014 remains open pending T016/T017/T019, and replacement, other targets and the rest of Phase 4 remain open.
 
 ## Constraints
 
@@ -132,11 +132,11 @@ P + Q ──> U: validated mounted journey ──> I: integrated evidence and fr
   capability before **Q** implementation. Specified by D-203 in
   [the host contract](../../docs/formats/markdown-folder-host.md): enumeration and closing-sample
   observation with the change-and-change-back disclosure, the §3 verification handoff,
-  `Q0 production policy v1` with synthetic planner measurements, and a capability matrix claiming no
-  folder capability today. Implemented acquisition counts and real host peaks remain **Q** evidence.
-  One shared host integration owner coordinates the Library, image-store and editor seams; there are
-  no competing writers. Existing-folder replacement and later-change preservation remain named
-  successor work inside this branch.
+  `Q0 production policy v1` with synthetic planner measurements, and a capability matrix claiming the
+  implemented desktop local-folder journey and no other target. Implemented acquisition counts and real
+  host peaks remain **Q** evidence. One shared host integration owner coordinates the Library,
+  image-store and editor seams; there are no competing writers. Existing-folder replacement and
+  later-change preservation remain named successor work inside this branch.
 - **U/I** begin only after the P and Q interfaces are agreed: validated transport, content-bound
   consent, destination choice, accessible warnings and file lists, real pre-commit cancellation and
   truthful late or unknown settlement, followed by integrated positive and failure evidence on each

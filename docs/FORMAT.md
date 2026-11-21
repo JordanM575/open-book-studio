@@ -1246,12 +1246,13 @@ saves. Only the matter save writes `matter`; a general book update never does. T
 
 ## Markdown folder export
 
-**Status: specified contract, not implemented output.** [D-202](DECISIONS.md#d-202--markdown-folder-export-pure-planner-contract-and-saved-source-bundle)
-accepts the contract and [the folder format](formats/markdown-folder.md) is normative; the host
-protocol and production policy are specified in [the host contract](formats/markdown-folder-host.md)
-under [D-203](DECISIONS.md#d-203--markdown-folder-host-protocol-and-production-policy). The pure
-planner exists; no capture, publisher or mounted journey exists yet, so the app does not offer this
-export and no folder found on disk was necessarily produced under these rules.
+**Status: implemented for the desktop local-folder target.** [D-202](DECISIONS.md#d-202--markdown-folder-export-pure-planner-contract-and-saved-source-bundle)
+accepts the contract and [the folder format](formats/markdown-folder.md) is normative;
+[D-203](DECISIONS.md#d-203--markdown-folder-host-protocol-and-production-policy) specifies the host
+protocol and production policy. Capture, planning, owned staging, no-replace commit, attempt-bound
+cancellation and the mounted Format journey are implemented and covered by synthetic tests. Replacing
+an existing folder is refused and remains separately owned successor work; browser, removable, network
+and synced destinations are not qualified. No publisher, measurement or device acceptance is claimed.
 
 The export writes a one-way reading copy: `README.md`, an `images/` directory (present even when
 empty) and dense uniformly numbered reading files in one order — the generated title page when matter
@@ -1273,8 +1274,10 @@ bound to verified private bytes before planning and copied exactly, with frozen 
 optional failures; copied files may carry embedded metadata and their placement text names position,
 not content. Planning is bounded in every dimension — input, generated text, output, inventory,
 retrieval and a conservative accounted payload that is a logical envelope, not measured memory — and
-a fresh plan must allow every file to be retrieved once under all limits together. Publication,
-no-replace replacement, cancellation and per-target qualification remain gated host work.
+a fresh plan must allow every file to be retrieved once under all limits together. Publication and
+attempt-bound cancellation are implemented for the desktop local-folder target. Replacing an existing
+or nonempty folder remains separately owned successor work and is refused; browser and other
+destination classes remain unqualified.
 
 ## Chapter files
 

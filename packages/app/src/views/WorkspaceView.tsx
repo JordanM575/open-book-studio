@@ -8,7 +8,7 @@ import type {
   ReorderChapterResult
 } from "@ai-book-studio/core/schema";
 import type { ImageRecord } from "@ai-book-studio/core/images/schema";
-import type { RecoveredDraft } from "@ai-book-studio/core/ipc";
+import type { ManuscriptExportOutcome, RecoveredDraft, Result } from "@ai-book-studio/core/ipc";
 import { plainSaveReason } from "@ai-book-studio/core/library/errors";
 import { modelDisplayName } from "@ai-book-studio/core/providers/compatibility";
 import type { StorageSummary } from "@ai-book-studio/core/library/storage";
@@ -44,7 +44,7 @@ import { RecoveryPanel } from "../components/RecoveryPanel";
 import { ReviewGateDialog, type ReviewGateView } from "../components/ReviewGateDialog";
 import { ReviewReportDialog, type ReviewRunView } from "../components/ReviewReportDialog";
 import { reviewFailureCoverage } from "../lib/review-worker-validation";
-import { exportBlockedMessage, exportReceipt, type ManuscriptExportReceipt } from "../lib/export-save";
+import { exportBlockedMessage, exportReceipt, isCancelledOutcome, type ManuscriptExportReceipt } from "../lib/export-save";
 import { runAfterReviewSave } from "../lib/review-save-gate";
 import { analyzeReviewInWorker, verifyRepetitionInWorker } from "../lib/review-worker";
 import { REPETITION_VERSION } from "@ai-book-studio/core/review/repetition";
@@ -223,9 +223,14 @@ export function WorkspaceView({
   const [voiceStatusRevision, setVoiceStatusRevision] = useState(0);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | undefined>(undefined);
   const [exporting, setExporting] = useState(false);
+  const [exportingTarget, setExportingTarget] = useState<string | null>(null);
+  const [exportAttemptActive, setExportAttemptActive] = useState(false);
+  const [exportCancelling, setExportCancelling] = useState(false);
+  const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [exportNote, setExportNote] = useState<(ManuscriptExportReceipt & { bookId: string; message: string; target: string }) | null>(null);
   const exportGeneration = useRef(0);
   const exportPending = useRef(false);
+  const exportAttemptId = useRef<string | null>(null);
   const formatExportPreflight = useRef<(() => Promise<void>) | null>(null);
   const registerExportPreflight = useCallback((check: () => Promise<void>) => {
     formatExportPreflight.current = check;
@@ -790,7 +795,12 @@ export function WorkspaceView({
   useEffect(() => {
     exportGeneration.current++;
     exportPending.current = false;
+    exportAttemptId.current = null;
     setExporting(false);
+    setExportingTarget(null);
+    setExportAttemptActive(false);
+    setExportCancelling(false);
+    setExportStatus(null);
     setExportNote(null);
     window.clearTimeout(exportNoteTimer.current);
     return () => {
@@ -800,14 +810,23 @@ export function WorkspaceView({
   }, [bookId]);
 
   /** Saves the open chapter, runs one export and names the written file for a few seconds. */
-  const runExport = async (target: string, request: () => ReturnType<typeof window.studio.books.exportDocx>): Promise<void> => {
+  const runExport = async (
+    target: string,
+    request: (attemptId: string) => Promise<Result<ManuscriptExportOutcome | null>>
+  ): Promise<void> => {
     if (exportPending.current || detail?.book.id !== bookId) return;
     const generation = ++exportGeneration.current;
     const originId = bookId;
     const current = () => exportGeneration.current === generation && shownBookId.current === originId;
     const preflight = formatExportPreflight.current;
+    const attemptId = crypto.randomUUID();
     exportPending.current = true;
+    exportAttemptId.current = attemptId;
     setExporting(true);
+    setExportingTarget(target);
+    setExportAttemptActive(false);
+    setExportCancelling(false);
+    setExportStatus(`Exporting ${target}…`);
     setExportNote(null);
     window.clearTimeout(exportNoteTimer.current);
     try {
@@ -821,9 +840,20 @@ export function WorkspaceView({
       }
       await preflight?.();
       if (!current()) return;
-      const receipt = exportReceipt(await must(request()));
+      setExportAttemptActive(true);
+      const outcome = await must(request(attemptId));
       // An already-published old-book export stays published; only its obsolete UI reply is ignored.
-      if (!current() || !receipt) return;
+      if (!current()) return;
+      if (isCancelledOutcome(outcome)) {
+        setExportStatus(outcome.message);
+        return;
+      }
+      const receipt = exportReceipt(outcome);
+      if (!receipt) {
+        setExportStatus(null);
+        return;
+      }
+      setExportStatus(null);
       const name = receipt.path.split(/[\\/]/).pop() ?? receipt.path;
       setExportNote({ ...receipt, bookId: originId, message: `Saved ${name}`, target });
       // A warning remains available to read until the next export, rather than timing out.
@@ -831,17 +861,42 @@ export function WorkspaceView({
         if (current()) setExportNote(null);
       }, 8000);
     } catch (error) {
-      if (current()) onNotice(error);
+      if (current()) {
+        setExportStatus(null);
+        onNotice(error);
+      }
     } finally {
       if (current()) {
         exportPending.current = false;
+        exportAttemptId.current = null;
         setExporting(false);
+        setExportingTarget(null);
+        setExportAttemptActive(false);
+        setExportCancelling(false);
       }
     }
   };
 
-  const exportDocx = (): Promise<void> => runExport("Word document", () => window.studio.books.exportDocx(bookId));
-  const exportMarkdown = (): Promise<void> => runExport("Markdown", () => window.studio.books.exportMarkdown(bookId));
+  /** Ask the main process to stop this header export before publication. */
+  const cancelExport = async (): Promise<void> => {
+    const attemptId = exportAttemptId.current;
+    if (!attemptId || exportCancelling) return;
+    setExportCancelling(true);
+    try {
+      const reply = await must(window.studio.books.exportCancel({ bookId, attemptId }));
+      if (reply.status === "too-late") {
+        setExportStatus(
+          "Cancellation arrived after publication began. The export is finishing; it will report whether the file was published."
+        );
+      }
+    } catch (error) {
+      // A failed cancel request claims nothing; the export reply settles the real outcome.
+      setExportStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const exportDocx = (): Promise<void> => runExport("Word document", (attemptId) => window.studio.books.exportDocx(bookId, attemptId));
+  const exportMarkdown = (): Promise<void> => runExport("Markdown", (attemptId) => window.studio.books.exportMarkdown(bookId, attemptId));
 
   const saveFormatSettings = ({ patch, from }: FormatChange): Promise<void> => {
     // The book the author changed the setting in, which the save belongs to even if the workspace has
@@ -1395,6 +1450,33 @@ export function WorkspaceView({
             >
               <FileSearch size={16} />
             </Button>
+            {exporting && exportingTarget ? (
+              <div
+                className="flex items-center gap-2 text-(length:--text-caption-size) text-muted-foreground"
+                role="status"
+                data-testid="workspace-export-progress"
+              >
+                <span>{exportCancelling ? "Cancelling…" : `Exporting ${exportingTarget}…`}</span>
+                {exportAttemptActive ? (
+                  <Button
+                    data-testid="workspace-export-cancel"
+                    disabled={exportCancelling}
+                    onClick={() => void cancelExport()}
+                  >
+                    Cancel export
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+            {exportStatus ? (
+              <p
+                className="max-w-sm break-words text-(length:--text-caption-size) text-muted-foreground"
+                role="status"
+                data-testid="workspace-export-note"
+              >
+                {exportStatus}
+              </p>
+            ) : null}
             {exportNote?.bookId === bookId ? (
               <div className="max-w-sm break-words text-(length:--text-caption-size) text-muted-foreground" role="status">
                 <p>{exportNote.message}</p>
