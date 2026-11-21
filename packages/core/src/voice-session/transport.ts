@@ -77,6 +77,32 @@ export interface TransportFacts {
   readonly permitted: boolean;
 }
 
+/**
+ * Renderer-safe projection of what a request cost. Unknown never becomes zero: a dispatched
+ * chunk without a provider-reported amount counts as unknown, and a reported zero only produces
+ * `reported` when nothing is unknown. `pending` is only for requests that have not settled yet and
+ * is produced by the host, never from a receipt.
+ */
+import type { VoiceChargeView } from "../ipc";
+
+function roundUsd6(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+/** Project the charge facts onto the shared view. `dispatched` counts settled chunks. */
+export function chargeViewOfCounts(dispatched: number, reportedUsd: number, unknownChunks: number): VoiceChargeView {
+  if (dispatched === 0) return { state: "none" };
+  if (unknownChunks === 0) return { state: "reported", usd: roundUsd6(reportedUsd) };
+  if (reportedUsd > 0) return { state: "mixed", reportedUsd: roundUsd6(reportedUsd), unknownChunks };
+  return { state: "unknown" };
+}
+
+/** Project a settled receipt onto the shared charge view. */
+export function chargeViewOfReceipt(receipt: TransportReceipt): VoiceChargeView {
+  const settled = receipt.operation.chunks.filter((chunk) => chunk.state === "settled").length;
+  return chargeViewOfCounts(settled, receipt.reportedUsd, receipt.unknownChunks);
+}
+
 export type TransportEffect =
   | {
       readonly type: "send";
@@ -120,7 +146,17 @@ export type TransportEvent =
       readonly costUsd?: number | null;
       readonly failure?: string;
     }
-  | { readonly type: "cancel"; readonly operationId: number; readonly reason: string };
+  | { readonly type: "cancel"; readonly operationId: number; readonly reason: string }
+  | {
+      /**
+       * Close a pre-dispatch operation with outcome `refusal`. No abort is emitted, every chunk
+       * that has not been dispatched is recorded as unsent and the slot is released. A dispatched
+       * or settled chunk, or an unknown operation, makes this a no-op.
+       */
+      readonly type: "refuse";
+      readonly operationId: number;
+      readonly reason: string;
+    };
 
 const CHUNK_LIMIT = 256;
 const RECEIPT_LIMIT = 256;
@@ -269,7 +305,9 @@ export function reduceTransport(ledger: TransportLedger, event: TransportEvent):
             : entry),
         };
         update({ slots: { ...state.slots, [operation.kind]: closed } });
-        finish(closed, outcome, outcome === "cancellation" ? "Cancelled before dispatch." : null);
+        finish(closed, outcome, outcome === "cancellation"
+          ? "Cancelled before dispatch."
+          : "The route, session or audio permission changed before dispatch. No request was sent.");
         if (outcome === "refusal") {
           update({ reason: "The route, session or audio permission changed before dispatch. No request was sent." });
         }
@@ -309,6 +347,16 @@ export function reduceTransport(ledger: TransportLedger, event: TransportEvent):
       const outcome: TransportOutcome = operation.cancelled ? "cancellation" : event.outcome;
       update({ slots: { ...state.slots, [operation.kind]: settled } });
       finish(settled, outcome, outcome === "failure" ? failureText(event.failure) : null);
+      return result();
+    }
+    case "refuse": {
+      const operation = operationIn(state, event.operationId);
+      if (!operation) return result();
+      // A refusal is only honest when nothing is mid-flight. Settled chunks keep their charge;
+      // queued (never dispatched) chunks close out as unsent.
+      if (operation.chunks.some((entry) => entry.state === "dispatched")) return result();
+      const reason = failureText(event.reason);
+      finish(operation, "refusal", reason);
       return result();
     }
     case "cancel": {

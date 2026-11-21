@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { speechModels } from "@ai-book-studio/core/providers/speech";
 import type { TranscriptionSelection } from "@ai-book-studio/core/providers/voice-preferences";
+import type { VoiceOperationView } from "@ai-book-studio/core/ipc";
 import { recordedBlobToWav } from "../lib/audio";
 
-export type DictationState = "idle" | "requesting" | "recording" | "transcribing";
+export type DictationState = "idle" | "requesting" | "recording" | "transcribing" | "cancelling";
 
 export interface DictationOptions {
   onText: (text: string) => void;
@@ -52,6 +53,7 @@ export async function dictationReadiness(): Promise<
 export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: DictationOptions) {
   const [state, setState] = useState<DictationState>("idle");
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [receipt, setReceipt] = useState<VoiceOperationView | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
   const stream = useRef<MediaStream | null>(null);
   const startedAt = useRef(0);
@@ -59,6 +61,13 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
   const mounted = useRef(true);
   const attempt = useRef(0);
   const starting = useRef(false);
+  /** The host's public id for the in-flight transcription, learned from the operation event. */
+  const operationId = useRef<number | null>(null);
+  const operationRevision = useRef(0);
+  /** True between the transcribe call and its resolution; a starting event may belong to us. */
+  const expectingOperation = useRef(false);
+  /** A stop was pressed before the host announced the operation; cancel as soon as it does. */
+  const cancelArmed = useRef(false);
 
   const clearTimer = useCallback(() => {
     if (timer.current) {
@@ -74,10 +83,50 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
     stream.current = null;
   }, []);
 
+  // Operation events from the host: adopt the minted id, keep the newest view, settle at the end.
+  useEffect(() => {
+    const onOperation = window.studio?.voice?.onOperation;
+    if (!onOperation) return undefined;
+    return onOperation((view) => {
+      if (view.kind !== "stt") return;
+      if (operationId.current === null) {
+        if (view.phase !== "starting" || !expectingOperation.current) return;
+        operationId.current = view.operationId;
+        operationRevision.current = view.viewRevision;
+        // The author pressed Stop before the host minted the id; cancel right now.
+        if (cancelArmed.current) {
+          cancelArmed.current = false;
+          void window.studio?.voice?.cancel?.({ operationId: view.operationId })?.catch(() => {});
+          if (mounted.current) setState("cancelling");
+        }
+        return;
+      }
+      if (view.operationId !== operationId.current) return;
+      if (view.viewRevision <= operationRevision.current) return;
+      operationRevision.current = view.viewRevision;
+      if (view.phase === "cancelling") {
+        if (mounted.current) setState("cancelling");
+        return;
+      }
+      if (view.phase === "settled") {
+        setReceipt(view);
+        operationId.current = null;
+        cancelArmed.current = false;
+        expectingOperation.current = false;
+        if (mounted.current) {
+          setState("idle");
+          setElapsedMs(0);
+        }
+      }
+    });
+  }, []);
+
   const fail = useCallback(
     (message: string) => {
       if (!mounted.current) return;
       starting.current = false;
+      cancelArmed.current = false;
+      operationId.current = null;
       setState("idle");
       setElapsedMs(0);
       onError(new Error(message));
@@ -91,6 +140,14 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
     active.stop();
   }, []);
 
+  // Ask the host to cancel the in-flight transcription, if there is one. The host keeps the id;
+  // the renderer may only ask for the stop to happen.
+  const cancelHostRequest = useCallback(() => {
+    const id = operationId.current;
+    if (id === null) return;
+    void window.studio?.voice?.cancel?.({ operationId: id })?.catch(() => {});
+  }, []);
+
   const cancel = useCallback(() => {
     attempt.current += 1;
     starting.current = false;
@@ -99,15 +156,28 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
     recorder.current = null;
     if (active && active.state !== "inactive") active.stop();
     release();
+    if (operationId.current !== null || expectingOperation.current) {
+      cancelArmed.current = true;
+      cancelHostRequest();
+      if (mounted.current) setState("cancelling");
+      return;
+    }
+    cancelArmed.current = false;
     if (mounted.current) {
       setState("idle");
       setElapsedMs(0);
     }
-  }, [clearTimer, release]);
+  }, [cancelHostRequest, clearTimer, release]);
 
   const start = useCallback(async () => {
-    if (state !== "idle" || starting.current) return;
+    if (state !== "idle" && state !== "cancelling") return;
+    if (starting.current) return;
     starting.current = true;
+    cancelArmed.current = false;
+    operationId.current = null;
+    operationRevision.current = 0;
+    expectingOperation.current = false;
+    setReceipt(null);
     const current = ++attempt.current;
     setState("requesting");
     const readiness = await dictationReadiness();
@@ -182,20 +252,38 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
           }
           const wav = await recordedBlobToWav(recorded);
           if (current !== attempt.current || !mounted.current) return;
+          expectingOperation.current = true;
           const result = await window.studio.voice.transcribe({
             audio: wav.buffer.slice(wav.byteOffset, wav.byteOffset + wav.byteLength) as ArrayBuffer,
             expectedSelection: readiness.selection
           });
           if (current !== attempt.current || !mounted.current) return;
-          if (!result.ok) throw new Error(result.error.message);
-          if (!result.data.text) {
-            fail("No speech was detected. Try again a little closer to the microphone.");
+          expectingOperation.current = false;
+          operationId.current = null;
+          cancelArmed.current = false;
+          starting.current = false;
+          if (!result.ok) {
+            setState("idle");
+            setElapsedMs(0);
+            onError(new Error(result.error.message));
             return;
           }
-          starting.current = false;
+          const outcome = result.data;
+          setReceipt(outcome.receipt);
           setState("idle");
           setElapsedMs(0);
-          onText(result.data.text);
+          if (outcome.status === "success") {
+            if (!outcome.transcript.text) {
+              onError(new Error("No speech was detected. Try again a little closer to the microphone."));
+              return;
+            }
+            onText(outcome.transcript.text);
+            return;
+          }
+          // A refusal or failure surfaces once; a cancel is a deliberate stop, not an error.
+          if (outcome.status === "refusal" || outcome.status === "failure") {
+            onError(new Error(outcome.message));
+          }
         } catch (error) {
           if (current !== attempt.current || !mounted.current) return;
           fail(error instanceof Error ? error.message : String(error));
@@ -227,6 +315,8 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
       mounted.current = false;
       attempt.current += 1;
       starting.current = false;
+      cancelArmed.current = false;
+      operationId.current = null;
       clearTimer();
       const active = recorder.current;
       recorder.current = null;
@@ -235,5 +325,5 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
     };
   }, [clearTimer, release]);
 
-  return { state, elapsedMs, start, stop, cancel };
+  return { state, elapsedMs, start, stop, cancel, receipt };
 }

@@ -10,6 +10,8 @@ import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from "@ai-book-studi
 import { ProviderError } from "@ai-book-studio/core/providers/types";
 import type { Chapter } from "@ai-book-studio/core/schema";
 import { DraftBuffer } from "../src/main/drafts";
+import { VoiceCancelRegistry } from "../src/main/voice-cancel-registry";
+import { VoiceRequestHost, VoiceRouteAuthority, type VoiceRequestScope } from "../src/main/voice-request";
 import { Library } from "../src/main/library/store";
 import { MetricsStore } from "../src/main/metrics";
 import { RecoveryStore } from "../src/main/recovery";
@@ -117,6 +119,27 @@ const CONNECTION = {
 };
 // A key-shaped value, assembled at runtime so the repository's secret scan never sees one here.
 const KEY = ["sk", "or", "v1", "0123456789abcdef0123456789abcdef"].join("-");
+function wav(): Uint8Array {
+  const sampleRate = 16_000;
+  const dataBytes = sampleRate * 2;
+  const bytes = new Uint8Array(44 + dataBytes);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+  view.setUint32(4, 36 + dataBytes, true);
+  bytes.set([0x57, 0x41, 0x56, 0x45], 8);
+  bytes.set([0x66, 0x6d, 0x74, 0x20], 12);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  bytes.set([0x64, 0x61, 0x74, 0x61], 36);
+  view.setUint32(40, dataBytes, true);
+  return bytes;
+}
+
 const PNG = new Uint8Array(
   Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==",
@@ -191,18 +214,44 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
   };
   const voice = {
     connections: mock(async () => [CONNECTION]),
-    transcribe: mock(async (_input: unknown) => ({ text: "The tide was out." }))
+    // Behaves like the real service: rechecks the pinned route, dispatches through the ledger
+    // scope and settles, so a second call is admitted the same way production behaves.
+    transcribe: mock(async (_input: unknown, scope: VoiceRequestScope) => {
+      await scope.recheck();
+      const next = scope.chunk();
+      if (!next) {
+        return { status: "refusal", message: "The transcription stopped before it could be sent.", receipt: scope.view() };
+      }
+      scope.settle(next.chunkId, { outcome: "success", costUsd: null });
+      return {
+        status: "success",
+        transcript: { text: "The tide was out.", provider: "openrouter", connectionLabel: "OpenRouter", model: "openai/whisper-1", durationMs: 10, costUsd: null, turns: [] },
+        receipt: scope.view()
+      };
+    })
   };
   const speech = {
     connections: mock(async (): Promise<unknown[]> => []),
-    speak: mock(async (_input: unknown) => ({
-      mimeType: "audio/wav",
-      bytes: new Uint8Array([82, 73, 70, 70]),
-      characters: 10,
-      chunks: 1,
-      connectionLabel: "OpenAI",
-      model: "gpt-4o-mini-tts"
-    }))
+    speak: mock(async (_input: unknown, scope: VoiceRequestScope) => {
+      await scope.recheck();
+      const next = scope.chunk();
+      if (!next) {
+        return { status: "refusal", message: "The speaking stopped before it could be sent.", receipt: scope.view() };
+      }
+      scope.settle(next.chunkId, { outcome: "success", costUsd: null });
+      return {
+        status: "success",
+        reply: {
+          mimeType: "audio/wav",
+          dataUrl: `data:audio/wav;base64,${Buffer.from([82, 73, 70, 70]).toString("base64")}`,
+          characters: 10,
+          chunks: 1,
+          connectionLabel: "OpenAI",
+          model: "gpt-4o-mini-tts"
+        },
+        receipt: scope.view()
+      };
+    })
   };
   const images = {
     generate: mock(async (_input: unknown) => ({ bytes: PNG, model: "muse-image", size: "1024x1024", costUsd: 0.04 }))
@@ -220,6 +269,17 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
   };
   const backend = { glassesUrl: "http://127.0.0.1:4318/glasses?token=ipc" };
   const working = new Set<string>();
+  const voiceRegistry = new VoiceCancelRegistry();
+  const voiceRoutes = new VoiceRouteAuthority(
+    { voicePreferences: () => (saved.voicePreferences as VoicePreferences | undefined) ?? DEFAULT_VOICE_PREFERENCES },
+    providers as never
+  );
+  const voiceRequests = new VoiceRequestHost({
+    registry: voiceRegistry,
+    routes: voiceRoutes,
+    emit: () => {},
+    isOwnerCurrent: () => true
+  });
   registerIpc(
     studio as never,
     () => (options.window ?? null) as never,
@@ -232,21 +292,29 @@ async function setup(options: { open?: boolean; window?: object } = {}) {
     speech as never,
     () => backend as never,
     bridge as never,
-    (bookId) => working.has(bookId)
+    (bookId) => working.has(bookId),
+    undefined,
+    voiceRegistry,
+    undefined,
+    voiceRequests
   );
   const services = [providers, agent, voice, speech, images];
   return { root, library, studio, saved, settings, providers, agent, voice, speech, images, bridge, working, services };
 }
 
-async function call(channel: string, payload?: unknown): Promise<Result<unknown>> {
+/** A sender that matches the fake studio window the voice handlers check. */
+const VOICE_WINDOW = { webContents: { id: 7, mainFrame: { frame: "main" }, send: () => {} } };
+const VOICE_EVENT = { sender: { id: 7 }, senderFrame: VOICE_WINDOW.webContents.mainFrame };
+
+async function call(channel: string, payload?: unknown, event: unknown = {}): Promise<Result<unknown>> {
   const handler = handlers.get(channel);
   if (!handler) throw new Error(`No handler registered for ${channel}.`);
-  return (await handler({}, payload)) as Result<unknown>;
+  return (await handler(event, payload)) as Result<unknown>;
 }
 
 /** The data of a call that must succeed; a refusal fails the test with its message. */
-async function data<T>(channel: string, payload?: unknown): Promise<T> {
-  const result = await call(channel, payload);
+async function data<T>(channel: string, payload?: unknown, event?: unknown): Promise<T> {
+  const result = await call(channel, payload, event);
   if (!result.ok) throw new Error(`${channel} refused: [${result.error.code}] ${result.error.message}`);
   return result.data as T;
 }
@@ -1137,22 +1205,28 @@ describe("the agent", () => {
 
 describe("voice and illustrations", () => {
   test("transcription and speech receive only what the author chose", async () => {
-    const { voice, speech, saved } = await setup();
+    const { voice, speech, saved } = await setup({ window: VOICE_WINDOW });
     expect(await data(IPC.voice.connections)).toEqual([CONNECTION]);
-    const audio = new Uint8Array([82, 73, 70, 70, 0, 0]);
-    const expectedSelection = { connectionId: CONNECTION.id, model: "openai/whisper-1" };
-    await data(IPC.voice.transcribe, { audio, expectedSelection, languageBias: [], keywords: ["Mara"] });
-    expect(voice.transcribe).toHaveBeenLastCalledWith({ audio, expectedSelection, keywords: ["Mara"] });
-    await data(IPC.voice.transcribe, { audio: audio.buffer, expectedSelection, languageBias: ["en"] });
-    expect(voice.transcribe).toHaveBeenLastCalledWith({ audio, expectedSelection, languageBias: ["en"] });
-
-    expect(await data(IPC.voice.settings)).toEqual(DEFAULT_VOICE_PREFERENCES);
     const preferences: VoicePreferences = {
       transcription: { connectionId: CONNECTION.id, model: "openai/whisper-1" },
       speaking: { connectionId: CONNECTION.id, model: "heygen/heygen-voice-1", voice: "nadine" }
     };
     await data(IPC.voice.updateSettings, preferences);
     expect(saved.voicePreferences).toEqual(preferences);
+    const audio = wav();
+    const expectedSelection = { connectionId: CONNECTION.id, model: "openai/whisper-1" };
+    await data(IPC.voice.transcribe, { audio, expectedSelection, languageBias: [], keywords: ["Mara"] }, VOICE_EVENT);
+    expect(voice.transcribe).toHaveBeenLastCalledWith(
+      { audio, keywords: ["Mara"] },
+      expect.objectContaining({ requestId: expect.any(Number) })
+    );
+    await data(IPC.voice.transcribe, { audio: audio.buffer, expectedSelection, languageBias: ["en"] }, VOICE_EVENT);
+    expect(voice.transcribe).toHaveBeenLastCalledWith(
+      { audio: expect.any(Uint8Array), languageBias: ["en"] },
+      expect.objectContaining({ requestId: expect.any(Number) })
+    );
+
+    expect(await data(IPC.voice.settings)).toEqual(preferences);
     const speakers = await data<{ available: boolean; selected: boolean; model: string | null; voice: string | null; voices: string[] }>(IPC.voice.speakers);
     expect(speakers).toMatchObject({
       available: true,
@@ -1162,10 +1236,10 @@ describe("voice and illustrations", () => {
       voices: expect.arrayContaining(["nadine", "vincent"])
     });
 
-    const spoken = await data<{ dataUrl: string; chunks: number }>(IPC.voice.speak, { text: "Read this.", speed: 1.25 });
-    expect(spoken.dataUrl).toBe(`data:audio/wav;base64,${Buffer.from([82, 73, 70, 70]).toString("base64")}`);
-    expect(spoken.chunks).toBe(1);
-    expect(speech.speak).toHaveBeenCalledWith({ text: "Read this.", speed: 1.25 });
+    const spoken = await data<{ reply: { dataUrl: string; chunks: number } }>(IPC.voice.speak, { text: "Read this.", speed: 1.25 }, VOICE_EVENT);
+    expect(spoken.reply.dataUrl).toBe(`data:audio/wav;base64,${Buffer.from([82, 73, 70, 70]).toString("base64")}`);
+    expect(spoken.reply.chunks).toBe(1);
+    expect(speech.speak).toHaveBeenCalledWith({ text: "Read this.", speed: 1.25 }, expect.objectContaining({ requestId: expect.any(Number) }));
   });
 
   test("voice preference IPC rejects mismatched models and unsupported voices", async () => {

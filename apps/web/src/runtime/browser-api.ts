@@ -399,7 +399,15 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
             "unsupported",
             "Cancelling a voice request is available in the desktop app."
           )
-        )
+        ),
+      operation: () =>
+        Promise.resolve(
+          failure(
+            "unsupported",
+            "Voice request receipts are available in the desktop app."
+          )
+        ),
+      onOperation: () => () => {}
     },
     images: {
       list: () => safe(async () => ({ manifest: { schemaVersion: 1, images: [] }, warning: null })),

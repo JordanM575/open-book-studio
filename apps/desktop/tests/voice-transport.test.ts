@@ -1,13 +1,31 @@
 import { describe, expect, test } from "bun:test";
-import { MemoryVault } from "@ai-book-studio/core/providers/credentials";
 import { META_SPEECH_MODEL, type VoiceTranscript } from "@ai-book-studio/core/providers/speech";
-import type { ConnectionSummary, StoredCredential } from "@ai-book-studio/core/providers/types";
 import { ProviderError } from "@ai-book-studio/core/providers/types";
 import type { TransportEvent } from "../../../packages/core/src/voice-session/transport";
-import { DEFAULT_VOICE_PREFERENCES, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
-import { ProviderService } from "../src/main/providers";
 import { SpeechService, type SpeakResult } from "../src/main/speech";
 import { VoiceService } from "../src/main/voice";
+import { hostFor, voiceFixture } from "./support/voice-request-host";
+import { DEFAULT_VOICE_PREFERENCES } from "@ai-book-studio/core/providers/voice-preferences";
+import type { ConnectionSummary, StoredCredential } from "@ai-book-studio/core/providers/types";
+import type { ProviderService } from "../src/main/providers";
+
+const TTS_CONNECTION: ConnectionSummary = {
+  id: "conn_openai01", provider: "openai", label: "OpenAI", kind: "api-key", createdAt: "2026-10-26T12:00:00.000Z"
+};
+const TTS_CREDENTIAL: StoredCredential = {
+  ...TTS_CONNECTION, secret: "synthetic-openai-key"
+};
+const TTS_PREFERENCES = {
+  ...DEFAULT_VOICE_PREFERENCES,
+  speaking: { connectionId: "conn_openai01", model: "gpt-4o-mini-tts", voice: "nova" }
+};
+const TTS_PROVIDERS = {
+  list: async () => [TTS_CONNECTION],
+  credential: async (id: string) => {
+    if (id !== TTS_CONNECTION.id) throw new Error("no such connection");
+    return TTS_CREDENTIAL;
+  }
+} as unknown as ProviderService;
 import {
   reportedCharge, requestSignal, settlementForFailure, settlementForSpeech, settlementForTranscript,
 } from "../src/main/voice-transport";
@@ -31,46 +49,6 @@ function wav(seconds = 1): Uint8Array {
   bytes.set([0x64, 0x61, 0x74, 0x61], 36);
   view.setUint32(40, dataBytes, true);
   return bytes;
-}
-
-const metaCredential: StoredCredential = {
-  id: "conn_meta0000001", provider: "meta", label: "Meta", kind: "api-key",
-  createdAt: "2026-11-07T00:00:00.000Z", secret: "synthetic-meta-key",
-  metadata: { baseUrl: "https://api.meta.ai/v1" },
-};
-
-function voiceService(fetchImpl: typeof fetch): VoiceService {
-  const vault = new MemoryVault();
-  void vault.set(metaCredential);
-  const providers = new ProviderService(vault, async () => {}, (async () => {
-    throw new Error("provider catalogue must not be called");
-  }) as unknown as typeof fetch);
-  const preferences: VoicePreferences = {
-    ...DEFAULT_VOICE_PREFERENCES,
-    transcription: { connectionId: metaCredential.id, model: META_SPEECH_MODEL },
-  };
-  return new VoiceService(providers, fetchImpl, () => preferences);
-}
-
-const speaker: ConnectionSummary = {
-  id: "conn_openai01", provider: "openai", label: "OpenAI", kind: "api-key",
-  createdAt: "2026-11-07T00:00:00.000Z",
-};
-const speakerCredential: StoredCredential = { ...speaker, secret: "synthetic-openai-key" };
-
-function speechService(fetchImpl: typeof fetch): SpeechService {
-  const providers = {
-    list: async () => [speaker],
-    credential: async (id: string) => {
-      if (id !== speaker.id) throw new Error("no such connection");
-      return speakerCredential;
-    },
-  } as unknown as ProviderService;
-  const preferences: VoicePreferences = {
-    ...DEFAULT_VOICE_PREFERENCES,
-    speaking: { connectionId: speaker.id, model: "gpt-4o-mini-tts", voice: "nova" },
-  };
-  return new SpeechService(providers, fetchImpl, () => preferences);
 }
 
 describe("voice transport charge vocabulary", () => {
@@ -147,48 +125,69 @@ describe("cancellable service seams", () => {
     expect(requestSignal(60_000).aborted).toBe(false);
   });
 
-  test("VoiceService forwards host cancellation and maps it to a cancellation receipt", async () => {
-    const controller = new AbortController();
-    controller.abort();
+  test("VoiceService forwards host cancellation and settles as a cancellation", async () => {
+    const fx = voiceFixture({
+      fetchImpl: (async () => {
+        throw new Error("unused");
+      }) as unknown as typeof fetch
+    });
+    const reservation = fx.host.reserve("stt", 1, 1, { connectionId: "conn_meta0000001", model: META_SPEECH_MODEL });
+    if (!reservation) throw new Error("reserve refused");
+    const publicId = reservation.publicId;
     let seen: AbortSignal | null = null;
-    const fetchImpl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const abortingFetch = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
       seen = init?.signal ?? null;
+      fx.host.cancel(1, publicId);
       throw new DOMException("Aborted", "AbortError");
     }) as unknown as typeof fetch;
-
-    let failure: unknown = null;
-    try {
-      await voiceService(fetchImpl).transcribe({
-        audio: wav(), expectedSelection: { connectionId: metaCredential.id, model: META_SPEECH_MODEL },
-        signal: controller.signal,
-      });
-    } catch (error) {
-      failure = error;
-    }
+    const begun = await fx.host.begin(reservation);
+    if (!begun.ok) throw new Error("begin refused");
+    const service = new VoiceService(fx.providers, abortingFetch);
+    const outcome = await service.transcribe({ audio: wav() }, begun.scope);
     expect((seen as AbortSignal | null)?.aborted).toBe(true);
-    expect(failure).toMatchObject({ code: "unknown", message: "The transcription request was cancelled." });
-    expect(settlementForFailure(failure)).toMatchObject({ outcome: "cancellation" });
+    expect(outcome.status).toBe("cancellation");
+    expect(outcome.receipt?.status).toBe("cancellation");
+    expect(outcome.receipt?.dispatchedChunks).toBe(1);
+    expect(outcome.receipt?.charge).toEqual({ state: "unknown" });
   });
 
   test("SpeechService stops before the next chunk after an author stop", async () => {
-    const controller = new AbortController();
     let calls = 0;
+    let reservationId = -1;
+    const holder: { current: ReturnType<typeof hostFor> | null } = { current: null };
     const fetchImpl = (async () => {
       calls += 1;
-      // The first chunk is already paid for; the author stops before the second is sent.
-      controller.abort();
+      // The first chunk is dispatched; the author stops before the second is sent.
+      if (calls === 1 && holder.current) holder.current.host.cancel(1, reservationId);
       return new Response(new Uint8Array([1, 2]), { status: 200, headers: { "content-type": "audio/mpeg" } });
     }) as unknown as typeof fetch;
-
-    let failure: unknown = null;
-    try {
-      await speechService(fetchImpl).speak({ text: "One. ".repeat(900), signal: controller.signal });
-    } catch (error) {
-      failure = error;
-    }
+    const fx = hostFor(TTS_PROVIDERS, TTS_PREFERENCES);
+    holder.current = fx;
+    const reservation = fx.host.reserve("tts", 2, 1);
+    reservationId = reservation?.publicId ?? -1;
+    if (!reservation) throw new Error("reserve refused");
+    const begun = await fx.host.begin(reservation);
+    if (!begun.ok) throw new Error("begin refused");
+    const speech = new SpeechService(TTS_PROVIDERS, fetchImpl);
+    const outcome = await speech.speak({ text: "One. ".repeat(900) }, begun.scope);
     expect(calls).toBe(1);
-    expect(failure).toMatchObject({ code: "unknown", message: "The speaking request was cancelled." });
-    expect(settlementForFailure(failure)).toMatchObject({ outcome: "cancellation" });
+    expect(outcome.status).toBe("cancellation");
+    expect(outcome.receipt?.status).toBe("cancellation");
+    // The first chunk settled (success) before the stop took effect; the second never went out.
+    expect(outcome.receipt?.settledChunks).toBe(1);
+    expect(outcome.receipt?.unsentChunks).toBe(1);
+  });
+
+  test("a deadline, not a host stop, settles as a failure with unknown charge", () => {
+    const timeout = new DOMException("The operation timed out.", "TimeoutError");
+    expect(settlementForFailure(timeout)).toEqual({
+      outcome: "failure",
+      failure: "The request timed out. It may have reached the provider; the cost is unknown."
+    });
+  });
+
+  test("a local host abort still settles as cancellation, not as a timeout", () => {
+    expect(settlementForFailure(new DOMException("Aborted", "AbortError")).outcome).toBe("cancellation");
   });
 });
 
@@ -203,51 +202,51 @@ test("a custom abort reason still settles as cancellation", () => {
 
 describe("aborts that land while the body is read", () => {
   test("VoiceService treats a stop after headers as a cancellation", async () => {
-    const controller = new AbortController();
-    const fetchImpl = (async () => ({
-      ok: true,
-      status: 200,
-      headers: new Headers({ "content-type": "application/json" }),
-      text: async () => "",
-      json: async () => {
-        controller.abort("Author stopped.");
-        throw new DOMException("Aborted", "AbortError");
-      }
-    })) as unknown as typeof fetch;
-
-    let failure: unknown = null;
-    try {
-      await voiceService(fetchImpl).transcribe({
-        audio: wav(), expectedSelection: { connectionId: metaCredential.id, model: META_SPEECH_MODEL },
-        signal: controller.signal
-      });
-    } catch (error) {
-      failure = error;
-    }
-    expect(failure).toMatchObject({ code: "unknown", message: "The transcription request was cancelled." });
-    expect(settlementForFailure(failure)).toMatchObject({ outcome: "cancellation" });
+    let publicId = -1;
+    const fx = voiceFixture({
+      fetchImpl: (async () => ({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "content-type": "application/json" }),
+        text: async () => "",
+        json: async () => {
+          fx.host.cancel(1, publicId);
+          throw new DOMException("Aborted", "AbortError");
+        }
+      })) as unknown as typeof fetch
+    });
+    const reservation = fx.host.reserve("stt", 1, 1, { connectionId: "conn_meta0000001", model: META_SPEECH_MODEL });
+    if (!reservation) throw new Error("reserve refused");
+    publicId = reservation.publicId;
+    const begun = await fx.host.begin(reservation);
+    if (!begun.ok) throw new Error("begin refused");
+    const service = new VoiceService(fx.providers, fx.fetchImpl);
+    const outcome = await service.transcribe({ audio: wav() }, begun.scope);
+    expect(outcome.status).toBe("cancellation");
+    expect(outcome.receipt?.status).toBe("cancellation");
   });
 
   test("SpeechService treats a stop after headers as a cancellation", async () => {
-    const controller = new AbortController();
-    const fetchImpl = (async () => ({
+    let publicId = -1;
+    const fx = hostFor(TTS_PROVIDERS, TTS_PREFERENCES);
+    const abortingFetch = (async () => ({
       ok: true,
       status: 200,
       headers: new Headers({ "content-type": "audio/mpeg" }),
       text: async () => "",
       arrayBuffer: async () => {
-        controller.abort("Author stopped.");
+        fx.host.cancel(1, publicId);
         throw new DOMException("Aborted", "AbortError");
       }
     })) as unknown as typeof fetch;
-
-    let failure: unknown = null;
-    try {
-      await speechService(fetchImpl).speak({ text: "One sentence.", signal: controller.signal });
-    } catch (error) {
-      failure = error;
-    }
-    expect(failure).toMatchObject({ code: "unknown", message: "The speaking request was cancelled." });
-    expect(settlementForFailure(failure)).toMatchObject({ outcome: "cancellation" });
+    const reservation = fx.host.reserve("tts", 1, 1);
+    if (!reservation) throw new Error("reserve refused");
+    publicId = reservation.publicId;
+    const begun = await fx.host.begin(reservation);
+    if (!begun.ok) throw new Error("begin refused");
+    const service = new SpeechService(TTS_PROVIDERS, abortingFetch);
+    const outcome = await service.speak({ text: "One sentence." }, begun.scope);
+    expect(outcome.status).toBe("cancellation");
+    expect(outcome.receipt?.status).toBe("cancellation");
   });
 });

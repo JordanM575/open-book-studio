@@ -97,9 +97,69 @@ export interface VoiceCancelReceipt {
   accepted: boolean;
   /** True when this call aborted a chunk the host had already dispatched locally. */
   abortedLocally: boolean;
-  /** True when this call released the slot because nothing had been sent. */
+  /** True when this call released the slot because nothing had been sent. A reservation-only
+   * cancel reports true as well: nothing was occupied, so nothing remains held. */
   released: boolean;
 }
+
+/**
+ * What a voice request knows about its cost. Unknown is a first-class state, never zero.
+ *
+ * - `pending`: the request is still in flight; no claim is made yet.
+ * - `none`: no chunk was dispatched; nothing was sent and nothing is owed.
+ * - `reported`: every dispatched chunk reported a finite non-negative amount. Zero is a real,
+ *   provider-reported zero, not an assumption.
+ * - `unknown`: at least one dispatched chunk carries no reported amount and no reported amount is
+ *   positive. The provider may have charged nothing, some amount, or something else entirely; the
+ *   studio does not know and never renders it as zero.
+ * - `mixed`: some dispatched chunks reported a positive amount, at least one did not. The known
+ *   subtotal is reported; the rest stay unknown. A reported zero plus an unreported chunk is
+ *   `unknown`, because the total is still unknown.
+ */
+export type VoiceChargeView =
+  | { state: "pending" }
+  | { state: "none" }
+  | { state: "reported"; usd: number }
+  | { state: "unknown" }
+  | { state: "mixed"; reportedUsd: number; unknownChunks: number };
+
+/**
+ * The renderer-safe projection of one host-owned voice operation. It never carries an endpoint,
+ * secret, session token, grant or manuscript text; labels are display strings only.
+ */
+export interface VoiceOperationView {
+  /** The public, host-minted id. Never the internal ledger id. */
+  operationId: number;
+  /** Monotonic per operation; the renderer ignores an older revision. */
+  viewRevision: number;
+  kind: "stt" | "tts";
+  phase: "starting" | "in-flight" | "cancelling" | "settled";
+  status: "success" | "refusal" | "failure" | "cancellation" | null;
+  cancelled: boolean;
+  /** Safe labels only; empty while the route is not resolved yet. */
+  connectionLabel: string;
+  model: string;
+  voice: string | null;
+  plannedChunks: number;
+  /** Chunks that were dispatched at least once (including settled ones). */
+  dispatchedChunks: number;
+  settledChunks: number;
+  /** Planned chunks that never reached a terminal settled state. */
+  unsentChunks: number;
+  charge: VoiceChargeView;
+  /** Redacted and bounded. Null on success and while the outcome is pending. */
+  message: string | null;
+  /** The actual settlement of the final dispatched chunk, kept separate from a prior cancel. */
+  finalChunkOutcome: "success" | "refusal" | "failure" | "cancellation" | null;
+}
+
+export type VoiceTranscriptionOutcome =
+  | { status: "success"; transcript: VoiceTranscript; receipt: VoiceOperationView }
+  | { status: "refusal" | "failure" | "cancellation"; message: string; receipt: VoiceOperationView | null };
+
+export type VoiceSpokenOutcome =
+  | { status: "success"; reply: SpokenReply; receipt: VoiceOperationView }
+  | { status: "refusal" | "failure" | "cancellation"; message: string; receipt: VoiceOperationView | null };
 
 /** The bridge to the phone, as the app's settings panel drives it. */
 export interface BridgeControl {
@@ -271,7 +331,9 @@ export const IPC = {
     /** Speak text and return the audio, so the renderer can play it. */
     speak: "voice:speak",
     /** Best-effort local cancel of one host-minted operation. */
-    cancel: "voice:cancel"
+    cancel: "voice:cancel",
+    /** Read the renderer-safe view of one host-minted operation, or null when unknown. */
+    operation: "voice:operation"
   },
   images: {
     list: "images:list",
@@ -360,6 +422,13 @@ export interface OpenConversationEvent {
   /** The chapter that was open when the turn's window closed, when the shell knows it. */
   chapterId?: string | undefined;
 }
+
+/**
+ * Main process to renderer: a voice operation this host owns changed phase. The payload is a
+ * renderer-safe {@link VoiceOperationView}; the renderer keeps the highest `viewRevision` per
+ * operation and ignores the rest. Emitted only after the host mints a public operation id.
+ */
+export const VOICE_OPERATION_CHANNEL = "voice:operation-event";
 
 /**
  * Main process to renderer: a close or quit is about to save the drafts, so the open editor saves
@@ -830,7 +899,7 @@ export interface StudioApi {
       expectedSelection: { connectionId: string; model: string };
       languageBias?: string[];
       keywords?: string[];
-    }): Promise<Result<VoiceTranscript>>;
+    }): Promise<Result<VoiceTranscriptionOutcome>>;
     /** The connections that can speak, and the voices they offer. */
     speakers(): Promise<Result<VoiceSpeakers>>;
     /**
@@ -842,7 +911,7 @@ export interface StudioApi {
     speak(input: {
       text: string;
       speed?: number;
-    }): Promise<Result<SpokenReply>>;
+    }): Promise<Result<VoiceSpokenOutcome>>;
     /**
      * Ask the host to cancel one operation it minted.
      *
@@ -853,6 +922,20 @@ export interface StudioApi {
       operationId: number;
       reason?: string;
     }): Promise<Result<VoiceCancelReceipt>>;
+    /**
+     * Read the renderer-safe view of one host-minted operation, or null when the id is unknown,
+     * was refused before dispatch, or belongs to another window. Phase and charge honesty match
+     * the `VOICE_OPERATION_CHANNEL` events; the invoke result is authoritative.
+     */
+    operation(input: {
+      operationId: number;
+    }): Promise<Result<VoiceOperationView | null>>;
+    /**
+     * Subscribe to operation transitions for operations this window owns. The callback receives
+     * each phase change; keep the highest `viewRevision` per operation and ignore the rest.
+     * Returns an unsubscribe.
+     */
+    onOperation(callback: (view: VoiceOperationView) => void): () => void;
   };
   images: {
     list(bookId: string): Promise<Result<ImageList>>;

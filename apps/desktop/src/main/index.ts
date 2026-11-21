@@ -5,7 +5,8 @@ import {
   AGENT_EVENT_CHANNEL,
   LIBRARY_EVENT_CHANNEL,
   SECOND_INSTANCE_EVENT_CHANNEL,
-  SYNC_EVENT_CHANNEL
+  SYNC_EVENT_CHANNEL,
+  VOICE_OPERATION_CHANNEL
 } from "@ai-book-studio/core/ipc";
 import type { DriftReport } from "@ai-book-studio/core/sync/types";
 import { DEFAULT_VOICE_PREFERENCES } from "@ai-book-studio/core/providers/voice-preferences";
@@ -33,6 +34,7 @@ import { SpeechService } from "./speech";
 import { SettingsStore } from "./settings";
 import { AudioGrantRegistry, trustedRendererOrigin, VoicePermissionOwner } from "./voice-permissions";
 import { VoiceCancelRegistry } from "./voice-cancel-registry";
+import { VoiceRequestHost, VoiceRouteAuthority } from "./voice-request";
 import { claimsSingleInstanceLock, sendWhenLoaded } from "./instance";
 import { StudioWindows } from "./windows";
 import { Studio } from "./studio";
@@ -505,8 +507,24 @@ const started = app.whenReady().then(async () => {
 
   const vault = createDesktopVault();
   providers = new ProviderService(vault, (url) => shell.openExternal(url));
-  const voice = new VoiceService(providers, fetch, () => settings.voicePreferences());
-  const speech = new SpeechService(providers, fetch, () => settings.voicePreferences());
+  /*
+   * Host-owned voice requests. Every provider-bound voice operation is minted here so the
+   * renderer can only ever ask for a cancel, never for a route, model, voice or session of its
+   * own. Event receipts go only to the window that owns the operation; a missing window drops them.
+   */
+  const voiceCancelRegistry = new VoiceCancelRegistry();
+  const voiceRequests = new VoiceRequestHost({
+    registry: voiceCancelRegistry,
+    routes: new VoiceRouteAuthority(settings, providers),
+    emit: (ownerWindowId, view) => {
+      const owner = BrowserWindow.fromId(ownerWindowId);
+      owner?.webContents.send(VOICE_OPERATION_CHANNEL, view);
+    },
+    isOwnerCurrent: (ownerWindowId) =>
+      mainWindow !== null && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerWindowId
+  });
+  const voice = new VoiceService(providers, fetch);
+  const speech = new SpeechService(providers, fetch);
   const images = new ImageService(providers);
   void vault.repairPermissions().then((permissions) => {
     if (permissions === "corrected") {
@@ -567,8 +585,6 @@ const started = app.whenReady().then(async () => {
     void sync.maybeCheckOnFocus().then(pushDrift);
   });
 
-  // Local cancel for host-minted voice ids. Dictation and speaking stay on their existing paths.
-  const voiceCancelRegistry = new VoiceCancelRegistry();
   registerIpc(
     studio,
     () => mainWindow,
@@ -583,7 +599,9 @@ const started = app.whenReady().then(async () => {
     bridgeControl,
     (bookId) => agentRuntime.isWorking(bookId),
     () => null,
-    voiceCancelRegistry
+    voiceCancelRegistry,
+    undefined,
+    voiceRequests
   );
 
   /*

@@ -11,6 +11,9 @@ import { AgentRuntime } from "./agent/runtime";
 import { ImageService } from "./images";
 import { VoiceService } from "./voice";
 import { SpeechService } from "./speech";
+import { VoiceCancelRegistry } from "./voice-cancel-registry";
+import { VoiceRequestHost, VoiceRouteAuthority } from "./voice-request";
+import { chunkForSpeech } from "@ai-book-studio/core/providers/tts";
 import { Library } from "./library/store";
 import type { ProviderService } from "./providers";
 import type { Studio } from "./studio";
@@ -44,6 +47,13 @@ export async function runLiveChecks(
 ): Promise<LiveResult[]> {
   const results: LiveResult[] = [];
   const voicePreferences = options.voicePreferences ?? DEFAULT_VOICE_PREFERENCES;
+  const voiceHost = () =>
+    new VoiceRequestHost({
+      registry: new VoiceCancelRegistry(),
+      routes: new VoiceRouteAuthority({ voicePreferences: () => voicePreferences }, providers),
+      emit: () => {},
+      isOwnerCurrent: () => true
+    });
   const record = (name: string, outcome: LiveOutcome, detail: string): void => {
     results.push({ name, outcome, detail });
   };
@@ -175,7 +185,14 @@ export async function runLiveChecks(
       await run("say", ["-o", aiff, PHRASE]);
       await run("afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", aiff, wav]);
       const audio = new Uint8Array(await readFile(wav));
-      const transcript = await new VoiceService(providers, fetch, () => voicePreferences).transcribe({ audio, expectedSelection });
+      const host = voiceHost();
+      const reservation = host.reserve("stt", 1, 1, expectedSelection);
+      if (!reservation) throw new Error("The studio is already starting a voice request.");
+      const begun = await host.begin(reservation);
+      if (!begun.ok) throw new Error(begun.message);
+      const outcome = await new VoiceService(providers, fetch).transcribe({ audio }, begun.scope);
+      if (outcome.status !== "success") throw new Error(outcome.message);
+      const transcript = outcome.transcript;
       const said = transcript.text.toLowerCase().replace(/[^a-z ]/g, "").trim();
       const words = PHRASE.toLowerCase().replace(/[^a-z ]/g, "").trim().split(" ");
       const heard = words.filter((word) => said.includes(word)).length;
@@ -198,14 +215,21 @@ export async function runLiveChecks(
     record("speaking", "blocked", "Choose a speaking connection, model and voice in Settings to run the speaking check.");
   } else {
     try {
-      const speech = new SpeechService(providers, fetch, () => voicePreferences);
+      const speech = new SpeechService(providers, fetch);
       const speakers = await speech.connections();
       if (speakers.length === 0) {
         record("speaking", "blocked", "No voice service is connected, so there is nothing to speak with.");
       } else {
-        const spoken = await speech.speak({
-          text: "The lighthouse keeper counted the ships that never came. Shall I read it to you?"
-        });
+        const text = "The lighthouse keeper counted the ships that never came. Shall I read it to you?";
+        const host = voiceHost();
+        const reservation = host.reserve("tts", chunkForSpeech(text).length, 1);
+        if (!reservation) throw new Error("The studio is already starting a voice request.");
+        const begun = await host.begin(reservation);
+        if (!begun.ok) throw new Error(begun.message);
+        const outcome = await speech.speak({ text }, begun.scope);
+        if (outcome.status !== "success") throw new Error(outcome.message);
+        const bytes = new Uint8Array(Buffer.from(outcome.reply.dataUrl.split(",")[1] ?? "", "base64"));
+        const spoken = { ...outcome.reply, bytes };
         const level = loudness(spoken.bytes, spoken.mimeType);
         // A file of the right size can still be silence. PCM can be measured; a compressed stream
         // cannot, cheaply, so for those the size is the only signal and the check says so.

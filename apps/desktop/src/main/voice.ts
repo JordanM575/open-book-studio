@@ -4,44 +4,39 @@ import {
   openRouterSpeechRequest,
   parseOpenRouterSpeechResponse,
   parseSpeechResponse,
-  speechCapability,
-  speechForm,
   speechModels,
+  speechForm,
+  type SpeechCapability,
   type VoiceTranscript
 } from "@ai-book-studio/core/providers/speech";
-import { DEFAULT_VOICE_PREFERENCES, type TranscriptionSelection, type VoicePreferences } from "@ai-book-studio/core/providers/voice-preferences";
-import { ProviderError, type ConnectionSummary, type ProviderId } from "@ai-book-studio/core/providers/types";
+import type { VoiceTranscriptionOutcome } from "@ai-book-studio/core/ipc";
+import { ProviderError, type ConnectionSummary } from "@ai-book-studio/core/providers/types";
 import type { ProviderService } from "./providers";
-import { requestSignal } from "./voice-transport";
+import { redact } from "@ai-book-studio/core/providers/redact";
+import { requestSignal, settlementForFailure } from "./voice-transport";
+import { VoiceRefusal, type ResolvedVoiceRoute, type VoiceRequestScope } from "./voice-request";
 
 const TRANSCRIBE_TIMEOUT_MS = 120_000;
+const CANCELLED_MESSAGE = "The transcription request was cancelled.";
 
 export interface TranscribeInput {
   audio: Uint8Array;
-  expectedSelection: TranscriptionSelection;
   languageBias?: string[];
   keywords?: string[];
-  /** Host-owned cancellation. Closing it stops the local wait; it is not a provider refund. */
-  signal?: AbortSignal;
 }
 
 /**
- * The only place audio leaves the studio. It reads the explicitly selected secret in the main
- * process, validates WAV before spending a request, and keeps audio in memory only.
+ * The only place audio leaves the studio. The saved selection, the connection and the credential
+ * are resolved by the host-created scope, which re-checks them immediately before the single
+ * send; this service never falls back to another connection, model or route.
+ *
+ * The audio is validated before any request is shaped, it stays in memory and it is discarded
+ * after the call. A request cancelled mid-flight is never delivered to the caller.
  */
-/** A host stop stays a cancellation even when it lands while the response body is read. */
-function cancelledTranscription(provider: ProviderId): ProviderError {
-  return new ProviderError("unknown", "The transcription request was cancelled.", {
-    provider,
-    cause: new DOMException("Aborted", "AbortError")
-  });
-}
-
 export class VoiceService {
   constructor(
     private readonly providers: ProviderService,
-    private readonly fetchImpl: typeof fetch = fetch,
-    private readonly getPreferences: () => VoicePreferences = () => DEFAULT_VOICE_PREFERENCES
+    private readonly fetchImpl: typeof fetch = fetch
   ) {}
 
   /** Connections that can transcribe audio, for the editor's microphone state. */
@@ -49,29 +44,22 @@ export class VoiceService {
     return (await this.providers.list()).filter((connection) => speechModels(connection.provider).length > 0);
   }
 
-  async transcribe(input: TranscribeInput): Promise<VoiceTranscript> {
+  async transcribe(input: TranscribeInput, scope: VoiceRequestScope): Promise<VoiceTranscriptionOutcome> {
     const check = inspectWav(input.audio);
-    if (!check.ok) throw new ProviderError("invalid-request", check.reason);
-
-    const selected = { ...this.getPreferences().transcription };
-    if (!selected.connectionId || !selected.model) {
-      throw new ProviderError("invalid-request", "Choose a transcription connection and model in Settings before using dictation.");
-    }
-    if (selected.connectionId !== input.expectedSelection.connectionId || selected.model !== input.expectedSelection.model) {
-      throw new ProviderError("invalid-request", "The transcription selection changed during dictation. Record again with the current selection.");
-    }
-    const available = await this.providers.list();
-    const connection = available.find((entry) => entry.id === selected.connectionId);
-    if (!connection) {
-      throw new ProviderError("not-found", "That transcription connection is unavailable. Choose another in Settings.");
+    if (!check.ok) {
+      scope.refuse(check.reason);
+      return { status: "refusal", message: check.reason, receipt: scope.view() };
     }
 
-    const credential = await this.providers.credential(connection.id);
-    const capability = speechCapability(credential.provider, credential.metadata?.baseUrl, selected.model);
-    if (!capability) {
-      throw new ProviderError("invalid-request", "The saved transcription model does not match that connection. Choose a supported model in Settings.");
+    let route: ResolvedVoiceRoute;
+    try {
+      route = await scope.recheck();
+    } catch (error) {
+      return this.refused(scope, error);
     }
 
+    const capability = route.capability as SpeechCapability;
+    const credential = route.credential;
     const isMeta = credential.provider === "meta";
     const body = isMeta
       ? speechForm(input.audio, {
@@ -80,6 +68,10 @@ export class VoiceService {
           ...(input.keywords?.length ? { keywords: input.keywords } : {})
         })
       : JSON.stringify(openRouterSpeechRequest(input.audio, capability.model));
+
+    const next = scope.chunk();
+    if (!next) return this.stopped(scope);
+    const { chunkId } = next;
 
     let response: Response;
     try {
@@ -90,22 +82,22 @@ export class VoiceService {
           ...(isMeta ? {} : { "content-type": "application/json" })
         },
         body,
-        signal: requestSignal(TRANSCRIBE_TIMEOUT_MS, input.signal)
+        signal: requestSignal(TRANSCRIBE_TIMEOUT_MS, next.signal)
       });
     } catch (error) {
-      if (input.signal?.aborted) {
-        throw cancelledTranscription(credential.provider);
-      }
-      throw new ProviderError("offline", "Could not reach the transcription service. Check your connection.", {
+      if (scope.signal.aborted) return this.cancelled(scope, chunkId);
+      const offline = new ProviderError("offline", "Could not reach the transcription service. Check your connection.", {
         provider: credential.provider,
         cause: error
       });
+      return this.failed(scope, chunkId, offline);
     }
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => "");
-      if (input.signal?.aborted) throw cancelledTranscription(credential.provider);
-      throw normalizeProviderError({ provider: credential.provider, status: response.status, body: errorBody });
+      if (scope.signal.aborted) return this.cancelled(scope, chunkId);
+      const normalized = normalizeProviderError({ provider: credential.provider, status: response.status, body: errorBody });
+      return this.failed(scope, chunkId, normalized);
     }
 
     let payload: unknown;
@@ -113,36 +105,96 @@ export class VoiceService {
       payload = await response.json();
     } catch (error) {
       // fetch resolved at the headers; a stop during the body read still has to settle as one.
-      if (input.signal?.aborted) throw cancelledTranscription(credential.provider);
-      payload = null;
+      if (scope.signal.aborted) return this.cancelled(scope, chunkId);
+      return this.failed(scope, chunkId, new ProviderError("unknown", "The transcription response could not be read.", {
+        provider: credential.provider,
+        cause: error
+      }));
     }
-    const transcript = isMeta
-      ? (() => {
-          const parsed = parseSpeechResponse(payload);
-          return {
-            text: parsed.text,
-            durationMs: parsed.providerDurationMs ?? check.info.durationMs,
-            costUsd: null,
-            turns: parsed.turns
-          };
-        })()
-      : (() => {
-          const parsed = parseOpenRouterSpeechResponse(payload);
-          return {
-            text: parsed.text,
-            durationMs: parsed.durationMs ?? check.info.durationMs,
-            costUsd: parsed.costUsd,
-            turns: []
-          };
-        })();
+
+    let parsedCost: number | null = null;
+    let transcript: VoiceTranscript;
+    try {
+      if (isMeta) {
+        const parsed = parseSpeechResponse(payload);
+        transcript = {
+          text: parsed.text,
+          provider: credential.provider,
+          connectionLabel: route.connectionLabel,
+          model: capability.model,
+          durationMs: parsed.providerDurationMs ?? check.info.durationMs,
+          costUsd: null,
+          turns: parsed.turns
+        };
+      } else {
+        const parsed = parseOpenRouterSpeechResponse(payload);
+        parsedCost = parsed.costUsd ?? null;
+        transcript = {
+          text: parsed.text,
+          provider: credential.provider,
+          connectionLabel: route.connectionLabel,
+          model: capability.model,
+          durationMs: parsed.durationMs ?? check.info.durationMs,
+          costUsd: parsed.costUsd,
+          turns: []
+        };
+      }
+    } catch (error) {
+      if (scope.signal.aborted) {
+        // A late, unreadable reply after a stop: charge unknown, outcome failure, content dropped.
+        scope.settle(chunkId, { outcome: "failure", failure: "The transcription response could not be read." });
+        return this.cancelled(scope, null);
+      }
+      return this.failed(scope, chunkId, error);
+    }
+    // Record the outcome at the chunk before any content is delivered, so a late provider report
+    // is never lost. If the author stopped meanwhile, the transcript is discarded but the charge
+    // stays on the receipt.
+    scope.settle(chunkId, { outcome: "success", costUsd: parsedCost });
+    if (scope.signal.aborted) return this.cancelled(scope, null);
+    return { status: "success", transcript, receipt: unreachableView(scope) };
+  }
+
+  /** The refusal path: nothing was sent, or nothing more was sent after a settled chunk. */
+  private refused(scope: VoiceRequestScope, error: unknown): VoiceTranscriptionOutcome {
+    if (scope.signal.aborted) return this.cancelled(scope, null);
+    const reason = error instanceof VoiceRefusal
+      ? error.message
+      : "The transcription request could not be prepared. Try again.";
+    scope.refuse(reason);
+    return { status: "refusal", message: reason, receipt: scope.view() };
+  }
+
+  private cancelled(scope: VoiceRequestScope, chunkId: number | null): VoiceTranscriptionOutcome {
+    if (chunkId !== null) {
+      scope.settle(chunkId, { outcome: "cancellation", failure: CANCELLED_MESSAGE });
+    }
+    return { status: "cancellation", message: CANCELLED_MESSAGE, receipt: scope.view() };
+  }
+
+  private failed(scope: VoiceRequestScope, chunkId: number, error: unknown): VoiceTranscriptionOutcome {
+    const settlement = settlementForFailure(error, { dispatched: true });
+    const failure = redact(settlement.failure);
+    scope.settle(chunkId, { outcome: settlement.outcome, failure });
+    return { status: "failure", message: failure, receipt: scope.view() };
+  }
+
+  /** The ledger declined to open the chunk; the operation is already settled or refusing. */
+  private stopped(scope: VoiceRequestScope): VoiceTranscriptionOutcome {
+    const view = scope.view();
+    const status = view?.status;
+    if (status === "cancellation") return { status: "cancellation", message: CANCELLED_MESSAGE, receipt: view };
     return {
-      text: transcript.text,
-      provider: credential.provider,
-      connectionLabel: credential.label,
-      model: capability.model,
-      durationMs: transcript.durationMs,
-      costUsd: transcript.costUsd,
-      turns: transcript.turns
+      status: "refusal",
+      message: view?.message ?? "The transcription request stopped before it could be sent.",
+      receipt: view
     };
   }
+}
+
+/** A settled view always exists after settle; this only satisfies the type checker. */
+function unreachableView(scope: VoiceRequestScope) {
+  const view = scope.view();
+  if (!view) throw new Error("The voice request lost its operation view.");
+  return view;
 }
