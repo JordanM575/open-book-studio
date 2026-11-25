@@ -7,6 +7,11 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Browser reader verification
+- Add an opt-in built web check for reader review refusal at welcome and in the workspace, with storage and process cleanup checks.
+- Verify the served browser build, trusted keyboard activation, and complete process exit in the reader refusal check.
+- Use the same commit stamp when building the desktop and web artifacts for the reader checks.
+
 ### Reader review verification
 - Add an opt-in built desktop check for keyboard preparation, explicit start, current-source checking and exact passage selection with a synthetic provider and library.
 - Wait for the reader check's startup scan and process group exit, and match the exact passage control and receipt to the observed run.

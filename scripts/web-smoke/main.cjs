@@ -7,6 +7,7 @@ const { version } = require("../../package.json");
 const url = process.env.WEB_SMOKE_URL;
 const resultPath = process.env.WEB_SMOKE_RESULT;
 const profile = process.env.WEB_SMOKE_PROFILE;
+const readerRefusal = Object.hasOwn(process.env, "WEB_SMOKE_SCENARIO") ? require("./reader-review-refusal.cjs") : null;
 const checks = [];
 const consoleErrors = [];
 let saveArtifacts = async () => {};
@@ -25,14 +26,33 @@ async function finish() {
   app.exit(ok ? 0 : 1);
 }
 
+if (readerRefusal) {
+  try {
+    readerRefusal.admit({ app, env: process.env, profile, resultPath, url });
+  } catch {
+    console.error("[web-smoke] The isolated reader launch was refused.");
+    process.exit(1);
+  }
+}
 app.setPath("userData", profile);
 app.whenReady().then(async () => {
+  if (readerRefusal && process.platform === "darwin") app.dock?.hide();
   const window = new BrowserWindow({
     show: false,
-    width: 393,
-    height: 852,
-    webPreferences: { contextIsolation: true, sandbox: true }
+    width: readerRefusal ? 1440 : 393,
+    height: readerRefusal ? 900 : 852,
+    webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false }
   });
+  if (readerRefusal) {
+    try {
+      const result = await readerRefusal.run({ window, app, url, profile, commit: process.env.WEB_SMOKE_COMMIT });
+      writeFileSync(resultPath, JSON.stringify(result), { flag: "wx", mode: 0o600 });
+      app.exit(result.ok ? 0 : 1);
+    } catch {
+      app.exit(1);
+    }
+    return;
+  }
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   // The page draws after the load event, and on a slow runner that can take longer than any fixed wait,

@@ -19,6 +19,7 @@
  *   offline     writing through export with every outbound connection denied (macOS only)
  *   instance    a second copy on the same profile: refused, nothing written, the open copy says so
  *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
+ *   reader-review-web  the built browser reader refusal (opt-in)
  *
  *   bun run e2e            build, then run everything
  *   bun run e2e --no-build trust the current build
@@ -36,6 +37,10 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CHECKS = [
   { id: "smoke", script: "scripts/smoke.mjs", what: "the built app, through its own renderer" },
   { id: "web", script: "scripts/web-smoke.mjs", what: "the browser build and its storage" },
+  {
+    id: "reader-review-web", script: "scripts/web-smoke.mjs", args: ["--reader-review-refusal"],
+    what: "the isolated built browser reader refusal", optIn: true
+  },
   { id: "audit", script: "scripts/ui-audit.mjs", what: "the real window at 1440x900, for dead ends" },
   {
     id: "phone",
@@ -90,25 +95,18 @@ function run(command, args, options = {}) {
 }
 
 if (build) {
-  console.log("[e2e] building the desktop app, the web build and the toolkit…");
-  const desktopEnv = { ...process.env };
-  if (selection.some((check) => check.id === "reader-review")) {
-    desktopEnv.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const webOnly = selection.length === 1 && selection[0].id === "reader-review-web";
+  const commands = webOnly ? ["build:web"] : ["build", "build:web", "toolkit:build"];
+  console.log(webOnly ? "[e2e] building the web app…" : "[e2e] building the desktop app, the web build and the toolkit…");
+  const env = { ...process.env };
+  if (selection.some((check) => check.id === "reader-review" || check.id === "reader-review-web")) {
+    env.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   }
-  const built = await run("bun", ["run", "build"], { env: desktopEnv });
-  if (built !== 0) {
-    console.error("[e2e] the desktop build failed, so there is nothing to check");
-    process.exit(1);
-  }
-  const web = await run("bun", ["run", "build:web"]);
-  if (web !== 0) {
-    console.error("[e2e] the web build failed");
-    process.exit(1);
-  }
-  const toolkit = await run("bun", ["run", "toolkit:build"]);
-  if (toolkit !== 0) {
-    console.error("[e2e] the toolkit build failed");
-    process.exit(1);
+  for (const command of commands) {
+    if (await run("bun", ["run", command], { env }) !== 0) {
+      console.error(`[e2e] ${command} failed`);
+      process.exit(1);
+    }
   }
 }
 
