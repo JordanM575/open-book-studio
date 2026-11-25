@@ -9,7 +9,7 @@ Update the `Unreleased` section before every commit.
 ## [Unreleased]
 ### Reader review verification
 - Add an opt-in built desktop check for keyboard preparation, explicit start, current-source checking and exact passage selection with a synthetic provider and library.
-- Wait for the reader check's startup scan and child exit, and match the exact passage control and receipt to the observed run.
+- Wait for the reader check's startup scan and process group exit, and match the exact passage control and receipt to the observed run.
 - Pass the disclosed reader review instructions through the SDK's instruction field so an approved review can reach the selected provider.
 ### Review evidence after saving
 - Keep paragraph breaks and newer draft text during autosave. Apply a missing final newline from a confirmed chapter save once the unchanged editor is idle, including after metadata-only chapter changes, so exact review evidence can open.

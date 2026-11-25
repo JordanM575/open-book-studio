@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import sample from "../apps/desktop/src/main/review/reader-review-sample.json" with { type: "json" };
 import { headlessEnvironment } from "./headless-environment.mjs";
@@ -250,25 +251,31 @@ function observeChild(child) {
       else logs[name] += chunk;
     });
   }
-  let closed = false;
   let signalled = false;
+  const pid = child.pid;
+  assert(Number.isSafeInteger(pid) && pid > 1 && pid !== process.pid);
   const exit = new Promise((resolve) => {
-    const onClose = (code, signal) => {
-      closed = true;
-      resolve({ code, signal });
-    };
+    const onClose = (code, signal) => resolve({ code, signal });
     child.once("close", onClose);
     if ((child.exitCode !== null || child.signalCode !== null) && child.stdout?.closed && child.stderr?.closed) {
       onClose(child.exitCode, child.signalCode);
     }
   });
   const terminateGroup = () => {
-    if (closed || signalled || !Number.isSafeInteger(child.pid) || child.pid <= 1 || child.pid === process.pid) return;
+    if (signalled) return;
     signalled = true;
     // The pinned Playwright launcher spawns Electron in its own detached process group on macOS.
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* The receipt still requires observed exit and pipe closure. */ }
+    try { process.kill(-pid, "SIGKILL"); } catch { /* A signal does not establish exit. */ }
   };
-  return { logs, exit, terminateGroup };
+  async function waitForGroup(milliseconds) {
+    const deadline = Date.now() + milliseconds;
+    for (;;) {
+      try { process.kill(-pid, 0); } catch (error) { return error.code === "ESRCH"; }
+      if (Date.now() >= deadline) return false;
+      await delay(50);
+    }
+  }
+  return { logs, exit, terminateGroup, waitForGroup };
 }
 
 async function within(promise, ms) {
@@ -283,14 +290,18 @@ async function within(promise, ms) {
 async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5_000) {
   const closing = Promise.resolve().then(() => application.close()).then(() => true, () => false);
   const settled = await within(Promise.all([closing, receipt.exit]), graceMs);
-  if (settled) return { graceful: settled[0], exit: settled[1] };
+  if (settled && await receipt.waitForGroup(Math.min(reapMs, 1_000))) {
+    return { graceful: settled[0], exit: settled[1], groupEmpty: true };
+  }
   receipt.terminateGroup();
-  return { graceful: false, exit: await within(receipt.exit, reapMs) };
+  const exit = settled?.[1] ?? await within(receipt.exit, reapMs);
+  return { graceful: false, exit, groupEmpty: exit !== null && await receipt.waitForGroup(reapMs) };
 }
 
 const result = {
   scenario: sample.scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
-  build: null, library: null, selection: null, observations: null, guardDenials: 0, childExit: null, cleaned: false
+  build: null, library: null, selection: null, observations: null, guardDenials: 0,
+  childExit: null, childGroupEmpty: false, cleaned: false
 };
 let scratch;
 let scratchIdentity;
@@ -371,6 +382,7 @@ try {
       result.phase = "child exit and final isolation";
       const stopped = await stopOwnedChild(application, receipt);
       result.childExit = stopped.exit;
+      result.childGroupEmpty = stopped.groupEmpty;
       clearTimeout(watchdog);
       assert(stopped.graceful);
       assert.deepEqual(result.childExit, { code: 0, signal: null });
@@ -397,7 +409,7 @@ try {
     try {
       if (listener?.listening) await new Promise((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
       if (scratch) {
-        assert(!launched || result.childExit !== null, "Child exit must be observed before scratch removal");
+        assert(!launched || result.childGroupEmpty, "Child group exit must be observed before scratch removal");
         const info = await lstat(scratch);
         assert(info.isDirectory() && info.dev === scratchIdentity.dev && info.ino === scratchIdentity.ino);
         await rm(scratch, { recursive: true });
