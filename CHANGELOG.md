@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Review smoke evidence navigation
+- Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
+
 ### Chapter history
 - Open the chapter history dialog only when the selected chapter has a bound history adapter. This restores the desktop renderer typecheck and preserves the unsupported-host behavior.
 
