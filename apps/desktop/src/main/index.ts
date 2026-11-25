@@ -462,10 +462,18 @@ const started = app.whenReady().then(async () => {
       mainWindow?.webContents.send(SYNC_EVENT_CHANNEL, { report });
     }
   };
+  const startupScans: Promise<void>[] = [];
   studio.onLibraryOpened = () => {
-    void sync.check().then(pushDrift);
+    const scan = sync.check().then(pushDrift);
+    if (check && startupScans.length === 0) startupScans.push(scan);
   };
   await studio.restore();
+  if (check) {
+    const [startupScan] = startupScans;
+    if (!startupScan) throw new Error("The reader check library did not open.");
+    // The first scan can write the synthetic device journal and last scan time.
+    await startupScan;
+  }
 
   // The control plane is for the standalone CLI and MCP server. A hidden test run can start it too,
   // with its own locator file, so the toolkit can be exercised end to end without a window.

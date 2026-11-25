@@ -116,6 +116,22 @@ function assertCompleted(snapshot) {
   assert.match(snapshot.preparedDigest, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.completedDigest, snapshot.preparedDigest);
   assert.match(snapshot.requestHash, /^[a-f0-9]{64}$/);
+  assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
+}
+
+function readChildObservation(payload, observed) {
+  const snapshot = JSON.parse(payload);
+  const fields = [
+    "catalogues", "preparations", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
+    "fixtureRefusals", "outboundAttempts", "permissionAttempts", "protectedStorageAttempts", "guardedStorageMethods",
+    "requestId", "preparedDigest", "completedDigest", "requestHash"
+  ];
+  assert.deepEqual(Object.keys(snapshot).sort(), [...fields].sort());
+  assertCompleted(snapshot);
+  assert.equal(snapshot.requestId, observed.requestId);
+  assert.equal(snapshot.preparedDigest, observed.preparedDigest);
+  assert.equal(snapshot.requestHash, observed.requestHash);
+  return Object.fromEntries(fields.map((field) => [field, snapshot[field]]));
 }
 
 async function runJourney(page, application, libraryRoot, candidate, record) {
@@ -188,16 +204,14 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   assert.equal(await results.getByRole("article").count(), 1);
   assert.equal(await finding.locator("blockquote").textContent(), sample.quote.text);
   assert((await finding.innerText()).includes("2 unverified quotations withheld"));
-  const passage = finding.getByRole("button", { name: /^Show exact passage finding-1,/ });
+  const passage = finding.getByRole("button", { name: /^Show exact passage for finding-1,/ });
   assert(await passage.isDisabled());
-  assertCompleted(await observe());
+  const observed = await observe();
+  assertCompleted(observed);
 
   record.phase = "check current sources and select the second exact passage";
   await activate(exactButton("Check current sources"));
-  await page.waitForFunction(() => {
-    const button = document.querySelector('button[aria-label^="Show exact passage finding-1,"]');
-    return button !== null && !button.disabled;
-  });
+  await passage.and(finding.getByRole("button", { disabled: false })).waitFor();
   await activate(passage);
   await activeChapter(sample.selected.id).waitFor();
   await page.waitForFunction(({ start, end, text }) => {
@@ -225,6 +239,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "Open reader review");
   assert.deepEqual(await fingerprint(libraryRoot), before);
   record.library = before;
+  return observed;
 }
 
 function observeChild(child) {
@@ -235,11 +250,42 @@ function observeChild(child) {
       else logs[name] += chunk;
     });
   }
+  let closed = false;
+  let signalled = false;
   const exit = new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) resolve({ code: child.exitCode, signal: child.signalCode });
-    else child.once("close", (code, signal) => resolve({ code, signal }));
+    const onClose = (code, signal) => {
+      closed = true;
+      resolve({ code, signal });
+    };
+    child.once("close", onClose);
+    if ((child.exitCode !== null || child.signalCode !== null) && child.stdout?.closed && child.stderr?.closed) {
+      onClose(child.exitCode, child.signalCode);
+    }
   });
-  return { logs, exit };
+  const terminateGroup = () => {
+    if (closed || signalled || !Number.isSafeInteger(child.pid) || child.pid <= 1 || child.pid === process.pid) return;
+    signalled = true;
+    // The pinned Playwright launcher spawns Electron in its own detached process group on macOS.
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* The receipt still requires observed exit and pipe closure. */ }
+  };
+  return { logs, exit, terminateGroup };
+}
+
+async function within(promise, ms) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5_000) {
+  const closing = Promise.resolve().then(() => application.close()).then(() => true, () => false);
+  const settled = await within(Promise.all([closing, receipt.exit]), graceMs);
+  if (settled) return { graceful: settled[0], exit: settled[1] };
+  receipt.terminateGroup();
+  return { graceful: false, exit: await within(receipt.exit, reapMs) };
 }
 
 const result = {
@@ -249,8 +295,9 @@ const result = {
 let scratch;
 let scratchIdentity;
 let application;
-let child;
 let receipt;
+let launched = false;
+let observed;
 let listener;
 let libraryRoot;
 let watchdog;
@@ -291,6 +338,7 @@ try {
     listener.listen(0, "127.0.0.1", resolve);
   });
   const port = listener.address().port;
+  launched = true;
   application = await _electron.launch({
     executablePath: launcher, args: ["--no-sandbox", "--use-mock-keychain", appDir], cwd: appDir,
     artifactsDir: artifacts, timeout: 40_000,
@@ -299,11 +347,10 @@ try {
       STUDIO_HEADLESS: "1", STUDIO_TEST_MEMORY_VAULT: "1", STUDIO_USER_DATA: fixture.profile, STUDIO_WINDOW_SIZE: "1440x900"
     }
   });
-  child = application.process();
-  receipt = observeChild(child);
+  receipt = observeChild(application.process());
   watchdog = setTimeout(() => {
     timedOut = true;
-    child.kill("SIGKILL");
+    receipt.terminateGroup();
   }, 90_000);
   const page = await application.firstWindow({ timeout: 15_000 });
   const isolated = await application.evaluate(({ app, BrowserWindow }, profile) =>
@@ -312,7 +359,7 @@ try {
   assert(isolated);
   result.guardDenials += await probeDenial(application, port);
   assert.equal(loopbackConnections, 0);
-  await runJourney(page, application, libraryRoot, result.candidate, result);
+  observed = await runJourney(page, application, libraryRoot, result.candidate, result);
   result.phase = "confirm outbound denial after the journey";
   result.guardDenials += await probeDenial(application, port);
   assert.equal(loopbackConnections, 0);
@@ -322,22 +369,17 @@ try {
   try {
     if (application) {
       result.phase = "child exit and final isolation";
-      const kill = setTimeout(() => child.kill("SIGKILL"), 15_000);
-      try {
-        await application.close();
-        result.childExit = await receipt.exit;
-        clearTimeout(watchdog);
-      } finally {
-        clearTimeout(kill);
-      }
+      const stopped = await stopOwnedChild(application, receipt);
+      result.childExit = stopped.exit;
+      clearTimeout(watchdog);
+      assert(stopped.graceful);
       assert.deepEqual(result.childExit, { code: 0, signal: null });
       assert(!timedOut && result.guardDenials === 8 && loopbackConnections === 0);
       const { stdout, stderr, overflow } = receipt.logs;
       assert(!overflow && !sentinel.test(stdout) && !sentinel.test(stderr));
       const summaries = stdout.split("\n").filter((line) => line.startsWith(childMarker));
       assert.equal(summaries.length, 1);
-      result.observations = JSON.parse(summaries[0].slice(childMarker.length));
-      assertCompleted(result.observations);
+      result.observations = readChildObservation(summaries[0].slice(childMarker.length), observed);
       const profile = join(scratch, "profile");
       assert(!(await readdir(profile)).includes("credentials.json"));
       for (const file of await filesIn(scratch, { skipVolatile: true })) {
@@ -355,6 +397,7 @@ try {
     try {
       if (listener?.listening) await new Promise((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
       if (scratch) {
+        assert(!launched || result.childExit !== null, "Child exit must be observed before scratch removal");
         const info = await lstat(scratch);
         assert(info.isDirectory() && info.dev === scratchIdentity.dev && info.ino === scratchIdentity.ino);
         await rm(scratch, { recursive: true });
