@@ -8,7 +8,7 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Review evidence after saving
-- Keep paragraph breaks and newer draft text during autosave. Apply a missing final newline from a confirmed chapter save once the unchanged editor is idle so exact review evidence can open.
+- Keep paragraph breaks and newer draft text during autosave. Apply a missing final newline from a confirmed chapter save once the unchanged editor is idle, including after metadata-only chapter changes, so exact review evidence can open.
 
 ### Review smoke evidence navigation
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.

@@ -454,16 +454,27 @@ describe("mounted editor surface", () => {
     );
   });
 
-  test.each(["hold", "composition"] as const)("an acknowledged newline settles after a %s", async (blocked) => {
+  test.each([
+    { name: "hold", blocked: "hold", rebased: false },
+    { name: "composition", blocked: "composition", rebased: false },
+    { name: "hold with a metadata rebase", blocked: "hold", rebased: true },
+    { name: "composition with a held metadata rebase", blocked: "composition", rebased: true }
+  ] as const)("an acknowledged newline settles after $name", async ({ blocked, rebased }) => {
     const reply = Promise.withResolvers<unknown>();
     const release = Promise.withResolvers<void>();
     const mounted = mount({}, () => reply.promise);
     const handle = mountedHandle(mounted);
     const submitted = `${CHAPTER.content}Mara wrote on.`;
     type(submitted);
+    const selection = { anchor: submitted.indexOf(PASSAGE) + PASSAGE.length, head: submitted.indexOf(PASSAGE) };
+    expect(mounted.editor().setSelection(selection)).toBe(true);
+    const nextChapter = { ...CHAPTER, version: CHAPTER.version + 2, hash: "c".repeat(64), content: normalizeBody(submitted) };
     const saving = handle.flush();
     await testing.waitFor(() => expect(mounted.save).toHaveBeenCalledTimes(1));
-    const holding = blocked === "hold" ? handle.hold(() => release.promise) : null;
+    const holding = blocked === "hold" ? handle.hold(async () => {
+      await release.promise;
+      if (rebased) expect(handle.rebase([nextChapter])).toBe(true);
+    }) : null;
     if (blocked === "composition") testing.fireEvent.compositionStart(mounted.surface());
 
     await testing.act(async () => {
@@ -479,11 +490,23 @@ describe("mounted editor surface", () => {
         await holding;
       });
     } else {
+      if (rebased) {
+        await testing.act(async () => {
+          await handle.hold(async () => { expect(handle.rebase([nextChapter])).toBe(true); });
+        });
+        expect(handle.getEvidenceSnapshot()).toBeNull();
+      }
       testing.fireEvent.compositionEnd(mounted.surface(), { data: "" });
     }
 
-    await testing.waitFor(() => expect(handle.getEvidenceSnapshot()?.body).toBe(normalizeBody(submitted)));
+    await testing.waitFor(() => expect(handle.getEvidenceSnapshot()).toMatchObject({
+      body: normalizeBody(submitted), selection,
+      version: rebased ? nextChapter.version : CHAPTER.version + 1,
+      rawHash: rebased ? nextChapter.hash : "b".repeat(64)
+    }));
     expect(mounted.save).toHaveBeenCalledTimes(1);
+    testing.fireEvent.keyDown(mounted.surface(), { key: "z", ctrlKey: true });
+    expect(editorText()).toBe(CHAPTER.content);
   });
 
   test("editing and returning to the submitted text cancels a held newline settlement", async () => {

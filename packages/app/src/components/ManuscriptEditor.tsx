@@ -379,10 +379,17 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       rebase: (chapters: readonly Chapter[]) => {
         const file = chapters.find((item) => item.id === chapterId);
         if (!file) return false;
-        if (file.hash === base.current.hash) return true;
-        if (file.content !== base.current.content || file.title !== base.current.title) return false;
+        const currentBase = base.current;
+        if (file.hash === currentBase.hash) return true;
+        if (file.content !== currentBase.content || file.title !== currentBase.title) return false;
         const previous = readSourceRef.current();
-        base.current = { ...base.current, version: file.version, hash: file.hash };
+        const rebased = { ...currentBase, version: file.version, hash: file.hash };
+        base.current = rebased;
+        // The verified metadata update kept the saved body; carry its pending LF acknowledgement.
+        const pending = pendingSavedNewline.current;
+        if (pending?.savedBase === currentBase && pending.editor === editorRef.current && pending.submitted === latest.current) {
+          pendingSavedNewline.current = { ...pending, savedBase: rebased };
+        }
         touchSource();
         // Metadata-only acknowledgement: the leaf keeps a dirty buffer and only drops stale marks.
         editorRef.current?.rebase(previous);
