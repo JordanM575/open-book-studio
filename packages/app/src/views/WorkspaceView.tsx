@@ -2136,7 +2136,7 @@ export function WorkspaceView({
         </DialogContent>
       </Dialog>
 
-      {historyClient && selected ? (
+      {historyApi && selected ? (
         <ChapterHistoryDialog
           open={historyOpen}
           target={{ libraryId: libraryRoot, bookId, chapterId: selected.id, viewId: historyViewId }}
