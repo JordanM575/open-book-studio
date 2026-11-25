@@ -51,7 +51,7 @@ export interface ValidatedEvidencePort {
 
 export type ReviewResult = "applied" | "stale" | "unavailable" | "superseded";
 export type ReviewCommand = "previous" | "next" | "inspect" | "return";
-export type EditOrigin = "input" | "paste" | "dictation" | "undo" | "redo" | "controlled";
+export type EditOrigin = "input" | "paste" | "dictation" | "undo" | "redo" | "controlled" | "save-normalization";
 
 export interface InlineChange {
   readonly previous: string;

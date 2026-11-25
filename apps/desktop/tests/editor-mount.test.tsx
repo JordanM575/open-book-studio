@@ -370,6 +370,66 @@ describe("mounted editor surface", () => {
     expect(editor.getSnapshot().held).toBe(false);
   });
 
+  test("a canonical save supports exact evidence without adding an undo step", async () => {
+    const { normalizeBody } = await import("@ai-book-studio/core/markdown");
+    const mounted = mount({}, ({ content }) => ({
+      ok: true,
+      data: {
+        status: "saved",
+        chapter: { ...CHAPTER, content: normalizeBody(content), version: CHAPTER.version + 1, hash: "b".repeat(64) }
+      }
+    }));
+    const typed = `\n${CHAPTER.content}Mara wrote on.`;
+    const editor = mounted.editor();
+    type(typed);
+    const start = typed.indexOf(PASSAGE);
+    expect(editor.setSelection({ anchor: start, head: start + PASSAGE.length })).toBe(true);
+
+    await testing.act(async () => { await mountedHandle(mounted).flush(); });
+
+    const saved = normalizeBody(typed);
+    const visit = mountedHandle(mounted).getEvidenceSnapshot();
+    expect(visit?.body).toBe(saved);
+    expect(editor.getSnapshot().selectedText).toBe(PASSAGE);
+    expect(editor.getSnapshot().selection.anchor).toBe(saved.indexOf(PASSAGE));
+    await testing.act(async () => { await mountedHandle(mounted).flush(); });
+    expect(mounted.save).toHaveBeenCalledTimes(1);
+
+    testing.fireEvent.keyDown(mounted.surface(), { key: "z", ctrlKey: true });
+    expect(editor.getSnapshot().body).toBe(CHAPTER.content);
+  });
+
+  test("a canonical save leaves typing that arrived during the request dirty", async () => {
+    const { normalizeBody } = await import("@ai-book-studio/core/markdown");
+    const reply = Promise.withResolvers<unknown>();
+    const mounted = mount({}, () => reply.promise);
+    const submitted = `${CHAPTER.content}Mara wrote on.`;
+    type(submitted);
+    let saved: Promise<SaveStatus> | undefined;
+    await testing.act(async () => {
+      saved = mountedHandle(mounted).flush();
+      await Promise.resolve();
+    });
+    expect(mounted.save).toHaveBeenCalledTimes(1);
+
+    const later = `${submitted}\nThen the lamp came back on.`;
+    type(later);
+    await testing.act(async () => {
+      reply.resolve({
+        ok: true,
+        data: {
+          status: "saved",
+          chapter: { ...CHAPTER, content: normalizeBody(submitted), version: CHAPTER.version + 1, hash: "b".repeat(64) }
+        }
+      });
+      await saved;
+    });
+
+    expect(mounted.editor().getSnapshot().body).toBe(later);
+    expect(mountedHandle(mounted).getStatus().kind).toBe("dirty");
+    expect(mountedHandle(mounted).getEvidenceSnapshot()).toBeNull();
+  });
+
   test("a host evidence selection moves the mounted selection on each new request", async () => {
     const mounted = mount();
     const editor = mounted.editor();

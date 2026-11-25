@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Review evidence after saving
+- Match the unchanged editor buffer to the canonical saved chapter so review evidence can open after saving. The save keeps the caret and undo history and leaves newer typing in the editor.
+
 ### Review smoke evidence navigation
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
 

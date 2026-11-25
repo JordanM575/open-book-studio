@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import type { Chapter, ChapterConflict } from "@ai-book-studio/core/schema";
 import type { ImageRecord } from "@ai-book-studio/core/images/schema";
 import { plainSaveReason } from "@ai-book-studio/core/library/errors";
+import { normalizeBody } from "@ai-book-studio/core/markdown";
 import { createSharedEvidencePort } from "@ai-book-studio/core/review/shared-verifier";
 import { type InlineSpan, inlineSpanKey } from "@ai-book-studio/core/review/inline/overlap";
 import { Button } from "@ai-book-studio/ui/button";
@@ -262,6 +263,8 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       updateStatus({ kind: "saving" });
       savesInFlight.current += 1;
       touchSource();
+      const submittedEpoch = sourceEpoch.current;
+      const submittedEditor = editorRef.current;
       try {
         const result = await window.studio.chapters.save({
           bookId,
@@ -287,10 +290,24 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 
         const saved = result.data.chapter;
         base.current = { version: saved.version, hash: saved.hash, content: saved.content, title: saved.title };
+        // The file writer canonicalizes edge newlines. Reflect that reply only in the
+        // unchanged LF buffer for this save, so exact saved-source evidence can select it.
+        if (submittedEditor && editorRef.current === submittedEditor && sourceEpoch.current === submittedEpoch &&
+            latest.current === text && saved.content !== text && !text.includes("\r") && normalizeBody(text) === saved.content) {
+          const snapshot = submittedEditor.getSnapshot();
+          if (snapshot.body === text) {
+            const removed = text.match(/^\n*/)?.[0].length ?? 0;
+            submittedEditor.replaceText(saved.content, snapshot.revision, "save-normalization", {
+              anchor: safeTextOffset(saved.content, snapshot.selection.anchor - removed),
+              head: safeTextOffset(saved.content, snapshot.selection.head - removed)
+            });
+          }
+        }
         onSaved(saved);
-        void window.studio.drafts.clear(bookId, chapter.id);
         const afterRetry = failures.current > 0;
         failures.current = 0;
+        if (latest.current !== text && latest.current !== saved.content) return updateStatus({ kind: "dirty" });
+        dropDraft();
         return updateStatus(afterRetry ? { kind: "saved", at: Date.now(), afterRetry } : { kind: "saved", at: Date.now() });
       } catch (error) {
         failures.current += 1;
@@ -432,6 +449,11 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 
   const onEditorChange = useCallback(
     (change: InlineChange) => {
+      if (change.origin === "save-normalization") {
+        latest.current = change.text;
+        setContent(change.text);
+        return;
+      }
       // The leaf reports the pre-edit text without mapping marks through it; history is ours alone.
       if (change.recordHistory) pushHistory(chapter.id, change.previous, Date.now(), change.isolated);
       applyTextRef.current(change.text);

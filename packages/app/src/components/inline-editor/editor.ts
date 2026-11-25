@@ -163,7 +163,7 @@ export class InlineEditor {
       const origin = explicit ?? (pasted ? "paste" : "input");
       this.options.onChange(Object.freeze({
         previous, text: snapshot.body, selection: snapshot.selection, origin,
-        recordHistory: origin !== "undo" && origin !== "redo",
+        recordHistory: origin !== "undo" && origin !== "redo" && origin !== "save-normalization",
         isolated: origin === "paste" || origin === "dictation" || origin === "controlled" ||
           Math.abs(snapshot.body.length - previous.length) > 1
       }));
