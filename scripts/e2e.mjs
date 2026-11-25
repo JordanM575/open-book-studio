@@ -18,6 +18,7 @@
  *   bridge      the phone's half: a separate process speaking to the app over the LAN
  *   offline     writing through export with every outbound connection denied (macOS only)
  *   instance    a second copy on the same profile: refused, nothing written, the open copy says so
+ *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
  *
  *   bun run e2e            build, then run everything
  *   bun run e2e --no-build trust the current build
@@ -25,7 +26,7 @@
  *
  * A live check needs keys and costs money, so it is not here. `bun run live:check` is its own gate.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,6 +60,13 @@ const CHECKS = [
     id: "instance",
     script: "scripts/second-instance-check.mjs",
     what: "a second copy on the same profile, refused with a notice"
+  },
+  {
+    id: "reader-review",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-exact-passage"],
+    what: "the isolated built desktop reader keyboard journey",
+    optIn: true
   }
 ];
 
@@ -71,7 +79,7 @@ if (unknown.length > 0) {
   console.error(`[e2e] Known: ${CHECKS.map((check) => check.id).join(", ")}`);
   process.exit(1);
 }
-const selection = requested.length > 0 ? CHECKS.filter((check) => requested.includes(check.id)) : CHECKS;
+const selection = CHECKS.filter((check) => requested.length > 0 ? requested.includes(check.id) : !check.optIn);
 
 function run(command, args, options = {}) {
   return new Promise((resolveRun) => {
@@ -83,7 +91,11 @@ function run(command, args, options = {}) {
 
 if (build) {
   console.log("[e2e] building the desktop app, the web build and the toolkit…");
-  const built = await run("bun", ["run", "build"]);
+  const desktopEnv = { ...process.env };
+  if (selection.some((check) => check.id === "reader-review")) {
+    desktopEnv.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  }
+  const built = await run("bun", ["run", "build"], { env: desktopEnv });
   if (built !== 0) {
     console.error("[e2e] the desktop build failed, so there is nothing to check");
     process.exit(1);

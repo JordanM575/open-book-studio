@@ -33,7 +33,10 @@ function harness(reason: FinishReason = "stop", text = '{"findings":[]}') {
 describe("one AI SDK reader transport call", () => {
   test("sends the exact validated messages once with empty tools, no retry and the abort signal", async () => {
     const envelope = await readerEnvelope();
-    const wire = JSON.parse(serializeProviderRequest(envelope)) as { messages: ReviewGenerateOptions["messages"]; tools: unknown[] };
+    const wire = JSON.parse(serializeProviderRequest(envelope)) as {
+      messages: NonNullable<ReviewGenerateOptions["messages"]>;
+      tools: unknown[];
+    };
     const { calls, models, model, transport } = harness("stop", "exact synthetic text");
     const controller = new AbortController();
     const result = await transport.run({ envelope, credential, signal: controller.signal });
@@ -42,8 +45,8 @@ describe("one AI SDK reader transport call", () => {
     const options = calls[0];
     if (!options) throw new Error("Missing synthetic generator call");
     expect(wire.tools).toEqual([]);
-    expect(options.messages).toEqual(wire.messages);
-    expect(options.messages).toHaveLength(2);
+    expect([{ role: "system", content: options.instructions }, ...(options.messages ?? [])]).toEqual(wire.messages);
+    expect(options.messages).toHaveLength(1);
     expect(options.tools).toEqual({});
     expect(Array.isArray(options.tools)).toBe(false);
     expect(options.maxRetries).toBe(0);

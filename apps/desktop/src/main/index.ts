@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, session, shell, type WebContents } from "electron";
+import { app, BrowserWindow, dialog, Menu, safeStorage, session, shell, type WebContents } from "electron";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -40,6 +40,7 @@ import { StudioWindows } from "./windows";
 import { Studio } from "./studio";
 import { runSmoke } from "./smoke";
 import { runLiveCheckInApp, sampleLibraryPath } from "./live-check";
+import { admitReaderReviewCheck, createReaderReviewCheck, readerReviewCheckRequested } from "./review/reader-review-check";
 
 const isDev = !app.isPackaged;
 
@@ -63,8 +64,24 @@ const capturePath = process.env.STUDIO_CAPTURE;
 const windowSize = parseWindowSize(process.env.STUDIO_WINDOW_SIZE);
 const TEST_WINDOW_OFFSET = -16_000;
 
+let readerCheck: ReturnType<typeof createReaderReviewCheck> | undefined;
 // Must happen before the single-instance lock and before any settings are read.
-if (isTest && process.env.STUDIO_USER_DATA) {
+if (readerReviewCheckRequested(process.env)) {
+  try {
+    const profile = admitReaderReviewCheck({
+      env: process.env, packaged: app.isPackaged, headless, appPath: app.getAppPath(), entry: __filename
+    });
+    app.setPath("userData", profile);
+    if (app.getPath("userData") !== profile) throw new Error("The reader check profile was not applied.");
+    readerCheck = createReaderReviewCheck();
+    readerCheck.guardHost(safeStorage, shell);
+    const snapshot = readerCheck.snapshot;
+    app.once("quit", () => console.log("[reader-review:child] " + JSON.stringify(snapshot())));
+  } catch {
+    console.error("[reader-review] The synthetic launch was refused.");
+    process.exit(1);
+  }
+} else if (isTest && process.env.STUDIO_USER_DATA) {
   app.setPath("userData", process.env.STUDIO_USER_DATA);
 } else if (isTest) {
   console.warn("[studio] STUDIO_TEST is set without STUDIO_USER_DATA; this run is using your real profile.");
@@ -94,6 +111,7 @@ const exitCoordinator = new ExitCoordinator();
 const claimsLock = claimsSingleInstanceLock({ headless, isTest, userData: process.env.STUDIO_USER_DATA });
 const refused = claimsLock && !app.requestSingleInstanceLock();
 if (refused) {
+  if (readerCheck) process.exit(1);
   console.log("[studio] This profile is already open in another copy of the studio, so this copy is closing without opening the library.");
   app.quit();
 } else if (claimsLock) {
@@ -419,6 +437,16 @@ const started = app.whenReady().then(async () => {
   if (headless && process.platform === "darwin") {
     app.dock?.hide();
   }
+  const check = readerCheck;
+  if (check) {
+    session.defaultSession.webRequest.onBeforeRequest(
+      { urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"] },
+      (_details, callback) => {
+        check.noteOutbound();
+        callback({ cancel: true });
+      }
+    );
+  }
 
   const settings = new SettingsStore();
   settingsStore = settings;
@@ -506,7 +534,8 @@ const started = app.whenReady().then(async () => {
   };
 
   const vault = createDesktopVault();
-  providers = new ProviderService(vault, (url) => shell.openExternal(url));
+  if (check) await check.seed(vault);
+  providers = new ProviderService(vault, (url) => shell.openExternal(url), check?.catalogueFetch);
   /*
    * Host-owned voice requests. Every provider-bound voice operation is minted here so the
    * renderer can only ever ask for a cancel, never for a route, model, voice or session of its
@@ -575,10 +604,10 @@ const started = app.whenReady().then(async () => {
   });
   const permissions = voicePermissions;
   session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin, details) =>
-    permissions.check(contents, permission, requestingOrigin, details)
+    check ? check.refusePermission() : permissions.check(contents, permission, requestingOrigin, details)
   );
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
-    callback(permissions.request(contents, permission, details));
+    callback(check ? check.refusePermission() : permissions.request(contents, permission, details));
   });
   app.on("browser-window-focus", () => {
     notifier.clearBadge();
@@ -600,7 +629,7 @@ const started = app.whenReady().then(async () => {
     (bookId) => agentRuntime.isWorking(bookId),
     () => null,
     voiceCancelRegistry,
-    undefined,
+    check?.createReader(() => studio.requireLibrary(), providers),
     voiceRequests
   );
 
