@@ -8,7 +8,7 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Review evidence after saving
-- Match the unchanged editor buffer to the canonical saved chapter so review evidence can open after saving. The save keeps the caret and undo history and leaves newer typing in the editor.
+- Keep paragraph breaks and newer draft text during autosave. Apply a missing final newline from a confirmed chapter save once the unchanged editor is idle so exact review evidence can open.
 
 ### Review smoke evidence navigation
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.

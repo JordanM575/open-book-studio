@@ -2,6 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
 import React from "react";
 import { mountDom, unmountDom } from "./support/dom";
+import { normalizeBody } from "@ai-book-studio/core/markdown";
 import type { Chapter, ChapterConflict } from "@ai-book-studio/core/schema";
 import type { EditorHandle, SaveStatus } from "@ai-book-studio/app/components/ManuscriptEditor";
 import type { InlineEditor } from "../../../packages/app/src/components/inline-editor/editor";
@@ -97,6 +98,16 @@ function studioWithSave(
     drafts: { set: setDraft, clear, onFlushRequest: () => () => {} }
   };
   return { save, updateMeta, setDraft, clear };
+}
+
+function canonicalSave({ content }: { content: string }) {
+  return {
+    ok: true,
+    data: {
+      status: "saved",
+      chapter: { ...CHAPTER, content: normalizeBody(content), version: CHAPTER.version + 1, hash: "b".repeat(64) }
+    }
+  };
 }
 
 interface Mounted {
@@ -371,15 +382,8 @@ describe("mounted editor surface", () => {
   });
 
   test("a canonical save supports exact evidence without adding an undo step", async () => {
-    const { normalizeBody } = await import("@ai-book-studio/core/markdown");
-    const mounted = mount({}, ({ content }) => ({
-      ok: true,
-      data: {
-        status: "saved",
-        chapter: { ...CHAPTER, content: normalizeBody(content), version: CHAPTER.version + 1, hash: "b".repeat(64) }
-      }
-    }));
-    const typed = `\n${CHAPTER.content}Mara wrote on.`;
+    const mounted = mount({}, canonicalSave);
+    const typed = `${CHAPTER.content}Mara wrote on.`;
     const editor = mounted.editor();
     type(typed);
     const start = typed.indexOf(PASSAGE);
@@ -400,7 +404,6 @@ describe("mounted editor surface", () => {
   });
 
   test("a canonical save leaves typing that arrived during the request dirty", async () => {
-    const { normalizeBody } = await import("@ai-book-studio/core/markdown");
     const reply = Promise.withResolvers<unknown>();
     const mounted = mount({}, () => reply.promise);
     const submitted = `${CHAPTER.content}Mara wrote on.`;
@@ -415,19 +418,119 @@ describe("mounted editor surface", () => {
     const later = `${submitted}\nThen the lamp came back on.`;
     type(later);
     await testing.act(async () => {
-      reply.resolve({
-        ok: true,
-        data: {
-          status: "saved",
-          chapter: { ...CHAPTER, content: normalizeBody(submitted), version: CHAPTER.version + 1, hash: "b".repeat(64) }
-        }
-      });
+      reply.resolve(canonicalSave({ content: submitted }));
       await saved;
     });
 
     expect(mounted.editor().getSnapshot().body).toBe(later);
     expect(mountedHandle(mounted).getStatus().kind).toBe("dirty");
     expect(mountedHandle(mounted).getEvidenceSnapshot()).toBeNull();
+  });
+
+  test("a queued no-op keeps the newest text dirty and preserves its backup", async () => {
+    const reply = Promise.withResolvers<unknown>();
+    const mounted = mount({}, () => reply.promise);
+    const handle = mountedHandle(mounted);
+    const submitted = `${CHAPTER.content}Mara wrote on.`;
+    type(submitted);
+    const first = handle.flush();
+    await testing.waitFor(() => expect(mounted.save).toHaveBeenCalledTimes(1));
+    const saved = normalizeBody(submitted);
+    type(saved);
+    const queued = handle.flush();
+    const newer = `${saved}Then the lamp came back on.`;
+    type(newer);
+
+    await testing.act(async () => {
+      reply.resolve(canonicalSave({ content: submitted }));
+      await Promise.all([first, queued]);
+    });
+
+    expect(handle.getStatus().kind).toBe("dirty");
+    expect(editorText()).toBe(newer);
+    expect(mounted.save).toHaveBeenCalledTimes(1);
+    await testing.waitFor(() =>
+      expect(mounted.setDraft).toHaveBeenCalledWith(expect.objectContaining({ content: newer, baseVersion: CHAPTER.version + 1 }))
+    );
+  });
+
+  test.each(["hold", "composition"] as const)("an acknowledged newline settles after a %s", async (blocked) => {
+    const reply = Promise.withResolvers<unknown>();
+    const release = Promise.withResolvers<void>();
+    const mounted = mount({}, () => reply.promise);
+    const handle = mountedHandle(mounted);
+    const submitted = `${CHAPTER.content}Mara wrote on.`;
+    type(submitted);
+    const saving = handle.flush();
+    await testing.waitFor(() => expect(mounted.save).toHaveBeenCalledTimes(1));
+    const holding = blocked === "hold" ? handle.hold(() => release.promise) : null;
+    if (blocked === "composition") testing.fireEvent.compositionStart(mounted.surface());
+
+    await testing.act(async () => {
+      reply.resolve(canonicalSave({ content: submitted }));
+      await saving;
+    });
+    expect(editorText()).toBe(submitted);
+    expect(handle.getEvidenceSnapshot()).toBeNull();
+
+    if (holding) {
+      await testing.act(async () => {
+        release.resolve();
+        await holding;
+      });
+    } else {
+      testing.fireEvent.compositionEnd(mounted.surface(), { data: "" });
+    }
+
+    await testing.waitFor(() => expect(handle.getEvidenceSnapshot()?.body).toBe(normalizeBody(submitted)));
+    expect(mounted.save).toHaveBeenCalledTimes(1);
+  });
+
+  test("editing and returning to the submitted text cancels a held newline settlement", async () => {
+    const reply = Promise.withResolvers<unknown>();
+    const release = Promise.withResolvers<void>();
+    const mounted = mount({}, () => reply.promise);
+    const handle = mountedHandle(mounted);
+    const submitted = `${CHAPTER.content}Mara wrote on.`;
+    type(submitted);
+    const saving = handle.flush();
+    await testing.waitFor(() => expect(mounted.save).toHaveBeenCalledTimes(1));
+    const holding = handle.hold(() => release.promise);
+    await testing.act(async () => {
+      reply.resolve(canonicalSave({ content: submitted }));
+      await saving;
+    });
+
+    type(`${submitted} More words.`);
+    type(submitted);
+    await testing.act(async () => {
+      release.resolve();
+      await holding;
+    });
+
+    expect(editorText()).toBe(submitted);
+    expect(handle.getStatus().kind).toBe("dirty");
+    expect(handle.getEvidenceSnapshot()).toBeNull();
+  });
+
+  test("idle autosave preserves a paragraph break for the next words", async () => {
+    const mounted = mount({}, canonicalSave);
+    const handle = mountedHandle(mounted);
+    const editor = mounted.editor();
+    const afterEnter = `${CHAPTER.content}\n`;
+    type(afterEnter);
+    expect(editor.setSelection({ anchor: afterEnter.length, head: afterEnter.length })).toBe(true);
+    await testing.waitFor(() => {
+      expect(mounted.save).toHaveBeenCalledTimes(1);
+      expect(handle.getStatus().kind).toBe("saved");
+    }, { timeout: 1500 });
+
+    const { body, selection } = editor.getSnapshot();
+    expect(body).toBe(afterEnter);
+    expect(selection.anchor).toBe(afterEnter.length);
+    type(`${body.slice(0, selection.anchor)}A new paragraph.${body.slice(selection.head)}`);
+    await testing.act(async () => { await handle.flush(); });
+    expect(handle.getEvidenceSnapshot()?.body).toBe(`${afterEnter}A new paragraph.\n`);
   });
 
   test("a host evidence selection moves the mounted selection on each new request", async () => {
