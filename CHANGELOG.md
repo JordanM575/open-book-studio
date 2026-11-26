@@ -20,6 +20,7 @@ Update the `Unreleased` section before every commit.
 - Verify site storage in isolated Chromium, Firefox and WebKit fixtures with CSP-safe validation and preserve the original diagnostic if artifact capture fails.
 - Record the passing strict browser matrix, same-page Web Lock serialization and saved-revision restart checks for Spec 010.
 - Exercise two separate browser tabs contending for the same Web Lock in the storage matrix.
+- Let the browser storage fixture use the adapter's bounded startup result and report persistence separately.
 
 ### Repository verification
 - Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.
