@@ -1,11 +1,11 @@
 # Tasks: structured reader and continuity review
 
-D-193 and D-197–D-199 are accepted. Isolated implementation/review evidence does not complete the
-mounted journey. T003's disclosed volatile selected-source prepare/start, T004's schema, quotation
-and citation-navigation work, T005's volatile profile attribution and explicit rerun comparison and
-T008's read-only enforcement proof are delivered at the source/test level; T006, T009 and
-T010–T019 remain. The built-app keyboard journey stays with T009. T010 retains the independent
-correction gate. The policy amendment completed T007. T001 was reconciled and recorded 2026-11-20.
+D-193 and D-197–D-199 are accepted. T003's disclosed volatile selected-source prepare/start,
+T004's schema, quotation and citation-navigation work, T005's volatile profile attribution and
+explicit rerun comparison and T008's read-only enforcement proof are delivered at the source/test
+level. T009 records the unpackaged macOS desktop and built-web verification. T006 and T010–T019
+remain open. T010 retains the independent correction gate. The policy amendment completed T007.
+T001 was reconciled and recorded 2026-11-20.
 
 - [x] T001 Reconcile 034/037 contracts, existing evidence and exact owned modules; record acceptance scope.
   Completed 2026-11-20 on `feat-routing-handoff-docs` (HEAD `f4c8caa`; 034/037/039 content verified
@@ -96,7 +96,21 @@ correction gate. The policy amendment completed T007. T001 was reconciled and re
   window is covered by the transport-injected deterministic test rather than a product hook. No
   live-provider, built-app, packaged-app or device evidence is claimed; those stay with T009.
   T001, T005–T006, T009 and T010–T019 remain open.
-- [ ] T009 Verify built-app keyboard/theme/reduced-motion/reduced-transparency/unsupported-host journeys; run exact-head tests/typecheck/smoke and record limitations in the index/changelog.
+- [x] T009 Verify built-app keyboard/theme/reduced-motion/reduced-transparency/unsupported-host journeys; run exact-head tests/typecheck/smoke and record limitations in the index/changelog.
+  Completed 2026-11-25 on `e796143`, whose tree merged in
+  [PR #127](https://github.com/JordanM575/open-book-studio/pull/127).
+  Linux passed all eight verification stages, including typechecks and both builds, with 5,489
+  tests passing and one skipped. Coverage passed at 94.90% functions and 96.88% lines.
+  The unpackaged macOS arm64 build passed default E2E 12/12, official smoke 52/52 and
+  six opt-in Reader Review scenarios on matching artifacts. The desktop cases checked keyboard
+  focus and exact saved passage selection, light and dark appearance, reduced motion and
+  reduced transparency independently, both zero-send Start refusals, Stop with a late response,
+  and attributed revisions with stale navigation refused. The built-web fixture in Electron
+  verified unsupported-host refusal at welcome and in the workspace without reader side effects.
+  Each reader case used synthetic fixtures and verified library custody. The runner removed an
+  empty web-smoke diagnostics directory after default E2E. Final teardown passed.
+  This evidence covers the named unpackaged Mac desktop and built-web fixture. Packaged, other
+  native host and live-provider claims require their own receipts.
 
 ## Inline, retained and whole-book follow-through — ADR 0020
 
