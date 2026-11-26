@@ -199,27 +199,36 @@ export function useSpeech(voiceStatusRevision = 0): Speech {
   const speakWithDevice = useCallback(
     (text: string, mine: number): boolean => {
       if (!deviceSupported || mine !== token.current) return false;
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.lang = "en-US";
-      utterance.onend = () => {
-        if (mine !== token.current || source.current !== "device") return;
+      const current = () => mine === token.current && source.current === "device";
+      const settle = (failed: boolean) => {
         source.current = null;
         setSpeaking(false);
         setPaused(false);
         setPhase("idle");
+        if (failed) setError("This device could not play the speech. Try reading again.");
       };
-      utterance.onerror = () => {
-        if (mine !== token.current || source.current !== "device") return;
-        source.current = null;
-        setSpeaking(false);
-        setPaused(false);
-        setPhase("idle");
-        setError("This device could not play the speech. Try reading again.");
-      };
-      source.current = "device";
-      setSpeaking(true);
-      setPhase("playing");
-      window.speechSynthesis.speak(utterance);
+
+      try {
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "en-US";
+        utterance.onend = () => {
+          if (current()) settle(false);
+        };
+        utterance.onerror = () => {
+          if (current()) settle(true);
+        };
+        source.current = "device";
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        if (mine === token.current) settle(true);
+        return false;
+      }
+
+      // The device may settle the utterance inside the speak call.
+      if (current()) {
+        setSpeaking(true);
+        setPhase("playing");
+      }
       return true;
     },
     [deviceSupported]
