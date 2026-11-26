@@ -1,6 +1,6 @@
 # The writing agent's capabilities
 
-The agent inside AI Book Studio is the author's own. This page is what it can be told, what it can
+The agent inside Open Book Studio is the author's own. This page is what it can be told, what it can
 be shown, and what it can be extended with. Everything here is per book, so two books in one
 library can behave differently.
 
@@ -112,14 +112,16 @@ The handler's context has the book id and the library, and nothing else:
 | `ctx.library.saveChapter` | A whole-chapter write, with the version and hash guard |
 | `ctx.library.appendToChapter` | An append, with the version and hash guard |
 
-A plugin cannot read a provider key, a credential file or the app's internals. It writes through
-the same `Library` the built-in tools use, so the atomic save and the version guard still apply.
+The handler context exposes book data and checked `Library` operations. Chapter writes through
+`ctx.library` use the same atomic save and version guard as built-in tools.
+[Plugin library adapter](../apps/desktop/src/main/agent/tool-set.ts#L147-L186)
 
 ### The rules
 
 - A plugin may not shadow a built-in tool. When the names collide, the built-in tool wins.
 - A plugin that fails to load is reported and skipped. The built-in tools keep working.
-- A plugin tool is a write, so the toolkit's `--allow-writes` applies to it as well.
+- The toolkit classifies plugin tools as `write`. CLI calls and MCP invocation require the
+  write opt-in described in the [toolkit guide](TOOLKIT.md#safety-tiers).
 - The folder is read on demand. Restart the app, or ask for a reload, after adding a file.
 
 ### Proving it
