@@ -131,8 +131,11 @@ describe("registered readerReview:request channel and actual preload", () => {
     expect(calls).toHaveLength(before);
   });
 
+  const redactionMarker = "TESTONLYREDACTIONMATERIAL".repeat(2);
+  const redactionToken = ["sk", "or-v1", redactionMarker].join("-");
+
   test("service failures are redacted at the IPC boundary", async () => {
-    const secret = "sk-or-v1-PRIVATEKEYMATERIALPRIVATEKEYMATERIAL";
+    const secret = redactionToken;
     const failing: ReaderReviewService = { ...fakeService,
       prepare: async () => { throw new Error(`Provider key ${secret} failed`); } };
     handlers.get(IPC.readerReview.request)?.pop();
@@ -145,11 +148,11 @@ describe("registered readerReview:request channel and actual preload", () => {
     if (result.ok) return;
     expect(result.error.code).toBe("internal");
     expect(result.error.message).toContain("sk-or-[redacted]");
-    expect(result.error.message).not.toContain("PRIVATEKEYMATERIAL");
+    expect(result.error.message).not.toContain(redactionMarker);
   });
 
   test("no reader-review operation leaks a secret-bearing error message", async () => {
-    const secret = "sk-or-v1-PRIVATEKEYMATERIALSECRETMATERIAL1234";
+    const secret = redactionToken;
     const leaking: ReaderReviewService = {
       support: async () => { throw new Error(`support failed: ${secret}`); },
       prepare: async () => { throw new Error(`prepare failed: ${secret}`); },
@@ -175,7 +178,7 @@ describe("registered readerReview:request channel and actual preload", () => {
       if (result.ok) continue;
       expect(result.error.code).toBe("internal");
       expect(JSON.stringify(result)).not.toContain(secret);
-      expect(result.error.message).not.toContain("PRIVATEKEYMATERIALSECRETMATERIAL1234");
+      expect(result.error.message).not.toContain(redactionMarker);
     }
   });
 

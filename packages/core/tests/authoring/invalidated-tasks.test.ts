@@ -135,8 +135,9 @@ describe("projectInvalidatedTasks", () => {
     expect(projectedRoot?.base).not.toEqual(root.base);
     expect(projectedRoot?.direction).toEqual(direction);
     expect(projectedRoot?.direction).not.toBe(direction);
-    expect((projectedRoot?.direction as { owner: unknown }).owner).not.toBe(direction.owner);
-    expect((projectedRoot?.direction as { label: string }).label).toBe("kept-reference");
+    const projectedDirection = projectedRoot?.direction as { owner: unknown; label: string } | undefined;
+    expect(projectedDirection?.owner).not.toBe(direction.owner);
+    expect(projectedDirection?.label).toBe("kept-reference");
     expect(projectedRoot?.retryAllowed).toBe(true);
     expect(projectedRoot?.needsDirection).toBe(true);
     expect(projectedRoot?.generation).toBe(7);

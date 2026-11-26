@@ -745,6 +745,7 @@ describe("plan state through the thread store", () => {
     expect(withPlan.plans).toHaveLength(1);
     const raw = JSON.parse(await bytesOf(thread.id)) as Record<string, unknown>;
     const stored = (raw.plans as Array<Record<string, unknown>>)[0];
+    if (!stored) throw new Error("Expected the persisted proposal");
     expect(stored).toMatchObject({
       id: "plan-1",
       mode: "edit",
@@ -753,7 +754,7 @@ describe("plan state through the thread store", () => {
       revision: 1,
       parent: { messageId: PLAN_PARENT_ID, turnId: PLAN_TURN_ID }
     });
-    expect((stored?.steps as Array<Record<string, unknown>>).map((step) => step.state)).toEqual([
+    expect((stored.steps as Array<Record<string, unknown>>).map((step) => step.state)).toEqual([
       "pending",
       "pending"
     ]);
@@ -1146,12 +1147,13 @@ describe("plan state through the thread store", () => {
     await store.applyPlanEvent(BOOK, threadId, "plan-1", { type: "start", revision: 1 });
     const moved = JSON.parse(await bytesOf(threadId)) as Record<string, unknown>;
     const plan = (moved.plans as Array<Record<string, unknown>>)[0];
+    if (!plan) throw new Error("Expected the persisted running plan");
     expect(plan?.status).toBe("running");
     expect(plan?.futurePlanField).toBe("keep the plan");
-    expect(((plan?.steps as Array<Record<string, unknown>>)[0])?.futureStepField).toBe(
+    expect((plan.steps as Array<Record<string, unknown>>)[0]?.futureStepField).toBe(
       "keep the step"
     );
-    expect((plan?.parent as Record<string, unknown>).futureParentField).toBe("keep the parent");
+    expect((plan.parent as Record<string, unknown>).futureParentField).toBe("keep the parent");
   });
 
   test("refreshPlanProposal persists the next revision and keeps the parent", async () => {

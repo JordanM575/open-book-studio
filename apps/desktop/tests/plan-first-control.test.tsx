@@ -361,6 +361,21 @@ function doneEvent(overrides: Partial<DoneEvent> = {}): DoneEvent {
 }
 
 describe("plan first control", () => {
+  test("keeps focus in the suggestion list when a step is added or removed", () => {
+    renderPlan({ onPropose: countingOnPropose() });
+    const view = testing.within(document.body);
+    testing.fireEvent.click(view.getByRole("button", { name: "Add step" }));
+    const steps = view.getAllByTestId("plan-step");
+    expect(steps).toHaveLength(2);
+    const added = steps[1];
+    if (!added) throw new Error("Expected the added step");
+    expect(document.activeElement).toBe(added);
+
+    testing.fireEvent.click(view.getByRole("button", { name: "Remove step 2" }));
+    expect(view.getAllByTestId("plan-step")).toHaveLength(1);
+    expect(document.activeElement).toBe(view.getByTestId("plan-step"));
+  });
+
   test("asks for a proposal with the request, suggestions and one-turn guidance", async () => {
     const onPropose = countingOnPropose();
     renderPlan({ onPropose });

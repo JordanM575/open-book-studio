@@ -7,6 +7,10 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Repository verification
+- Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.
+- Generate synthetic reader IPC redaction values at runtime.
+
 ### Browser reader verification
 - Settle workspace startup reads before measuring the unsupported reader control's side effects.
 - Add an opt-in built web check for reader review refusal at welcome and in the workspace, with storage and process cleanup checks.
