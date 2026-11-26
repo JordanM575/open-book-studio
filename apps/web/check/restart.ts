@@ -1,11 +1,14 @@
 import "./csp-validation";
 import { LibraryService } from "@ai-book-studio/core/library/service";
 import { browserRuntime } from "../src/runtime/browser-libraries";
+import { webLock } from "../src/storage/directory-port";
 import {
   newBrowserLibraryId,
   openBrowserLibrary,
   removeBrowserLibrary
 } from "../src/storage/opfs";
+
+Object.assign(window, { browserMatrixWebLock: webLock });
 
 const PHASE = "check:restart:phase";
 const LIBRARY = "check:restart:library";

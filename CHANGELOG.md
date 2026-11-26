@@ -16,6 +16,7 @@ Update the `Unreleased` section before every commit.
 - Confirm storage access before browser sign-in and retire a preparing sign-in when an explicit storage check refuses access.
 - Verify site storage in isolated Chromium, Firefox and WebKit fixtures with CSP-safe validation and preserve the original diagnostic if artifact capture fails.
 - Record the passing strict browser matrix, same-page Web Lock serialization and saved-revision restart checks for Spec 010.
+- Exercise two separate browser tabs contending for the same Web Lock in the storage matrix.
 
 ### Repository verification
 - Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.

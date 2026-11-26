@@ -16,6 +16,8 @@ import {
   type BrowserLibrary
 } from "../src/storage/opfs";
 
+Object.assign(window, { browserMatrixWebLock: webLock });
+
 interface Check {
   name: string;
   ok: boolean;
@@ -232,7 +234,7 @@ async function run(): Promise<void> {
     return "permission-required · folder kept";
   });
 
-  await check("two tabs serialize writes with Web Locks", async () => {
+  await check("Web Locks serialize requests within one page", async () => {
     if (!webLocksAvailable()) return "Web Locks unavailable";
     let release!: () => void;
     let started!: () => void;
@@ -243,18 +245,18 @@ async function run(): Promise<void> {
       started = resolve;
     });
     const order: string[] = [];
-    const first = webLock("check:two-tabs", async () => {
+    const first = webLock("check:same-page", async () => {
       order.push("first:start");
       started();
       await gate;
       order.push("first:end");
     });
     await firstStarted;
-    const second = webLock("check:two-tabs", async () => {
+    const second = webLock("check:same-page", async () => {
       order.push("second:start");
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    if (order.includes("second:start")) throw new Error("The second tab entered while the first held the lock.");
+    if (order.includes("second:start")) throw new Error("The second request entered while the first held the lock.");
     release();
     await Promise.all([first, second]);
     if (order.join("|") !== "first:start|first:end|second:start") {
