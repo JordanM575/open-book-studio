@@ -1,9 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { InMemoryLibraryPort } from "./support/in-memory-port";
 import { ImageStore } from "../src/images/store";
 import { imageManifestPath, imageFilePath, imagesPath, trashPath } from "../src/library/paths";
 import type { LibraryPath } from "../src/library/port";
-import { imageManifestSchema, inspectImage, MAX_IMAGE_PROMPT } from "../src/images/schema";
+import { imageManifestSchema, inspectImage, MAX_IMAGE_BYTES, MAX_IMAGE_PROMPT } from "../src/images/schema";
 import {
   IMAGE_COST_USD,
   imageGenerationEndpoint,
@@ -65,26 +65,80 @@ describe("Meta image provider", () => {
     });
   });
 
-  test("decodes a real PNG and records the flat image cost", () => {
-    const result = parseImageResponse(
-      {
-        data: [{ b64_json: Buffer.from(png()).toString("base64") }],
-        output_format: "png",
-        usage: { input_tokens: 12, output_tokens: 34 }
-      },
-      "1024x1024"
-    );
-    expect(result.inspection).toMatchObject({ format: "png", width: 1, height: 1 });
-    expect(result.costUsd).toBe(IMAGE_COST_USD);
-    expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+  test("preserves PNG bytes and usage with padded, unpadded and whitespace-formatted Base64", () => {
+    const bytes = png();
+    const padded = Buffer.from(bytes).toString("base64");
+    const unpadded = padded.replace(/=+$/, "");
+    const formatted = ` \t${padded.slice(0, 8)}\r\n${padded.slice(8, -1)}\f${padded.slice(-1)}`;
+    // The last digit of this fixture is g. Changing it to h sets an unused padding bit.
+    const withUnusedBit = `${unpadded.slice(0, -1)}h==`;
+    for (const encoded of [padded, unpadded, formatted, withUnusedBit]) {
+      const result = parseImageResponse(
+        {
+          data: [{ b64_json: encoded }],
+          output_format: "png",
+          usage: { input_tokens: 12, output_tokens: 34 }
+        },
+        "1024x1024"
+      );
+      expect(result.bytes).toEqual(bytes);
+      expect(result.inspection).toMatchObject({ format: "png", width: 1, height: 1 });
+      expect(result.costUsd).toBe(IMAGE_COST_USD);
+      expect(result.usage).toEqual({ inputTokens: 12, outputTokens: 34 });
+    }
   });
 
-  test("refuses missing, undecodable and non-image payloads", () => {
-    expect(() => parseImageResponse({ data: [] }, "1024x1024")).toThrow(/no image data/);
-    expect(() => parseImageResponse({ data: [{ b64_json: "%%%" }] }, "1024x1024")).toThrow(/could not be decoded/);
+  test("admits the exact decoded-size limit with and without padding", () => {
+    const unpadded = "A".repeat(Math.ceil((MAX_IMAGE_BYTES * 4) / 3));
+    const padded = unpadded.padEnd(Math.ceil(unpadded.length / 4) * 4, "=");
+    const decoder = spyOn(globalThis, "atob").mockReturnValue(Buffer.from(png()).toString("latin1"));
+    try {
+      // The decoder supplies a small PNG so this test exercises the boundary check without decoding 20 MiB.
+      for (const encoded of [padded, unpadded, `\t${padded}\r\n`]) {
+        const result = parseImageResponse({ data: [{ b64_json: encoded }] }, "1024x1024");
+        expect(result.inspection.format).toBe("png");
+      }
+      expect(decoder.mock.calls.length).toBe(3);
+    } finally {
+      decoder.mockRestore();
+    }
+  });
+
+  test("refuses one decoded byte over the limit before invoking atob", () => {
+    const oversized = "A".repeat(Math.ceil(((MAX_IMAGE_BYTES + 1) * 4) / 3));
+    const formatted = `${oversized.slice(0, 4)}\r\n${oversized.slice(4)}`;
+    const decoder = spyOn(globalThis, "atob").mockReturnValue("");
+    try {
+      for (const encoded of [oversized, formatted]) {
+        expect(() => parseImageResponse({ data: [{ b64_json: encoded }] }, "1024x1024")).toThrow(/not a complete image/);
+      }
+      expect(decoder.mock.calls.length).toBe(0);
+    } finally {
+      decoder.mockRestore();
+    }
+  });
+
+  test("refuses missing and malformed Base64 before invoking atob", () => {
+    const decoder = spyOn(globalThis, "atob").mockReturnValue("");
+    try {
+      expect(() => parseImageResponse({ data: [] }, "1024x1024")).toThrow(/no image data/);
+      expect(() => parseImageResponse({ data: [{ b64_json: "\t\u00a0" }] }, "1024x1024")).toThrow(/no image data/);
+      for (const encoded of ["%%%", "A", "Zg=", "Z=g=", "Zg===", "Zg-_", "Z\vg==", "Z\u00a0g=="]) {
+        expect(() => parseImageResponse({ data: [{ b64_json: encoded }] }, "1024x1024")).toThrow(/could not be decoded/);
+      }
+      expect(decoder.mock.calls.length).toBe(0);
+    } finally {
+      decoder.mockRestore();
+    }
+  });
+
+  test("refuses non-image bytes and a mismatched reported format", () => {
     expect(() =>
       parseImageResponse({ data: [{ b64_json: Buffer.from("not an image").toString("base64") }] }, "1024x1024")
     ).toThrow(/not a complete image/);
+    expect(() =>
+      parseImageResponse({ data: [{ b64_json: Buffer.from(png()).toString("base64") }], output_format: "webp" }, "1024x1024")
+    ).toThrow(/different format/);
   });
 });
 
