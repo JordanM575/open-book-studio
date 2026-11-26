@@ -90,7 +90,7 @@ there is a working slice with remaining work; **planned** means it is not availa
 | --- | --- | --- |
 | Desktop from source | Working Electron app; macOS is the reference environment | Editing, writing agent, protected credentials, dictation, speech and exports |
 | Desktop packages | macOS DMG/ZIP, Windows NSIS and Linux AppImage targets are configured | Configuration is not proof of signed, notarized or tested installers on every OS |
-| Browser | Working web build with a picked Chromium folder or browser-origin storage | Editing and archive portability; agent, provider dictation and manuscript export remain desktop-only |
+| Browser | Edit in browser-origin storage where available and transfer libraries with portable archives | Opening a local folder requires a secure page, the browser's folder-picker API and a read/write grant. Use the desktop app for provider dictation and manuscript export. |
 | iPhone / iPad | Responsive layouts and a Capacitor iOS shell, exercised in Simulator | No App Store/TestFlight release or real-device validation is claimed |
 | Android | Planned | No Android app or Play Store release is claimed |
 | CLI / MCP | Standalone `bookwriter` talks to the open desktop studio | Loopback only; no hosted copy of a manuscript and no remote access by default |
@@ -251,8 +251,11 @@ docs/  specs/     format, architecture, decisions, ADRs and the spec-driven hist
 The interface never touches the filesystem. It asks the main process, which validates every call with
 Zod, writes atomically through one `Library` and returns data or a typed error. The agent runs there
 too, on the Vercel AI SDK, and its tools call the same `Library`, so its edits are checked like yours.
-Electron 45, React 19, TypeScript 7, Tailwind 4 and Zod 4, in a Bun workspace. The browser build
-keeps books in browser storage or a folder you pick; the agent, dictation and export are desktop-only.
+Electron 45, React 19, TypeScript 7, Tailwind 4 and Zod 4, in a Bun workspace.
+
+In the web build, **Use this browser** keeps the library in site storage for the current browser
+profile. The browser can clear site data. Use portable archive export and import to move a library
+between the web and desktop builds. [Browser storage and archive tasks](specs/010-web-target/tasks.md)
 
 ## Where your book lives
 
@@ -279,8 +282,13 @@ There is no account, no telemetry and no server-side copy. Your text leaves the 
 ask: an agent turn sends what the agent needs to the provider you chose, dictation sends the
 recording to the selected Meta or OpenRouter service, an illustration sends its prompt to Muse Image,
 and a spoken reply sends its text to the voice service you connected. Keys never appear in the library,
-logs or exports. The browser
-build keeps an OpenRouter sign-in in that browser's own storage and does not run the agent yet.
+logs or exports. After OpenRouter sign-in, the web build stores the connection in site storage
+for the current browser profile. Running the writing agent requires the desktop app.
+[Browser sign-in tasks](specs/011-model-access/tasks.md#phase-8--web-enablement)
+
+The web build reports Reader review as unavailable. The built-web check observed zero library
+reads or writes, permission operations or provider requests during refusal.
+[Reader review verification](specs/039-reader-continuity-review/tasks.md)
 
 ## Verification
 
