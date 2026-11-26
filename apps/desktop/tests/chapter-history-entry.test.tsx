@@ -200,6 +200,19 @@ function dialogTitles(): string[] {
 }
 
 describe("desktop chapter history entry", () => {
+  test("the desktop toolbar opens history for the selected chapter", async () => {
+    const history = historyClient();
+    studio(history);
+    const view = renderWorkspace();
+    await openBook(view);
+
+    testing.fireEvent.click(view.getByRole("button", { name: "Chapter history" }));
+    const dialog = view.getByRole("dialog", { name: "Chapter history" });
+    expect(testing.within(dialog).getByText(FIRST.title)).toBeTruthy();
+    await testing.waitFor(() => expect(history.list).toHaveBeenCalledWith({ bookId: BOOK, chapterId: FIRST.id }));
+    expect(history.list).toHaveBeenCalledTimes(1);
+  });
+
   test("opens saved chapter history from More and lists the selected chapter", async () => {
     const history = historyClient();
     studio(history);
@@ -315,10 +328,11 @@ describe("desktop chapter history entry", () => {
     await expect(first.list({ libraryId: LIBRARY, bookId: BOOK, chapterId: FIRST.id, viewId: first.viewId })).rejects.toThrow(/another visit/);
   });
 
-  test("without a history API the More item is absent and nothing is adapted", async () => {
+  test("without a history API neither opener is offered and nothing is adapted", async () => {
     studio(undefined);
     const view = renderWorkspace();
     await openBook(view);
+    expect(view.queryByRole("button", { name: "Chapter history" })).toBeNull();
     testing.fireEvent.click(view.getByTestId("mobile-more"));
     expect(view.queryByTestId("more-chapter-history")).toBeNull();
     expect(view.queryByRole("dialog", { name: "Chapter history" })).toBeNull();

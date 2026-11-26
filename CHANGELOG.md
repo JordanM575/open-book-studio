@@ -46,6 +46,8 @@ Update the `Unreleased` section before every commit.
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
 
 ### Chapter history
+- Open the selected chapter's history directly from the desktop toolbar.
+- Verify the visible toolbar action and the exact captured record for the selected chapter in hidden smoke.
 - Open the chapter history dialog only when the selected chapter has a bound history adapter. This restores the desktop renderer typecheck and preserves the unsupported-host behavior.
 
 ### Reader review T001 reconciliation (039 T001) task record
