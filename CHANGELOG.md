@@ -15,6 +15,7 @@ Update the `Unreleased` section before every commit.
 
 ### Workflow verification
 - Type-check authoring fixtures for extended records, invalidated task status and malformed question states.
+- Verify confirmed chapter revision lineage with distinct candidate references and exact saved tokens. Keep preserved conflict copies outside publication evidence.
 
 ### Browser storage and capabilities
 - Bound the browser persistence wait so site storage can open with an unconfirmed-persistence warning.
