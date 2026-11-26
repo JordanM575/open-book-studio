@@ -50,6 +50,21 @@ async function writeFixture(scratch) {
   return { profile, libraryRoot };
 }
 
+async function saveFixtureRevision(page, libraryRoot, content) {
+  const reply = await page.evaluate(input => window.studio.chapters.save(input), {
+    bookId: sample.book.id, chapterId: sample.selected.id, content, baseVersion: 1, baseHash: sample.selected.hash
+  });
+  assert(reply.ok && reply.data.status === "saved");
+  const saved = reply.data.chapter;
+  assert.equal(saved.id, sample.selected.id);
+  assert.equal(saved.version, 2);
+  assert.equal(saved.content, content);
+  const path = join(libraryRoot, "books", sample.book.id, "chapters", sample.selected.filename);
+  assert.equal(sha256(await readFile(path)), saved.hash);
+  assert.notEqual(saved.hash, sample.selected.hash);
+  return { version: saved.version, hash: saved.hash };
+}
+
 async function filesIn(rootDir, { skipVolatile = false } = {}) {
   const files = [];
   async function walk(directory) {
@@ -109,11 +124,11 @@ function assertGuards(snapshot) {
   }
 }
 
-function assertDispatchedOnce(snapshot) {
+function assertDispatched(snapshot, count) {
   assertGuards(snapshot);
   for (const [name, value] of Object.entries({
-    catalogues: 1, preparations: 1, cancelledPreparations: 0, starts: 1,
-    readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
+    catalogues: 1, preparations: count, cancelledPreparations: 0, starts: count,
+    readerLists: 2 * count, readerModels: 2 * count, readerCredentialReads: count, completionPosts: count
   })) assert.equal(snapshot[name], value, name);
   assert.match(snapshot.preparedDigest, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.completedDigest, snapshot.preparedDigest);
@@ -121,15 +136,15 @@ function assertDispatchedOnce(snapshot) {
   assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 }
 
-function assertCompleted(snapshot) {
-  assertDispatchedOnce(snapshot);
+function assertCompleted(snapshot, count = 1) {
+  assertDispatched(snapshot, count);
   assert.equal(snapshot.stoppedRuns, 0);
   assert.equal(snapshot.lateResponses, 0);
   assert.deepEqual(snapshot.lastStart, { kind: "completed", reason: null });
 }
 
 function assertStopped(snapshot) {
-  assertDispatchedOnce(snapshot);
+  assertDispatched(snapshot, 1);
   assert.equal(snapshot.stoppedRuns, 1);
   assert.equal(snapshot.lateResponses, 1);
   assert.deepEqual(snapshot.lastStart, { kind: "stopped", reason: null });
@@ -332,21 +347,9 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   if (record.scenario === sample.staleScenario) {
     record.phase = "checked save of the selected source after Prepare";
     const editedContent = sample.selected.body + "\nThe author confirms the arrival.\n";
-    const reply = await page.evaluate((input) => window.studio.chapters.save(input), {
-      bookId: sample.book.id, chapterId: sample.selected.id, content: editedContent,
-      baseVersion: 1, baseHash: sample.selected.hash
-    });
-    assert(reply.ok && reply.data.status === "saved");
-    const saved = reply.data.chapter;
-    assert.equal(saved.id, sample.selected.id);
-    assert.equal(saved.version, 2);
-    assert.equal(saved.content, editedContent);
-    const savedFile = join(libraryRoot, "books", sample.book.id, "chapters", sample.selected.filename);
-    assert.equal(sha256(await readFile(savedFile)), saved.hash);
-    assert.notEqual(saved.hash, sample.selected.hash);
+    record.sourceEdit = await saveFixtureRevision(page, libraryRoot, editedContent);
     const afterEdit = await fingerprint(libraryRoot);
     assert.notEqual(afterEdit.digest, before.digest);
-    record.sourceEdit = { version: saved.version, hash: saved.hash };
 
     record.phase = "refuse keyboard Start on the changed saved source";
     await activate(exactButton("Start with " + sample.providerName));
@@ -369,7 +372,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   if (record.scenario === sample.stopScenario) {
     record.phase = "wait for one pending synthetic response";
     const pending = await waitForObservation(snapshot => snapshot.completionPosts > 0);
-    assertDispatchedOnce(pending);
+    assertDispatched(pending, 1);
     assert.equal(pending.stoppedRuns + pending.lateResponses, 0);
     assert.equal(pending.lastStart, null);
 
@@ -428,6 +431,76 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   record.phase = "verify the admitted synthetic completion";
   const observed = await observe();
   assertCompleted(observed);
+
+  if (record.scenario === sample.pairedScenario) {
+    record.phase = "make the first finding current and save the paired revision";
+    assert((await run.innerText()).includes("Alpha reader · Version 1"));
+    await activate(exactButton("Check current sources"));
+    await passage.and(finding.getByRole("button", { disabled: false })).waitFor();
+    assert.deepEqual(await fingerprint(libraryRoot), before);
+    assert.equal(sample.revisedBody.length, sample.selected.body.length);
+    assert.equal(sample.revisedBody.slice(sample.quote.start, sample.quote.end), sample.quote.text);
+    record.sourceEdit = await saveFixtureRevision(page, libraryRoot, sample.revisedBody);
+    const afterEdit = await fingerprint(libraryRoot);
+    assert.notEqual(afterEdit.digest, before.digest);
+
+    record.phase = "refuse exact navigation from the now-stale report";
+    await activate(passage);
+    const panel = page.getByRole("region", { name: "Structured reader review", exact: true });
+    await panel.getByRole("status").filter({ hasText: "The passage is stale or the editor is not ready" }).waitFor();
+    assert(await passage.isDisabled());
+    assert.equal(await finding.locator("blockquote").textContent(), sample.quote.text);
+    await activeChapter(sample.first.id).waitFor();
+    await activate(exactButton("Check current sources"));
+    await run.getByText(/^Source status: Stale at the last check/).waitFor();
+    assert.equal((await observe()).completionPosts, 1);
+
+    record.phase = "disclose Beta reader with the saved second revision";
+    await activate(page.getByRole("radio", { name: /^Alpha reader/ }), "ArrowRight");
+    await page.getByRole("radio", { name: /^Beta reader/, checked: true }).waitFor();
+    await activate(exactButton("Prepare rerun"));
+    await disclosure.getByText(/^Saved version 2 · Captured/).waitFor();
+    assert((await disclosure.innerText()).includes("Beta reader · Version 1"));
+    assert.equal(await disclosure.locator("pre").textContent(), sample.revisedBody);
+    const preparedAgain = await observe();
+    assertGuards(preparedAgain);
+    assert.equal(preparedAgain.preparations, 2);
+    assert.equal(preparedAgain.starts, 1);
+    assert.equal(preparedAgain.readerCredentialReads, 1);
+    assert.equal(preparedAgain.completionPosts, 1);
+    assert.notEqual(preparedAgain.requestId, prepared.requestId);
+    assert.notEqual(preparedAgain.preparedDigest, prepared.preparedDigest);
+    assert.deepEqual(await fingerprint(libraryRoot), afterEdit);
+
+    record.phase = "retain and compare both attributed runs after explicit Start";
+    await activate(exactButton("Start with " + sample.providerName));
+    const rerun = results.getByRole("article", { name: "Reader run " + preparedAgain.requestId, exact: true });
+    const revisedFinding = rerun.getByRole("region", { name: "clarity finding" });
+    await revisedFinding.getByText(sample.revisedFinding, { exact: true }).waitFor();
+    assert.equal(await results.getByRole("article").count(), 2);
+    assert((await run.innerText()).includes("Alpha reader · Version 1"));
+    assert((await finding.innerText()).includes("saved version 1"));
+    assert(await finding.getByText(sample.finding, { exact: true }).isVisible());
+    assert(await passage.isDisabled());
+    assert((await rerun.innerText()).includes("Beta reader · Version 1"));
+    assert((await revisedFinding.innerText()).includes("saved version 2"));
+    assert.equal(await revisedFinding.locator("blockquote").textContent(), sample.quote.text);
+    const comparison = results.getByRole("region", { name: "Latest run comparison" });
+    await comparison.getByRole("heading", { name: "Compare the latest two runs" }).waitFor();
+    const comparisonText = await comparison.innerText();
+    assert(comparisonText.includes(`Run ${prepared.requestId} → Run ${preparedAgain.requestId} · 2 completed runs`));
+    assert(comparisonText.includes("Inputs: Changed · Sources · Profile."));
+    assert(comparisonText.includes("saved version 1 → 2"));
+    const completed = await observe();
+    assertCompleted(completed, 2);
+    assert.equal(completed.requestId, preparedAgain.requestId);
+    assert.equal(completed.preparedDigest, preparedAgain.preparedDigest);
+    record.paired = { earlier: prepared.requestId, later: preparedAgain.requestId, staleNavigationRefused: true };
+    await closeReview();
+    assert.deepEqual(await fingerprint(libraryRoot), afterEdit);
+    record.library = afterEdit;
+    return completed;
+  }
 
   record.phase = "check current sources and select the second exact passage";
   await activate(exactButton("Check current sources"));
@@ -515,10 +588,11 @@ async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5
   return { graceful: false, exit, groupEmpty: exit !== null && await receipt.waitForGroup(reapMs) };
 }
 
-const scenario = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario].find(name => name === process.argv[2]) ?? null;
+const scenario = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario, sample.pairedScenario]
+  .find(name => name === process.argv[2]) ?? null;
 const result = {
   scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
-  build: null, library: null, selection: null, appearance: null, sourceEdit: null, startView: null, observations: null, guardDenials: 0,
+  build: null, library: null, selection: null, appearance: null, sourceEdit: null, paired: null, startView: null, observations: null, guardDenials: 0,
   childExit: null, childGroupEmpty: false, cleaned: false
 };
 let scratch;
@@ -613,7 +687,7 @@ try {
       if (scenario === sample.preStartScenario) assertRefusedStart(result.observations, { cancelledPreparations: 1, factReads: 1 });
       else if (scenario === sample.staleScenario) assertRefusedStart(result.observations, { cancelledPreparations: 0, factReads: 2 });
       else if (scenario === sample.stopScenario) assertStopped(result.observations);
-      else assertCompleted(result.observations);
+      else assertCompleted(result.observations, scenario === sample.pairedScenario ? 2 : 1);
       assert.deepEqual(result.observations, observed);
       const profile = join(scratch, "profile");
       assert(!(await readdir(profile)).includes("credentials.json"));

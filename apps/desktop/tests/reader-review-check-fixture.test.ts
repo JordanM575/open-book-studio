@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MemoryVault } from "@ai-book-studio/core/providers/credentials";
+import { compareReaderRuns } from "@ai-book-studio/core/review/findings";
 import { Library } from "../src/main/library/store";
 import { ProviderService } from "../src/main/providers";
 import { admitReaderReviewCheck, createReaderReviewCheck, readerReviewCheckRequested } from "../src/main/review/reader-review-check";
@@ -217,5 +218,45 @@ describe("synthetic catalogue and completion boundaries", () => {
       fixtureRefusals: 0, outboundAttempts: 0
     });
     expect(await treeFingerprint(libraryRoot)).toEqual(before);
+  });
+
+  test("the paired fixture completes each explicitly disclosed profile and saved revision once", async () => {
+    const { library, libraryRoot, before, check, reader, prepared } = await preparedFixture(sample.pairedScenario);
+    const start = (scope: { requestId: string; scopeDigest: string }) =>
+      reader.start({ operation: "start", requestId: scope.requestId, scopeDigest: scope.scopeDigest });
+    const earlier = await start(prepared);
+    if (earlier.kind !== "completed") throw new Error("Expected the initial completed fixture run");
+    expect(await treeFingerprint(libraryRoot)).toEqual(before);
+    expect(sample.revisedBody.length).toBe(sample.selected.body.length);
+    const edited = await library.saveChapter(sample.book.id, sample.selected.id, sample.revisedBody, {
+      baseVersion: 1, baseHash: sample.selected.hash
+    });
+    if (edited.status !== "saved") throw new Error("Expected the paired checked save");
+    const editedBytes = await treeFingerprint(libraryRoot);
+    expect(editedBytes).not.toEqual(before);
+    const next = await reader.prepare({
+      operation: "prepare", prepareId: "prepare-paired-fixture", bookId: sample.book.id, profileId: "reader-beta", prompt: "",
+      chapters: [{ chapterId: sample.selected.id, ranges: [{ start: 0, end: sample.selected.body.length }] }]
+    });
+    if (next.kind !== "ready") throw new Error("Expected the new paired disclosure");
+    expect(next.requestId).not.toBe(prepared.requestId);
+    expect(check.snapshot()).toMatchObject({ starts: 1, readerCredentialReads: 1, completionPosts: 1 });
+    const later = await start(next);
+    if (later.kind !== "completed") throw new Error("Expected the paired completed fixture run");
+    expect(earlier.run.envelope.profile?.id).toBe("reader-alpha");
+    expect(later.run.envelope.profile?.id).toBe("reader-beta");
+    expect(earlier.run.findings[0]).toMatchObject({ interpretation: sample.finding,
+      evidence: [{ citation: { quote: sample.quote.text, identity: { version: 1, hash: sample.selected.hash } } }] });
+    expect(later.run.findings[0]).toMatchObject({ interpretation: sample.revisedFinding,
+      evidence: [{ citation: { quote: sample.quote.text, identity: { version: 2, hash: edited.chapter.hash } } }] });
+    expect(compareReaderRuns(earlier.run, later.run)).toMatchObject({
+      status: "comparable", kind: "multiple-changes", changedFacets: ["sources", "profile"]
+    });
+    expect(check.snapshot()).toMatchObject({
+      catalogues: 1, preparations: 2, starts: 2, readerLists: 4, readerModels: 4,
+      readerCredentialReads: 2, completionPosts: 2, stoppedRuns: 0, lateResponses: 0,
+      preparedDigest: next.scopeDigest, completedDigest: next.scopeDigest, fixtureRefusals: 0
+    });
+    expect(await treeFingerprint(libraryRoot)).toEqual(editedBytes);
   });
 });

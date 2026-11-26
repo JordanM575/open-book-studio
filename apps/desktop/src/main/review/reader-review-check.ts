@@ -15,7 +15,7 @@ import { AiSdkReviewTransport } from "./transport";
 import sample from "./reader-review-sample.json";
 
 const SCENARIO_FLAG = "STUDIO_READER_REVIEW_CHECK";
-const scenarios = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario];
+const scenarios = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario, sample.pairedScenario];
 const launchFlags = new Set([
   SCENARIO_FLAG, "STUDIO_TEST", "STUDIO_HEADLESS", "STUDIO_TEST_MEMORY_VAULT",
   "STUDIO_USER_DATA", "STUDIO_WINDOW_SIZE"
@@ -206,15 +206,21 @@ export function createReaderReviewCheck(scenario = sample.scenario) {
   function observePreparation(envelope: ReviewEnvelope): void {
     const source = envelope.sources[0];
     const segment = source?.kind === "chapter" ? source.segments[0] : undefined;
-    if (prepared || envelope.kind !== "reader-review" || envelope.books.length !== 1 ||
+    const rerun = prepared !== null;
+    const expectedVersion = rerun ? 2 : 1;
+    const expectedBody = rerun ? sample.revisedBody : sample.selected.body;
+    const expectedProfile = rerun ? "reader-beta" : "reader-alpha";
+    if ((rerun && (scenario !== sample.pairedScenario || counts.preparations !== 1 || counts.completionPosts !== 1 ||
+         lastStart?.kind !== "completed" || envelope.requestId === prepared?.requestId)) ||
+        envelope.kind !== "reader-review" || envelope.books.length !== 1 ||
         envelope.books[0]?.bookId !== sample.book.id || envelope.books[0].enabledTools.length !== 0 ||
         envelope.destination.provider !== sample.providerName || envelope.destination.connectionId !== sample.book.defaultConnectionId ||
-        envelope.destination.model !== sample.book.defaultModelId || envelope.profile?.id !== "reader-alpha" ||
+        envelope.destination.model !== sample.book.defaultModelId || envelope.profile?.id !== expectedProfile ||
         envelope.priorFeedback.length !== 0 || envelope.prompt !== "" || envelope.sources.length !== 1 ||
         source?.kind !== "chapter" || source.identity.bookId !== sample.book.id ||
-        source.identity.chapterId !== sample.selected.id || source.identity.version !== 1 ||
-        source.identity.hash !== sample.selected.hash || source.segments.length !== 1 ||
-        segment?.start !== 0 || segment.end !== sample.selected.body.length || segment.text !== sample.selected.body) {
+        source.identity.chapterId !== sample.selected.id || source.identity.version !== expectedVersion ||
+        (rerun ? source.identity.hash === sample.selected.hash : source.identity.hash !== sample.selected.hash) ||
+        source.segments.length !== 1 || segment?.start !== 0 || segment.end !== expectedBody.length || segment.text !== expectedBody) {
       refuseFixture();
     }
     prepared = envelope;
@@ -232,7 +238,7 @@ export function createReaderReviewCheck(scenario = sample.scenario) {
       },
       transport: {
         async run(input) {
-          if (input.envelope !== prepared || counts.completionPosts !== 0) return refuseFixture();
+          if (input.envelope !== prepared || counts.completionPosts + 1 !== counts.preparations) return refuseFixture();
           return sdk.run(input);
         }
       }
@@ -271,8 +277,8 @@ export function createReaderReviewCheck(scenario = sample.scenario) {
     const envelope = prepared;
     const source = envelope?.sources[0];
     const profile = envelope?.profile;
-    if (!envelope || !profile || source?.kind !== "chapter" || counts.completionPosts !== 0 ||
-        counts.readerCredentialReads !== 1 || request.method !== "POST" ||
+    if (!envelope || !profile || source?.kind !== "chapter" || counts.completionPosts + 1 !== counts.preparations ||
+        counts.readerCredentialReads !== counts.preparations || request.method !== "POST" ||
         request.url !== sample.baseUrl + "/chat/completions" ||
         request.headers.get("authorization") !== "Bearer " + secret || request.signal.aborted) {
       return refuseFixture();
@@ -287,7 +293,7 @@ export function createReaderReviewCheck(scenario = sample.scenario) {
       return refuseFixture();
     }
     if (!isDeepStrictEqual(data, { model: sample.book.defaultModelId, messages: wire.messages }) ||
-        counts.completionPosts !== 0 || request.signal.aborted) {
+        envelope !== prepared || counts.completionPosts + 1 !== counts.preparations || request.signal.aborted) {
       return refuseFixture();
     }
     counts.completionPosts++;
@@ -302,12 +308,13 @@ export function createReaderReviewCheck(scenario = sample.scenario) {
     const content = JSON.stringify({
       ...identity,
       findings: [{
-        ...identity, findingId: "finding-1", category: "clarity", claim: "observation", interpretation: sample.finding,
-        evidence: [quote, { ...quote, quote: "A mismatched quote" }, { ...quote, identity: { ...quote.identity, version: 2 } }]
+        ...identity, findingId: "finding-1", category: "clarity", claim: "observation",
+        interpretation: source.identity.version === 2 ? sample.revisedFinding : sample.finding,
+        evidence: [quote, { ...quote, quote: "A mismatched quote" }, { ...quote, identity: { ...quote.identity, version: source.identity.version + 1 } }]
       }]
     });
     const response = Response.json({
-      id: "chatcmpl-reader-fixture", model: sample.book.defaultModelId, object: "chat.completion",
+      id: "chatcmpl-reader-fixture-" + counts.completionPosts, model: sample.book.defaultModelId, object: "chat.completion",
       created: 1_795_564_800,
       choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
       usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 }

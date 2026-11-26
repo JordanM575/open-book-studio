@@ -14,6 +14,7 @@ Update the `Unreleased` section before every commit.
 - Use the same commit stamp when building the desktop and web artifacts for the reader checks.
 
 ### Reader review verification
+- Check that stale passage navigation refuses and two reader lenses retain their own saved revisions in the mounted comparison.
 - Exercise keyboard Stop with a late synthetic response and verify the stopped attempt remains without findings.
 - Exercise an opt-in keyboard Start refusal after a checked save changes the selected source.
 - Capture completed findings and their run identity before the renderer revalidates the copied envelope.
