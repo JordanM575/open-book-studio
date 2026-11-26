@@ -374,11 +374,13 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
     await check("chapter history is reachable from the desktop toolbar", async () => {
       const dialog = `[...document.querySelectorAll('[data-slot="dialog-title"]')]
         .find((title) => title.textContent?.trim() === "Chapter history")?.closest('[role="dialog"]')`;
+      const bookId = "book_smoke0001";
+      const chapterId = "ch_smoke0001";
       const label = "Selected chapter history smoke snapshot";
       // A chapter-specific saved record distinguishes the actual IPC listing from an empty sibling.
       const recordFile = await evaluate<string | null>(win, `(async () => {
-        const bookId = "book_smoke0001";
-        const chapterId = "ch_smoke0001";
+        const bookId = ${JSON.stringify(bookId)};
+        const chapterId = ${JSON.stringify(chapterId)};
         const selected = document.querySelector('[data-testid="chapter-row"][aria-current="page"]');
         if (selected?.getAttribute("data-chapter-id") !== chapterId) return null;
         const book = await window.studio.books.open(bookId);
@@ -393,6 +395,21 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       })()`);
       if (!recordFile) throw new Error("could not capture the selected chapter's synthetic history record");
 
+      const library = studio.requireLibrary();
+      const before = await library.readChapter(bookId, chapterId);
+      const row = `[...((${dialog})?.querySelectorAll('[aria-label="History records"] li') ?? [])]
+        .find((row) => {
+          const fields = [...row.querySelectorAll("p")].map((field) => field.textContent?.trim());
+          return fields.includes(${JSON.stringify(label)}) && fields.includes(${JSON.stringify(recordFile)});
+        })`;
+      const detail = `(${dialog})?.querySelector('[aria-label="Selected history record"]')`;
+      const clickHistoryAction = (name: string) => evaluate<boolean>(win, `(() => {
+        const button = [...((${row})?.querySelectorAll("button") ?? [])]
+          .find((button) => button.textContent?.trim() === ${JSON.stringify(name)});
+        if (!button || button.disabled) return false;
+        button.click();
+        return true;
+      })()`);
       const opened = await evaluate<boolean>(win, `(() => {
         const opener = document.querySelector('[data-testid="open-chapter-history"]');
         if (!opener || opener.disabled || innerWidth < 700) return false;
@@ -409,15 +426,38 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       if (!opened) throw new Error("the Chapter history button is unavailable in the desktop toolbar");
       try {
         await waitUntil(
-          () => evaluate<boolean>(win, inPage(`[...((${dialog})?.querySelectorAll('[aria-label="History records"] li') ?? [])]
-            .some((row) => {
-              const fields = [...row.querySelectorAll("p")].map((field) => field.textContent?.trim());
-              return fields.includes(${JSON.stringify(label)}) && fields.includes(${JSON.stringify(recordFile)});
-            })`)),
+          () => evaluate<boolean>(win, inPage(row)),
           "chapter history to list the selected chapter's captured record"
         );
         const current = await evaluate<boolean>(win, inPage(`(${dialog})?.textContent?.includes("The Light")`));
         if (!current) throw new Error("the Chapter history dialog did not identify the selected chapter");
+
+        if (!await clickHistoryAction("Open record")) throw new Error("the selected history row could not be opened");
+        await waitUntil(
+          () => evaluate<boolean>(win, inPage(`(() => {
+            const record = ${detail};
+            const heading = record?.querySelector("h2");
+            return heading?.textContent === ${JSON.stringify(`Read-only history · ${label}`)} &&
+              document.activeElement === heading &&
+              record.querySelector('[aria-label="Snapshot body"] pre')?.textContent === ${JSON.stringify(before.content)};
+          })()`)),
+          "the read-only snapshot body and focused heading"
+        );
+
+        if (!await clickHistoryAction("Compare saved text")) throw new Error("the selected history row could not be compared");
+        await waitUntil(
+          () => evaluate<boolean>(win, inPage(`(() => {
+            const record = ${detail};
+            const heading = record?.querySelector("h2");
+            const body = ${JSON.stringify(before.content)};
+            return heading?.textContent === ${JSON.stringify(`Saved-text comparison · ${label}`)} &&
+              document.activeElement === heading &&
+              record.textContent?.includes("The saved bodies are identical.") &&
+              record.querySelector('[aria-label="Historical saved text"] pre')?.textContent === body &&
+              record.querySelector('[aria-label="Current saved text"] pre')?.textContent === body;
+          })()`)),
+          "the matching snapshot and current saved bodies with the comparison heading focused"
+        );
       } finally {
         await evaluate(win, `(${dialog})?.querySelector('button[aria-label="Close"]')?.click()`);
         await waitUntil(
@@ -425,7 +465,11 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
           "chapter history to close"
         );
       }
-      return "visible desktop opener and the selected chapter's captured history record";
+      const after = await library.readChapter(bookId, chapterId);
+      if (after.version !== before.version || after.hash !== before.hash) {
+        throw new Error("opening or comparing history changed the saved chapter");
+      }
+      return "visible opener, exact saved bodies, focused details, and unchanged chapter revision";
     });
 
     await check("the continuation check-in panel reads nothing until asked", async () => {
