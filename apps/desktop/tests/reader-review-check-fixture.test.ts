@@ -52,7 +52,7 @@ async function preparedFixture(scenario = sample.scenario) {
   admitReaderReviewCheck(launch);
   const library = await Library.open(libraryRoot);
   const before = await treeFingerprint(libraryRoot);
-  const check = createReaderReviewCheck();
+  const check = createReaderReviewCheck(scenario);
   const vault = new MemoryVault();
   await check.seed(vault);
   const providers = new ProviderService(vault, async () => { throw new Error("Unexpected external link"); }, check.catalogueFetch);
@@ -196,5 +196,26 @@ describe("synthetic catalogue and completion boundaries", () => {
       lastStart: { kind: "blocked", reason: "changed" }
     });
     expect(await treeFingerprint(libraryRoot)).toEqual(afterEdit);
+  });
+
+  test("Stop retires a sent request before the synthetic provider returns its held response", async () => {
+    const { libraryRoot, before, check, reader, prepared } = await preparedFixture(sample.stopScenario);
+    const requestId = prepared.requestId;
+    const running = reader.start({ operation: "start", requestId, scopeDigest: prepared.scopeDigest });
+    const deadline = Date.now() + 1_000;
+    while (check.snapshot().completionPosts === 0 && Date.now() < deadline) await Bun.sleep(1);
+    expect(check.snapshot()).toMatchObject({ completionPosts: 1, stoppedRuns: 0, lateResponses: 0, lastStart: null });
+    expect(check.releaseStoppedResponse()).toBe(false);
+    expect(await reader.stop({ operation: "stop", requestId })).toBe("stopped");
+    expect(check.snapshot()).toMatchObject({ stoppedRuns: 1, lateResponses: 0, lastStart: null });
+    expect(check.releaseStoppedResponse()).toBe(true);
+    expect(check.releaseStoppedResponse()).toBe(false);
+    expect(await running).toEqual({ kind: "stopped" });
+    expect(check.snapshot()).toMatchObject({
+      starts: 1, readerCredentialReads: 1, completionPosts: 1, stoppedRuns: 1, lateResponses: 1,
+      completedDigest: prepared.scopeDigest, lastStart: { kind: "stopped", reason: null },
+      fixtureRefusals: 0, outboundAttempts: 0
+    });
+    expect(await treeFingerprint(libraryRoot)).toEqual(before);
   });
 });

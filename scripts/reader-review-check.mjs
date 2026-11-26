@@ -109,24 +109,38 @@ function assertGuards(snapshot) {
   }
 }
 
-function assertCompleted(snapshot) {
+function assertDispatchedOnce(snapshot) {
   assertGuards(snapshot);
   for (const [name, value] of Object.entries({
     catalogues: 1, preparations: 1, cancelledPreparations: 0, starts: 1,
     readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
   })) assert.equal(snapshot[name], value, name);
-  assert.deepEqual(snapshot.lastStart, { kind: "completed", reason: null });
   assert.match(snapshot.preparedDigest, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.completedDigest, snapshot.preparedDigest);
   assert.match(snapshot.requestHash, /^[a-f0-9]{64}$/);
   assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 }
 
+function assertCompleted(snapshot) {
+  assertDispatchedOnce(snapshot);
+  assert.equal(snapshot.stoppedRuns, 0);
+  assert.equal(snapshot.lateResponses, 0);
+  assert.deepEqual(snapshot.lastStart, { kind: "completed", reason: null });
+}
+
+function assertStopped(snapshot) {
+  assertDispatchedOnce(snapshot);
+  assert.equal(snapshot.stoppedRuns, 1);
+  assert.equal(snapshot.lateResponses, 1);
+  assert.deepEqual(snapshot.lastStart, { kind: "stopped", reason: null });
+}
+
 function assertRefusedStart(snapshot, { cancelledPreparations, factReads }) {
   assertGuards(snapshot);
   for (const [name, value] of Object.entries({
     catalogues: 1, preparations: 1, cancelledPreparations, starts: 1,
-    readerLists: factReads, readerModels: factReads, readerCredentialReads: 0, completionPosts: 0
+    readerLists: factReads, readerModels: factReads, readerCredentialReads: 0, completionPosts: 0,
+    stoppedRuns: 0, lateResponses: 0
   })) assert.equal(snapshot[name], value, name);
   assert.deepEqual(snapshot.lastStart, { kind: "blocked", reason: "changed" });
   assert.equal(snapshot.completedDigest, null);
@@ -137,6 +151,7 @@ function readChildObservation(payload) {
   const snapshot = JSON.parse(payload);
   const counters = [
     "catalogues", "preparations", "cancelledPreparations", "starts", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
+    "stoppedRuns", "lateResponses",
     "fixtureRefusals", "outboundAttempts", "permissionAttempts", "protectedStorageAttempts", "guardedStorageMethods"
   ];
   const digests = ["preparedDigest", "completedDigest", "requestHash"];
@@ -213,6 +228,15 @@ async function verifyAppearance(page) {
 async function runJourney(page, application, libraryRoot, candidate, record) {
   page.setDefaultTimeout(10_000);
   const observe = () => application.evaluate(() => globalThis[Symbol.for("studio.reader-review-check")].snapshot());
+  const waitForObservation = async (ready) => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const current = await observe();
+      if (ready(current)) return current;
+      if (Date.now() >= deadline) throw new Error("The expected synthetic reader observation did not arrive");
+      await delay(50);
+    }
+  };
   const activate = async (control, key = "Enter") => {
     await control.waitFor({ state: "visible" });
     assert(await control.isEnabled(), "The required keyboard control is disabled");
@@ -286,12 +310,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   if (record.scenario === sample.preStartScenario) {
     record.phase = "cancel prepared reader review by keyboard";
     await closeReview();
-    const deadline = Date.now() + 10_000;
-    let afterClose = await observe();
-    while (afterClose.cancelledPreparations === 0 && Date.now() < deadline) {
-      await delay(50);
-      afterClose = await observe();
-    }
+    const afterClose = await waitForObservation(snapshot => snapshot.cancelledPreparations > 0);
     assert.equal(afterClose.cancelledPreparations, 1);
     assert.equal(afterClose.starts + afterClose.readerCredentialReads + afterClose.completionPosts, 0);
     assertGuards(afterClose);
@@ -347,6 +366,42 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   record.phase = "activate explicit Start by keyboard";
   await activate(exactButton("Start with " + sample.providerName));
   const results = page.getByRole("region", { name: "Volatile reader results" });
+  if (record.scenario === sample.stopScenario) {
+    record.phase = "wait for one pending synthetic response";
+    const pending = await waitForObservation(snapshot => snapshot.completionPosts > 0);
+    assertDispatchedOnce(pending);
+    assert.equal(pending.stoppedRuns + pending.lateResponses, 0);
+    assert.equal(pending.lastStart, null);
+
+    record.phase = "stop the in-flight reader request by keyboard";
+    await activate(exactButton("Stop review"));
+    const panel = page.getByRole("region", { name: "Structured reader review", exact: true });
+    const status = panel.getByRole("status").filter({ hasText: "Review stopped · Incomplete" });
+    await status.waitFor();
+    const stopped = await waitForObservation(snapshot => snapshot.stoppedRuns > 0);
+    assert.equal(stopped.stoppedRuns, 1);
+    assert.equal(stopped.lateResponses, 0);
+    assert.equal(stopped.lastStart, null);
+
+    record.phase = "settle the late synthetic response without retaining findings";
+    const released = await application.evaluate(() => globalThis[Symbol.for("studio.reader-review-check")].releaseStoppedResponse());
+    assert(released);
+    const observed = await waitForObservation(snapshot => snapshot.lateResponses > 0 && snapshot.lastStart !== null);
+    assertStopped(observed);
+    assert.equal(observed.requestId, prepared.requestId);
+    assert.equal(observed.preparedDigest, prepared.preparedDigest);
+    const attempt = results.getByRole("region", { name: "Reader attempt " + prepared.requestId, exact: true });
+    await attempt.getByRole("heading", { name: "Run " + prepared.requestId + " · Stopped", exact: true }).waitFor();
+    assert((await attempt.innerText()).includes("No findings were retained for this attempt."));
+    assert(await status.isVisible());
+    assert.equal(await results.getByRole("article").count(), 0);
+    assert.equal(await results.getByRole("button", { name: /^Show exact passage for / }).count(), 0);
+    await closeReview();
+    assert.deepEqual(await fingerprint(libraryRoot), before);
+    record.library = before;
+    return observed;
+  }
+
   const run = results.getByRole("article", { name: "Reader run " + prepared.requestId });
   record.phase = "wait for the completed attributed run";
   try {
@@ -460,7 +515,7 @@ async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5
   return { graceful: false, exit, groupEmpty: exit !== null && await receipt.waitForGroup(reapMs) };
 }
 
-const scenario = [sample.scenario, sample.preStartScenario, sample.staleScenario].find(name => name === process.argv[2]) ?? null;
+const scenario = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario].find(name => name === process.argv[2]) ?? null;
 const result = {
   scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
   build: null, library: null, selection: null, appearance: null, sourceEdit: null, startView: null, observations: null, guardDenials: 0,
@@ -557,6 +612,7 @@ try {
       assert(!timedOut && result.guardDenials === 8 && loopbackConnections === 0);
       if (scenario === sample.preStartScenario) assertRefusedStart(result.observations, { cancelledPreparations: 1, factReads: 1 });
       else if (scenario === sample.staleScenario) assertRefusedStart(result.observations, { cancelledPreparations: 0, factReads: 2 });
+      else if (scenario === sample.stopScenario) assertStopped(result.observations);
       else assertCompleted(result.observations);
       assert.deepEqual(result.observations, observed);
       const profile = join(scratch, "profile");

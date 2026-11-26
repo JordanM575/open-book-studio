@@ -15,7 +15,7 @@ import { AiSdkReviewTransport } from "./transport";
 import sample from "./reader-review-sample.json";
 
 const SCENARIO_FLAG = "STUDIO_READER_REVIEW_CHECK";
-const scenarios = [sample.scenario, sample.preStartScenario, sample.staleScenario];
+const scenarios = [sample.scenario, sample.preStartScenario, sample.staleScenario, sample.stopScenario];
 const launchFlags = new Set([
   SCENARIO_FLAG, "STUDIO_TEST", "STUDIO_HEADLESS", "STUDIO_TEST_MEMORY_VAULT",
   "STUDIO_USER_DATA", "STUDIO_WINDOW_SIZE"
@@ -115,21 +115,29 @@ export function admitReaderReviewCheck({ env, packaged, headless, appPath, entry
 
 const observationKey = Symbol.for("studio.reader-review-check");
 
-export function createReaderReviewCheck() {
+export function createReaderReviewCheck(scenario = sample.scenario) {
   const secret = sample.sentinelPrefix + randomBytes(24).toString("hex");
   const counts = {
     catalogues: 0, preparations: 0, cancelledPreparations: 0, starts: 0, readerLists: 0, readerModels: 0, readerCredentialReads: 0,
-    completionPosts: 0, fixtureRefusals: 0, outboundAttempts: 0, permissionAttempts: 0,
+    completionPosts: 0, stoppedRuns: 0, lateResponses: 0, fixtureRefusals: 0, outboundAttempts: 0, permissionAttempts: 0,
     protectedStorageAttempts: 0, guardedStorageMethods: 0
   };
   let prepared: ReviewEnvelope | null = null;
   let completedDigest: string | null = null;
   let requestHash: string | null = null;
   let lastStart: { kind: ReaderReviewStartResult["kind"]; reason: ReaderReviewRefusal | ReaderReviewFailure | null } | null = null;
+  let heldResponse: { signal: AbortSignal; release: () => void } | null = null;
   const snapshot = () => ({
     ...counts, requestId: prepared?.requestId ?? null, preparedDigest: prepared?.scopeDigest ?? null,
     completedDigest, requestHash, lastStart
   });
+  function releaseStoppedResponse(): boolean {
+    if (!heldResponse || counts.stoppedRuns !== 1 || !heldResponse.signal.aborted) return false;
+    const { release } = heldResponse;
+    heldResponse = null;
+    release();
+    return true;
+  }
   function refuseFixture(): never {
     counts.fixtureRefusals++;
     throw new Error("Unexpected reader fixture request.");
@@ -174,7 +182,7 @@ export function createReaderReviewCheck() {
     globalThis.fetch = Object.assign(async () => refuseOutbound(), { preconnect: refuseOutbound });
     channel("undici:request:create").subscribe(noteOutbound);
     channel("http.client.request.start").subscribe(noteOutbound);
-    Object.defineProperty(globalThis, observationKey, { value: Object.freeze({ snapshot }) });
+    Object.defineProperty(globalThis, observationKey, { value: Object.freeze({ snapshot, releaseStoppedResponse }) });
   }
 
   async function seed(vault: CredentialVault): Promise<void> {
@@ -245,7 +253,11 @@ export function createReaderReviewCheck() {
         };
         return result;
       },
-      stop: (request) => service.stop(request),
+      async stop(request) {
+        const result = await service.stop(request);
+        if (result === "stopped") counts.stoppedRuns++;
+        return result;
+      },
       async cancelPrepare(request) {
         const result = await service.cancelPrepare(request);
         if (result === "cancelled") counts.cancelledPreparations++;
@@ -279,6 +291,7 @@ export function createReaderReviewCheck() {
       return refuseFixture();
     }
     counts.completionPosts++;
+    // Record the admitted POST even if Stop later discards its reply.
     completedDigest = envelope.scopeDigest;
     requestHash = createHash("sha256").update(raw).digest("hex");
     const identity = { runId: envelope.requestId, readerId: profile.id, readerVersion: profile.version };
@@ -293,13 +306,19 @@ export function createReaderReviewCheck() {
         evidence: [quote, { ...quote, quote: "A mismatched quote" }, { ...quote, identity: { ...quote.identity, version: 2 } }]
       }]
     });
-    return Response.json({
+    const response = Response.json({
       id: "chatcmpl-reader-fixture", model: sample.book.defaultModelId, object: "chat.completion",
       created: 1_795_564_800,
       choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
       usage: { prompt_tokens: 100, completion_tokens: 40, total_tokens: 140 }
     });
+    if (scenario === sample.stopScenario) {
+      // Simulate the provider delivering a response after the request was aborted.
+      await new Promise<void>(release => { heldResponse = { signal: request.signal, release }; });
+      counts.lateResponses++;
+    }
+    return response;
   }, { preconnect: refuseFixture });
 
-  return { snapshot, guardHost, seed, catalogueFetch, createReader, noteOutbound, refusePermission };
+  return { snapshot, guardHost, seed, catalogueFetch, createReader, noteOutbound, refusePermission, releaseStoppedResponse };
 }

@@ -73,7 +73,7 @@ if (readerReviewCheckRequested(process.env)) {
     });
     app.setPath("userData", profile);
     if (app.getPath("userData") !== profile) throw new Error("The reader check profile was not applied.");
-    readerCheck = createReaderReviewCheck();
+    readerCheck = createReaderReviewCheck(process.env.STUDIO_READER_REVIEW_CHECK);
     readerCheck.guardHost(safeStorage, shell);
     const snapshot = readerCheck.snapshot;
     app.once("quit", () => console.log("[reader-review:child] " + JSON.stringify(snapshot())));

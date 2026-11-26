@@ -2,6 +2,7 @@
   "scenario": "keyboard-exact-passage",
   "preStartScenario": "keyboard-prestart-cancel",
   "staleScenario": "keyboard-changed-source-refusal",
+  "stopScenario": "keyboard-stop-late-response",
   "scratchPrefix": "studio-reader-review-check-",
   "sentinelPrefix": "reader-review-fixture-secret-",
   "book": {

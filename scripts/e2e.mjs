@@ -21,6 +21,7 @@
  *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
  *   reader-review-prestart  the built reader's keyboard cancellation and retired-disclosure refusal (opt-in, macOS)
  *   reader-review-stale  the built reader's refusal after a checked source edit (opt-in, macOS)
+ *   reader-review-stop  the built reader's keyboard Stop with a late synthetic response (opt-in, macOS)
  *   reader-review-web  the built browser reader refusal (opt-in)
  *
  *   bun run e2e            build, then run everything
@@ -87,6 +88,13 @@ const CHECKS = [
     script: "scripts/reader-review-check.mjs",
     args: ["keyboard-changed-source-refusal"],
     what: "the mounted reader refusal after a checked save changes the selected source",
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-stop",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-stop-late-response"],
+    what: "keyboard Stop followed by a late synthetic reader response",
     optIn: true, stampCommit: true
   }
 ];
