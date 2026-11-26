@@ -28,10 +28,12 @@ Tasks are ordered. `[P]` means safe to do in parallel with another `[P]` task in
   The strict `apps/web/check/` run passed 16/16 each in Playwright Chromium, Firefox and WebKit
   on `8c7b2fb` from [PR #129](https://github.com/JordanM575/open-book-studio/pull/129).
   The fixtures use a simulated picker for folder selection and cancellation. The checks cover a
-  denied permission that keeps the pending folder, two-tab Web Lock serialization and OPFS page
-  restart. The stamped production web build also reopened the same saved chapter revision and hash
-  after restarting Firefox and Playwright WebKit. Native folder selection, permission re-grant
-  and revocation, and standalone Safari and Firefox target qualification remain open.
+  denied permission that keeps the pending folder and OPFS page restart. Where Web Locks are
+  available, the lock check verifies serialization for two requests in one page.
+  The stamped production web build also reopened the same saved
+  chapter revision and hash after restarting Firefox and Playwright WebKit. Two-tab Web Lock
+  serialization, native folder selection, permission re-grant and revocation, and standalone Safari
+  and Firefox target qualification remain open.
 
 ## Phase 3 — Honest save and recovery (User Story 2)
 
@@ -63,8 +65,7 @@ Tasks are ordered. `[P]` means safe to do in parallel with another `[P]` task in
   [PR #129](https://github.com/JordanM575/open-book-studio/pull/129) passed all eight Linux verify
   stages with 5,503 tests passing and one skip. Its strict browser matrix passed 48/48 across
   Chromium, Firefox and WebKit in Playwright. Earlier packaged smoke passed 16/16 on its original
-  build. Matching desktop and packaged smoke and the remaining T013 host and permission cases
-  still gate completion.
+  build. Matching desktop and packaged smoke and the remaining T013 cases still gate completion.
 - [x] T028 Update `docs/FORMAT.md`, `docs/ARCHITECTURE.md`, `specs/README.md`, `CHANGELOG.md`, and specs 011/013/014 links to match the delivered storage/archive behavior. The browser-storage commit contract, save-failure tests, web smoke journeys and spec 011 Phase 8 status are now documented.
 
 ## Dependencies and delivery
