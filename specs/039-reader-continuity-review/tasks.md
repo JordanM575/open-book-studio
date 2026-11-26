@@ -107,8 +107,9 @@ T001 was reconciled and recorded 2026-11-20.
   reduced transparency independently, both zero-send Start refusals, Stop with a late response,
   and attributed revisions with stale navigation refused. The built-web fixture in Electron
   verified unsupported-host refusal at welcome and in the workspace without reader side effects.
-  Each reader case used synthetic fixtures and verified library custody. The runner removed an
-  empty web-smoke diagnostics directory after default E2E. Final teardown passed.
+  Each reader case used synthetic fixtures and verified library custody. The default web harness
+  left an empty diagnostics directory. A separate cleanup removed it, and a follow-up census
+  confirmed clean state before the targeted run. Final teardown passed.
   This evidence covers the named unpackaged Mac desktop and built-web fixture. Packaged, other
   native host and live-provider claims require their own receipts.
 
