@@ -307,7 +307,7 @@ export function useDictation({ onText, onError, maxMs = MAX_DICTATION_MS }: Dict
       if (mounted.current) setElapsedMs(elapsed);
       if (elapsed >= maxMs) stop();
     }, 250);
-  }, [clearTimer, fail, maxMs, onText, release, state, stop]);
+  }, [clearTimer, fail, maxMs, onError, onText, release, state, stop]);
 
   useEffect(() => {
     mounted.current = true;

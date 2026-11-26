@@ -37,6 +37,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 import { capturePage, createRunDir } from "./failure-artifacts.mjs";
 
 const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -91,15 +92,7 @@ const launcher = join(temp, "electron-offline.sh");
 await writeFile(launcher, `#!/bin/sh\nexec ${SANDBOX_EXEC} -f ${quote(policy)} ${quote(electronPath)} "$@"\n`);
 await chmod(launcher, 0o755);
 
-const env = { ...process.env };
-// T3 Code and some terminals export this; it would start Electron as plain Node.
-delete env.ELECTRON_RUN_AS_NODE;
-// A coding agent's fetch proxy must not ride along; the denial should meet the app alone.
-delete env.NODE_OPTIONS;
-for (const key of Object.keys(env)) if (key.startsWith("HEADROOM_") || /_proxy$/i.test(key)) delete env[key];
-env.STUDIO_TEST = "1";
-env.STUDIO_HEADLESS = "1";
-env.STUDIO_USER_DATA = profile;
+const env = headlessDesktopEnvironment(process.env, profile);
 env.STUDIO_IMPORT_PATH = manuscriptPath;
 env.STUDIO_EXPORT_PATH = exports;
 
@@ -131,7 +124,7 @@ const hang = setTimeout(() => {
 try {
   app = await _electron.launch({
     executablePath: launcher,
-    args: ["--no-sandbox", appDir],
+    args: ["--no-sandbox", ...mockKeychainArgs(), appDir],
     cwd: appDir,
     env,
     timeout: 60_000

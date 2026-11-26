@@ -100,9 +100,10 @@ describe("voice cancel registry", () => {
     });
     expect(abortCalls).toEqual([[]]);
     expect(sent.signal?.aborted).toBe(true);
-    expect(sent.signal?.reason).toBeInstanceOf(DOMException);
-    expect((sent.signal?.reason as DOMException).name).toBe("AbortError");
-    expect((sent.signal?.reason as DOMException).message).toBe("The operation was aborted.");
+    const reason = sent.signal?.reason as DOMException | undefined;
+    expect(reason).toBeInstanceOf(DOMException);
+    expect(reason?.name).toBe("AbortError");
+    expect(reason?.message).toBe("The operation was aborted.");
     const slot = host.accounting().slots.tts;
     expect(slot?.operationId).toBe(operationId);
     expect(slot?.cancelled).toBe(true);

@@ -18,6 +18,12 @@
  *   bridge      the phone's half: a separate process speaking to the app over the LAN
  *   offline     writing through export with every outbound connection denied (macOS only)
  *   instance    a second copy on the same profile: refused, nothing written, the open copy says so
+ *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
+ *   reader-review-prestart  the built reader's keyboard cancellation and retired-disclosure refusal (opt-in, macOS)
+ *   reader-review-stale  the built reader's refusal after a checked source edit (opt-in, macOS)
+ *   reader-review-stop  the built reader's keyboard Stop with a late synthetic response (opt-in, macOS)
+ *   reader-review-paired  the built reader's stale navigation refusal and paired saved revisions (opt-in, macOS)
+ *   reader-review-web  the built browser reader refusal (opt-in)
  *
  *   bun run e2e            build, then run everything
  *   bun run e2e --no-build trust the current build
@@ -25,7 +31,7 @@
  *
  * A live check needs keys and costs money, so it is not here. `bun run live:check` is its own gate.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +41,10 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const CHECKS = [
   { id: "smoke", script: "scripts/smoke.mjs", what: "the built app, through its own renderer" },
   { id: "web", script: "scripts/web-smoke.mjs", what: "the browser build and its storage" },
+  {
+    id: "reader-review-web", script: "scripts/web-smoke.mjs", args: ["--reader-review-refusal"],
+    what: "the isolated built browser reader refusal", optIn: true, stampCommit: true
+  },
   { id: "audit", script: "scripts/ui-audit.mjs", what: "the real window at 1440x900, for dead ends" },
   {
     id: "phone",
@@ -59,6 +69,41 @@ const CHECKS = [
     id: "instance",
     script: "scripts/second-instance-check.mjs",
     what: "a second copy on the same profile, refused with a notice"
+  },
+  {
+    id: "reader-review",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-exact-passage"],
+    what: "the isolated built desktop reader keyboard journey",
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-prestart",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-prestart-cancel"],
+    what: "keyboard cancellation and refusal of a retired reader disclosure",
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-stale",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-changed-source-refusal"],
+    what: "the mounted reader refusal after a checked save changes the selected source",
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-stop",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-stop-late-response"],
+    what: "keyboard Stop followed by a late synthetic reader response",
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-paired",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-paired-revisions"],
+    what: "stale passage refusal and attributed rerun after a checked revision",
+    optIn: true, stampCommit: true
   }
 ];
 
@@ -71,7 +116,7 @@ if (unknown.length > 0) {
   console.error(`[e2e] Known: ${CHECKS.map((check) => check.id).join(", ")}`);
   process.exit(1);
 }
-const selection = requested.length > 0 ? CHECKS.filter((check) => requested.includes(check.id)) : CHECKS;
+const selection = CHECKS.filter((check) => requested.length > 0 ? requested.includes(check.id) : !check.optIn);
 
 function run(command, args, options = {}) {
   return new Promise((resolveRun) => {
@@ -82,21 +127,18 @@ function run(command, args, options = {}) {
 }
 
 if (build) {
-  console.log("[e2e] building the desktop app, the web build and the toolkit…");
-  const built = await run("bun", ["run", "build"]);
-  if (built !== 0) {
-    console.error("[e2e] the desktop build failed, so there is nothing to check");
-    process.exit(1);
+  const webOnly = selection.length === 1 && selection[0].id === "reader-review-web";
+  const commands = webOnly ? ["build:web"] : ["build", "build:web", "toolkit:build"];
+  console.log(webOnly ? "[e2e] building the web app…" : "[e2e] building the desktop app, the web build and the toolkit…");
+  const env = { ...process.env };
+  if (selection.some((check) => check.stampCommit)) {
+    env.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   }
-  const web = await run("bun", ["run", "build:web"]);
-  if (web !== 0) {
-    console.error("[e2e] the web build failed");
-    process.exit(1);
-  }
-  const toolkit = await run("bun", ["run", "toolkit:build"]);
-  if (toolkit !== 0) {
-    console.error("[e2e] the toolkit build failed");
-    process.exit(1);
+  for (const command of commands) {
+    if (await run("bun", ["run", command], { env }) !== 0) {
+      console.error(`[e2e] ${command} failed`);
+      process.exit(1);
+    }
   }
 }
 

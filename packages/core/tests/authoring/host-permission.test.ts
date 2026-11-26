@@ -32,7 +32,6 @@ function descriptor(resume: HostPermission['resume'], patch: Partial<HostPermiss
     schemaVersion: 1,
     kind: 'host-permission',
     id: 'permit_1',
-    owner: { ...owner },
     hostId,
     policyDigest,
     generation: 1,

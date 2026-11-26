@@ -693,6 +693,10 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
         })()`
       );
       if (!closed) throw new Error("the manuscript review report had no Close button");
+      await waitUntil(
+        () => evaluate<boolean>(win, inPage(`!document.querySelector('[data-testid="review-report"]')`)),
+        "the first manuscript review to close"
+      );
       return "run scope, studio counts, coverage and definitions over the fixture book";
     });
 
@@ -708,14 +712,14 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       );
       if (!clicked) throw new Error("the Review manuscript button was not found");
       // The report is retained across Close; reopening re-checks it against the saved chapters.
-      // Freshness starts as checking and disables every control, so wait for an enabled button
-      // instead of clicking the first paint.
+      // Freshness starts as checking and disables every control. Require the reopened report
+      // and an enabled control before clicking.
       await waitUntil(
         () =>
           evaluate<boolean>(
             win,
             inPage(
-              `[...document.querySelectorAll('[data-testid="review-evidence"]')].some((button) => !button.disabled)`
+              `document.querySelector('[data-testid="review-report"][data-state="open"] [data-testid="review-evidence"]:enabled')`
             )
           ),
         "the current report's evidence control"
@@ -723,7 +727,7 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       const opened = await evaluate<boolean>(
         win,
         `(() => {
-          const button = [...document.querySelectorAll('[data-testid="review-evidence"]')].find((item) => !item.disabled);
+          const button = document.querySelector('[data-testid="review-report"][data-state="open"] [data-testid="review-evidence"]:enabled');
           if (!button) return false;
           button.click();
           return true;
@@ -732,10 +736,26 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       if (!opened) throw new Error("the current report had no enabled evidence control");
       // The dialog closes only after the saved-source revalidation and the exact editor
       // selection have both been applied.
-      await waitUntil(
-        () => evaluate<boolean>(win, inPage(`!document.querySelector('[data-testid="review-report"]')`)),
-        "the review report to close after selecting evidence"
-      );
+      let navigationDetail = "";
+      try {
+        await waitUntil(async () => {
+          const outcome = await evaluate<{ closed: boolean; detail: string }>(
+            win,
+            `(() => {
+              const report = document.querySelector('[data-testid="review-report"]');
+              const refusal = [...document.querySelectorAll('[role="alert"]')]
+                .find((notice) => notice.textContent?.trim().startsWith("That passage"));
+              const status = report?.querySelector('[data-testid="review-unavailable"], [data-testid="review-stale"], [data-testid="review-checking"]');
+              return { closed: !report, detail: (refusal?.textContent ?? status?.textContent ?? "").trim().slice(0, 180) };
+            })()`
+          );
+          if (outcome.detail) navigationDetail = outcome.detail;
+          return outcome.closed;
+        }, "the review report to close after selecting evidence");
+      } catch (error) {
+        if (!navigationDetail) throw error;
+        throw new Error(`${error instanceof Error ? error.message : String(error)}. Review status: ${navigationDetail}`);
+      }
       const selection = await evaluate<string>(
         win,
         `(() => {

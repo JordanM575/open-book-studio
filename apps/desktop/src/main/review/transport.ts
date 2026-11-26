@@ -1,4 +1,4 @@
-import { generateText, type FinishReason, type LanguageModel, type ModelMessage } from "ai";
+import { generateText, type FinishReason, type LanguageModel } from "ai";
 import { serializeProviderRequest, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
 import { ProviderError, type StoredCredential } from "@ai-book-studio/core/providers/types";
 import { modelFor } from "../agent/transport";
@@ -35,19 +35,16 @@ export class AiSdkReviewTransport implements ReviewTransport {
       throw new ProviderError("invalid-request", "The review request did not match the disclosed messages and empty tools. No provider request was sent.");
     }
     const messages = wire.messages;
-    for (const message of messages) {
-      if (!message || typeof message !== "object") {
-        throw new ProviderError("invalid-request", "The review request contained an invalid message. No provider request was sent.");
-      }
-      const candidate = message as { role?: unknown; content?: unknown };
-      if ((candidate.role !== "system" && candidate.role !== "user") || typeof candidate.content !== "string") {
-        throw new ProviderError("invalid-request", "The review request contained an invalid message. No provider request was sent.");
-      }
+    const [system, user] = messages as Array<{ role?: unknown; content?: unknown } | null>;
+    if (system?.role !== "system" || typeof system.content !== "string" ||
+        user?.role !== "user" || typeof user.content !== "string") {
+      throw new ProviderError("invalid-request", "The review request contained an invalid message. No provider request was sent.");
     }
     const model = this.modelFactory(input.credential, input.envelope.destination.model);
     const result = await this.generate({
       model,
-      messages: messages as ModelMessage[],
+      instructions: system.content,
+      messages: [{ role: "user", content: user.content }],
       tools: {},
       maxRetries: 0,
       abortSignal: input.signal

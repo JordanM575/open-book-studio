@@ -148,7 +148,7 @@ export function PlanFirstControl({
   // Add and Remove replace the pressed button with another row. Focus stays in the step list.
   useEffect(() => {
     const id = pendingStepFocus.current;
-    if (!id) return;
+    if (!id || !steps.some((step) => step.id === id)) return;
     const input = stepInputs.current.get(id);
     if (!input) return;
     pendingStepFocus.current = null;

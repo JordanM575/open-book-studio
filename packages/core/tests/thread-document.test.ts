@@ -277,10 +277,11 @@ describe("plan documents", () => {
     const out = JSON.parse(built.text) as Record<string, unknown>;
     expect(out.title).toBe("Renamed");
     expect(out.futureTopLevel).toBe("keep this too");
-    const plans = out.plans as Array<Record<string, unknown>>;
-    expect(plans[0]?.futurePlanField).toEqual({ keep: true });
-    expect((plans[0]?.steps as Array<Record<string, unknown>>)[0]?.futureStepField).toBe("step extra");
-    expect((plans[0]?.parent as Record<string, unknown>).futureParentField).toBe("parent extra");
+    const [plan] = out.plans as Array<Record<string, unknown>>;
+    if (!plan) throw new Error("Expected the preserved plan");
+    expect(plan.futurePlanField).toEqual({ keep: true });
+    expect((plan.steps as Array<Record<string, unknown>>)[0]?.futureStepField).toBe("step extra");
+    expect((plan.parent as Record<string, unknown>).futureParentField).toBe("parent extra");
   });
 
   test("an unchanged plan document is a no-op that keeps the stored bytes", () => {

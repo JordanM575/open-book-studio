@@ -1,5 +1,5 @@
 import { assertReviewData, freeze, REVIEW_LIMITS, timestampSchema } from "@ai-book-studio/core/review/contract";
-import { reviewDisclosure, type CurrentSource, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { reviewDisclosure, validateReviewEnvelope, type CurrentSource, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
 import { buildReaderRun, type Citation, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import type {
   ReaderReviewConnection, ReaderReviewPriceFacts, ReaderReviewStopResult, ReaderReviewTerms
@@ -227,8 +227,11 @@ export function acceptPreparation(value: PreparedReaderReview, bookId: string): 
 /** Recompute evidence/subjectivity from the core run; never trust display labels or verified flags. */
 export async function acceptRun(run: ReaderRun, envelope: ReviewEnvelope): Promise<ReaderRun> {
   assertReviewData(run);
-  if (run.kind !== "reader-review" || reviewDisclosure(run.envelope).scopeDigest !== envelope.scopeDigest ||
-      !Array.isArray(run.findings) || run.findings.length > REVIEW_LIMITS.findings) throw new Error("Invalid reader result");
+  if (run.kind !== "reader-review" || !Array.isArray(run.findings) || run.findings.length > REVIEW_LIMITS.findings) {
+    throw new Error("Invalid reader result");
+  }
+  const preparedEnvelope = reviewDisclosure(envelope);
+  const { runId, startedAt, completedAt, envelope: returnedEnvelope } = run;
   const findings = run.findings.map((finding) => {
     if (!Array.isArray(finding.evidence) || !Array.isArray(finding.invalidEvidence) ||
         finding.evidence.length + finding.invalidEvidence.length > REVIEW_LIMITS.evidence) throw new Error("Invalid evidence");
@@ -239,7 +242,10 @@ export async function acceptRun(run: ReaderRun, envelope: ReviewEnvelope): Promi
       evidence: [...finding.evidence.map((entry: ReaderRun["findings"][number]["evidence"][number]) => entry.citation), ...finding.invalidEvidence.map(() => null)]
     };
   });
-  return buildReaderRun({ runId: run.runId, startedAt: run.startedAt, completedAt: run.completedAt, envelope,
-    output: JSON.stringify({ runId: run.runId, readerId: envelope.profile?.id,
-      readerVersion: envelope.profile?.version, findings }) });
+  // Serialize the admitted result before yielding to the returned envelope's digest check.
+  const output = JSON.stringify({ runId, readerId: preparedEnvelope.profile?.id,
+    readerVersion: preparedEnvelope.profile?.version, findings });
+  const verifiedEnvelope = await validateReviewEnvelope(returnedEnvelope);
+  if (verifiedEnvelope.scopeDigest !== preparedEnvelope.scopeDigest) throw new Error("Invalid reader result scope");
+  return buildReaderRun({ runId, startedAt, completedAt, envelope: preparedEnvelope, output });
 }

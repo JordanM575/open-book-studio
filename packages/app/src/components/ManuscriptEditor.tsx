@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffec
 import type { Chapter, ChapterConflict } from "@ai-book-studio/core/schema";
 import type { ImageRecord } from "@ai-book-studio/core/images/schema";
 import { plainSaveReason } from "@ai-book-studio/core/library/errors";
+import { normalizeBody } from "@ai-book-studio/core/markdown";
 import { createSharedEvidencePort } from "@ai-book-studio/core/review/shared-verifier";
 import { type InlineSpan, inlineSpanKey } from "@ai-book-studio/core/review/inline/overlap";
 import { Button } from "@ai-book-studio/ui/button";
@@ -152,6 +153,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorRef = useRef<InlineEditor | null>(null);
+  const pendingSavedNewline = useRef<{ editor: InlineEditor; submitted: string; savedBase: Base } | null>(null);
   /** The armed replace is read at transcript time. useDictation keeps the onText it saw at start. */
   const replaceArmRef = useRef<{ revision: number; anchor: number; head: number } | null>(null);
   const surface = useRef<HTMLDivElement | null>(null);
@@ -216,6 +218,21 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     return current !== null && current.revision === expected.revision && isExactCurrent(current, expected);
   }, [evidenceSnapshot]);
 
+  const settleSavedNewline = useCallback(() => {
+    const pending = pendingSavedNewline.current;
+    if (!pending) return;
+    if (editorRef.current !== pending.editor || base.current !== pending.savedBase || latest.current !== pending.submitted) {
+      pendingSavedNewline.current = null;
+      return;
+    }
+    const snapshot = pending.editor.getSnapshot();
+    if (snapshot.held || snapshot.composing) return;
+    pendingSavedNewline.current = null;
+    if (snapshot.body === pending.submitted) {
+      pending.editor.replaceText(pending.savedBase.content, snapshot.revision, "save-normalization", snapshot.selection);
+    }
+  }, []);
+
   useLayoutEffect(() => {
     if (!editor || !selection?.isCurrent()) return;
     // For a new chapter, capture its mounted visit only after it exists. For the already-open
@@ -242,7 +259,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const saveNow = useCallback(
     async (text: string): Promise<SaveStatus> => {
       if (text === base.current.content) {
-        if (statusRef.current.kind !== "dirty") return statusRef.current;
+        if (latest.current !== text || statusRef.current.kind !== "dirty") return statusRef.current;
         // Typing and then undoing back to the saved text leaves nothing to write. The chapter on
         // disk already matches, so end where a save would: no pending draft, and saved.
         dropDraft();
@@ -254,7 +271,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       // from a flush, a remount or a quit, would only write the same copy twice (QA C4).
       const copy = kept.current;
       if (copy && copy.text === text && copy.hash === base.current.hash) {
-        if (statusRef.current.kind !== "dirty") return statusRef.current;
+        if (latest.current !== text || statusRef.current.kind !== "dirty") return statusRef.current;
         dropDraft();
         return updateStatus(copy.status);
       }
@@ -262,6 +279,8 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       updateStatus({ kind: "saving" });
       savesInFlight.current += 1;
       touchSource();
+      const submittedEpoch = sourceEpoch.current;
+      const submittedEditor = editorRef.current;
       try {
         const result = await window.studio.chapters.save({
           bookId,
@@ -286,11 +305,21 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
         }
 
         const saved = result.data.chapter;
-        base.current = { version: saved.version, hash: saved.hash, content: saved.content, title: saved.title };
+        const savedBase = { version: saved.version, hash: saved.hash, content: saved.content, title: saved.title };
+        base.current = savedBase;
+        pendingSavedNewline.current = null;
+        // Reflect only a final LF the writer added. Removing empty lines while the author
+        // pauses can join paragraphs when they type on. An added LF keeps the caret in place.
+        if (submittedEditor && editorRef.current === submittedEditor && sourceEpoch.current === submittedEpoch &&
+            latest.current === text && saved.content === `${text}\n` && normalizeBody(text) === saved.content) {
+          pendingSavedNewline.current = { editor: submittedEditor, submitted: text, savedBase };
+          settleSavedNewline();
+        }
         onSaved(saved);
-        void window.studio.drafts.clear(bookId, chapter.id);
         const afterRetry = failures.current > 0;
         failures.current = 0;
+        if (latest.current !== text && latest.current !== saved.content) return updateStatus({ kind: "dirty" });
+        dropDraft();
         return updateStatus(afterRetry ? { kind: "saved", at: Date.now(), afterRetry } : { kind: "saved", at: Date.now() });
       } catch (error) {
         failures.current += 1;
@@ -304,7 +333,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
         if (current) void Promise.resolve().then(() => current.syncSource());
       }
     },
-    [bookId, chapter.id, dropDraft, onSaved, touchSource, updateStatus]
+    [bookId, chapter.id, dropDraft, onSaved, settleSavedNewline, touchSource, updateStatus]
   );
 
   // One save at a time. A save that started while another was on its way would carry the old base
@@ -342,22 +371,32 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
         const release = editorRef.current?.hold();
         const run = queue.current.then(write);
         queue.current = run.catch(() => {});
-        return release ? run.finally(release) : run;
+        return release ? run.finally(() => {
+          release();
+          settleSavedNewline();
+        }) : run;
       },
       rebase: (chapters: readonly Chapter[]) => {
         const file = chapters.find((item) => item.id === chapterId);
         if (!file) return false;
-        if (file.hash === base.current.hash) return true;
-        if (file.content !== base.current.content || file.title !== base.current.title) return false;
+        const currentBase = base.current;
+        if (file.hash === currentBase.hash) return true;
+        if (file.content !== currentBase.content || file.title !== currentBase.title) return false;
         const previous = readSourceRef.current();
-        base.current = { ...base.current, version: file.version, hash: file.hash };
+        const rebased = { ...currentBase, version: file.version, hash: file.hash };
+        base.current = rebased;
+        // The verified metadata update kept the saved body; carry its pending LF acknowledgement.
+        const pending = pendingSavedNewline.current;
+        if (pending?.savedBase === currentBase && pending.editor === editorRef.current && pending.submitted === latest.current) {
+          pendingSavedNewline.current = { ...pending, savedBase: rebased };
+        }
         touchSource();
         // Metadata-only acknowledgement: the leaf keeps a dirty buffer and only drops stale marks.
         editorRef.current?.rebase(previous);
         return true;
       }
     }),
-    [chapterId, evidenceCurrent, evidenceSnapshot, touchSource]
+    [chapterId, evidenceCurrent, evidenceSnapshot, settleSavedNewline, touchSource]
   );
 
   // A close or quit asks for the newest text before the main process saves its drafts: the draft
@@ -432,6 +471,12 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 
   const onEditorChange = useCallback(
     (change: InlineChange) => {
+      if (change.origin === "save-normalization") {
+        latest.current = change.text;
+        setContent(change.text);
+        return;
+      }
+      pendingSavedNewline.current = null;
       // The leaf reports the pre-edit text without mapping marks through it; history is ours alone.
       if (change.recordHistory) pushHistory(chapter.id, change.previous, Date.now(), change.isolated);
       applyTextRef.current(change.text);
@@ -514,7 +559,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
       onInspect: (inspection) => handleInspectionRef.current(inspection),
       onReviewStatus: (next) => handleReviewStatusRef.current(next),
       onSelection: (selection) => onSelectionRef.current(selection),
-      onComposition: () => {},
+      onComposition: (composing) => { if (!composing) settleSavedNewline(); },
       onBlur: () => void saveRef.current(latest.current),
       label: "Chapter text",
       testId: "manuscript-text",

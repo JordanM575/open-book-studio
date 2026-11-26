@@ -13,6 +13,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appDir = join(root, "apps", "desktop");
@@ -71,21 +72,12 @@ await writeFile(
 `
 );
 
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
-// This shell may carry a fetch proxy installed for the coding agent itself. The app must not
-// inherit it: the proxy authorises the agent's own traffic, not the app's, and every provider
-// request would come back as an unauthorised refusal that has nothing to do with the app.
-delete env.NODE_OPTIONS;
-for (const key of Object.keys(env)) if (key.startsWith("HEADROOM_")) delete env[key];
-env.STUDIO_TEST = "1";
-env.STUDIO_HEADLESS = "1";
+const env = headlessDesktopEnvironment(process.env, profile);
 env.STUDIO_BACKEND = "1";
-env.STUDIO_USER_DATA = profile;
 env.STUDIO_BACKEND_FILE = backendFile;
 
 const electronPath = createRequire(join(appDir, "package.json"))("electron");
-const app = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env });
+const app = await _electron.launch({ executablePath: electronPath, args: [...mockKeychainArgs(), appDir], cwd: appDir, env });
 await app.firstWindow();
 
 let locator = null;

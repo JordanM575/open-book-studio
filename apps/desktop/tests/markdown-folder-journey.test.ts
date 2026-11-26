@@ -215,16 +215,12 @@ describe("markdown folder attempt journey", () => {
     const { host, bookId, outParent } = await makeHost({ withImage: true });
     const attempt = await readyAttempt(host, bookId);
     const destination = join(outParent, "appeared-folder");
-    const pending = host.publishAttempt(attempt.attemptId, destination);
-    // Wait until staging exists (so the first destination check has passed), then appear.
-    for (let turn = 0; turn < 200; turn += 1) {
-      const names = await readdir(outParent);
-      if (names.some((name) => name.includes(".markdown-folder-staging-"))) break;
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    await mkdir(destination);
-    await writeFile(join(destination, "actor.txt"), "another actor");
-    const settlement = await pending;
+    const settlement = await host.publishAttempt(attempt.attemptId, destination, {
+      afterStagingComplete: async () => {
+        await mkdir(destination);
+        await writeFile(join(destination, "actor.txt"), "another actor");
+      }
+    });
     expect(settlement.status).toBe("name-conflict");
     if (settlement.status !== "name-conflict") throw new Error("expected name-conflict settlement");
     expect(settlement.message).toContain("does not replace one");

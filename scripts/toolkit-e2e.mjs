@@ -28,6 +28,7 @@ import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { headlessDesktopEnvironment, headlessEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appDir = join(root, "apps", "desktop");
@@ -105,25 +106,15 @@ await writeFile(tidePath, chapterFile(TIDE, "The Tide Clock", 2, TIDE_BODY));
 await writeFile(join(profile, "studio.json"), `${JSON.stringify({ libraryRoot }, null, 2)}\n`);
 
 /*
- * One environment for the app and the toolkit. This shell may carry a fetch proxy for the coding
- * agent (`NODE_OPTIONS`, `HEADROOM_*`), its own `STUDIO_*` flags or a `BOOKWRITER_*` target, and none
- * of them may reach the run. The toolkit is pinned to this run's locator and is always given `--url`
- * and `--token` as well, so it can never fall back to the author's own studio.
+ * Both processes inherit just the host fields they need. The toolkit is pinned to the fixture's
+ * locator and receives its URL and token explicitly.
  */
-const toolEnv = { ...process.env };
-for (const key of Object.keys(toolEnv)) {
-  if (/^(HEADROOM_|STUDIO_|BOOKWRITER_)/.test(key)) delete toolEnv[key];
-}
-delete toolEnv.NODE_OPTIONS;
-delete toolEnv.ELECTRON_RUN_AS_NODE;
-toolEnv.STUDIO_BACKEND_FILE = backendFile;
+const toolEnv = { ...headlessEnvironment(process.env), STUDIO_BACKEND_FILE: backendFile };
 
 const appEnv = {
-  ...toolEnv,
-  STUDIO_TEST: "1",
-  STUDIO_HEADLESS: "1",
+  ...headlessDesktopEnvironment(process.env, profile),
+  STUDIO_BACKEND_FILE: backendFile,
   STUDIO_BACKEND: "1",
-  STUDIO_USER_DATA: profile,
   STUDIO_WINDOW_SIZE: "1440x900"
 };
 
@@ -611,7 +602,7 @@ const electronPath = createRequire(join(appDir, "package.json"))("electron");
 const { _electron } = await import("playwright");
 let app = null;
 try {
-  app = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env: appEnv });
+  app = await _electron.launch({ executablePath: electronPath, args: [...mockKeychainArgs(), appDir], cwd: appDir, env: appEnv });
   const page = await app.firstWindow();
   locator = await waitForLocator();
   if (!locator) problems.push("the backend never wrote its locator file");

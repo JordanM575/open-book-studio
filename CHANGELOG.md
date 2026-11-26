@@ -7,6 +7,39 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Repository verification
+- Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.
+- Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.
+- Generate synthetic reader IPC redaction values at runtime and check for partial marker leaks.
+- Drive the Markdown folder collision test at the staging-complete boundary.
+
+### Browser reader verification
+- Settle workspace startup reads before measuring the unsupported reader control's side effects.
+- Add an opt-in built web check for reader review refusal at welcome and in the workspace, with storage and process cleanup checks.
+- Verify the served browser build, trusted keyboard activation, and complete process exit in the reader refusal check.
+- Use the same commit stamp when building the desktop and web artifacts for the reader checks.
+
+### Reader review verification
+- Check that stale passage navigation refuses and two reader lenses retain their own saved revisions in the mounted comparison.
+- Exercise keyboard Stop with a late synthetic response and verify the stopped attempt remains without findings.
+- Exercise an opt-in keyboard Start refusal after a checked save changes the selected source.
+- Capture completed findings and their run identity before the renderer revalidates the copied envelope.
+- Add an opt-in keyboard check for cancelling a prepared disclosure and refusing Start for the retired request.
+- Exercise keyboard focus, light and dark appearance, and independent reduced-motion and reduced-transparency preferences in the built reader check.
+- Revalidate completed reader runs copied across the desktop bridge before displaying their scoped findings.
+- Record the failed step, synthetic Start outcome and bounded operation counts when reader verification stops early.
+- Add an opt-in built desktop check for keyboard preparation, explicit start, current-source checking and exact passage selection with a synthetic provider and library.
+- Wait for the reader check's startup scan and process group exit, and match the exact passage control and receipt to the observed run.
+- Pass the disclosed reader review instructions through the SDK's instruction field so an approved review can reach the selected provider.
+### Review evidence after saving
+- Keep paragraph breaks and newer draft text during autosave. Apply a missing final newline from a confirmed chapter save once the unchanged editor is idle, including after metadata-only chapter changes, so exact review evidence can open.
+
+### Review smoke evidence navigation
+- Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
+
+### Chapter history
+- Open the chapter history dialog only when the selected chapter has a bound history adapter. This restores the desktop renderer typecheck and preserves the unsupported-host behavior.
+
 ### Reader review T001 reconciliation (039 T001) task record
 - 039 T001 is recorded complete on documentation alone: the 034/037/039 reconciliation audit (`reader-review-t001-reconciliation.md`, 2026-11-20) is adopted as the acceptance scope, with its evidence ledger kept as builder/coordinator-reported and never re-run. Stale claims corrected: 039 spec U-039-01/02 rows (T002/T004 and T002/T005 merged and checked), the 039 plan Verification section (post-W10 merges: T003 PR #108, T004 PR #112, T005 PR #119, T008 PR #116; T006, T009, T010–T019 remain open) and its delivery-checkpoint status, the 039 plan's U-039-04 prerequisite line (T003 applied it; only T006 carries it), 034 spec's repetition-scanner and FR-005 lines (repetition-v1 shipped, T008), and the 037 plan "Shape" section (dated pointer to the merged standalone transport, not a foreground `runtime.ts` turn).
 - The shared `review/` directory ownership record now lives in `packages/core/src/review/SCOPED-CONTRACTS.md` (034 owns `index.ts`/`repetition.ts`; 039 owns the scoped-contract leaves; 037 owns no module there; the `guided-review` kind remains reserved with no producer or consumer). Residuals recorded, not resolved: M-2, M-6 (check-in ownership assumption), M-7 (consent wording), M-8 (schema-1/schema-2 `review-campaign` path family), M-9 (IPC inventory drift), M-10 (duplicated record-store patterns). No product or test source changed; no excluded persistence file touched; 034 and 037 task files untouched; 038 T022 remains unchecked; no other task box moved; no live-provider, built-app, packaged-app, device or semantic-quality evidence is claimed.

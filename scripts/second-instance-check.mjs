@@ -37,9 +37,11 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { capturePage, createRunDir } from "./failure-artifacts.mjs";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const appDir = join(root, "apps", "desktop");
+const appArgs = [...mockKeychainArgs(), appDir];
 const builtMain = join(appDir, "out", "main", "index.cjs");
 const keep = process.argv.includes("--keep");
 
@@ -107,7 +109,7 @@ const hang = setTimeout(() => {
 }, 240_000);
 
 try {
-  app = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env: envA, timeout: 60_000 });
+  app = await _electron.launch({ executablePath: electronPath, args: appArgs, cwd: appDir, env: envA, timeout: 60_000 });
   collectLines(app.process(), mainLog);
   page = await app.firstWindow();
   capture = await capturePage(page);
@@ -217,7 +219,7 @@ try {
   await step("a copy on a different profile is not refused, and copy A hears nothing of it", async () => {
     const heard = count(mainLog, HEARD_LINE);
     const appearances = await page.evaluate(() => window.__secondInstanceNotice.appearances);
-    other = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env: envOther, timeout: 60_000 });
+  other = await _electron.launch({ executablePath: electronPath, args: appArgs, cwd: appDir, env: envOther, timeout: 60_000 });
     const otherPage = await other.firstWindow();
     await waitFor(
       () =>
@@ -323,7 +325,7 @@ function launchSecond() {
   return new Promise((done) => {
     const started = Date.now();
     const output = [];
-    second = spawn(electronPath, [appDir], { cwd: appDir, env: envA, stdio: ["ignore", "pipe", "pipe"] });
+    second = spawn(electronPath, appArgs, { cwd: appDir, env: envA, stdio: ["ignore", "pipe", "pipe"] });
     collectLines(second, output);
     let killed = false;
     const giveUp = setTimeout(() => {
@@ -338,14 +340,7 @@ function launchSecond() {
 }
 
 function studioEnv(userData, extra = {}) {
-  const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    // T3 Code and some terminals export ELECTRON_RUN_AS_NODE, and inherited studio switches would
-    // change what the copies do, so neither rides along.
-    if (key === "ELECTRON_RUN_AS_NODE" || key === "NODE_OPTIONS" || key.startsWith("STUDIO_")) continue;
-    env[key] = value;
-  }
-  return { ...env, STUDIO_TEST: "1", STUDIO_HEADLESS: "1", STUDIO_USER_DATA: userData, ...extra };
+  return { ...headlessDesktopEnvironment(process.env, userData), ...extra };
 }
 
 async function seedProfile(folder, library) {
