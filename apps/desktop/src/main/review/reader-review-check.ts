@@ -6,7 +6,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { CredentialVault } from "@ai-book-studio/core/providers/credentials";
 import { serializeProviderRequest, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
-import type { ReaderReviewService as ReaderReviewServiceContract } from "@ai-book-studio/core/review/reader-api";
+import type {
+  ReaderReviewFailure, ReaderReviewRefusal, ReaderReviewService as ReaderReviewServiceContract, ReaderReviewStartResult
+} from "@ai-book-studio/core/review/reader-api";
 import { modelFor } from "../agent/transport";
 import { ReaderReviewService, type ReviewLibrary, type ReviewProviders } from "./service";
 import { AiSdkReviewTransport } from "./transport";
@@ -115,16 +117,17 @@ const observationKey = Symbol.for("studio.reader-review-check");
 export function createReaderReviewCheck() {
   const secret = sample.sentinelPrefix + randomBytes(24).toString("hex");
   const counts = {
-    catalogues: 0, preparations: 0, readerLists: 0, readerModels: 0, readerCredentialReads: 0,
+    catalogues: 0, preparations: 0, starts: 0, readerLists: 0, readerModels: 0, readerCredentialReads: 0,
     completionPosts: 0, fixtureRefusals: 0, outboundAttempts: 0, permissionAttempts: 0,
     protectedStorageAttempts: 0, guardedStorageMethods: 0
   };
   let prepared: ReviewEnvelope | null = null;
   let completedDigest: string | null = null;
   let requestHash: string | null = null;
+  let lastStart: { kind: ReaderReviewStartResult["kind"]; reason: ReaderReviewRefusal | ReaderReviewFailure | null } | null = null;
   const snapshot = () => ({
     ...counts, requestId: prepared?.requestId ?? null, preparedDigest: prepared?.scopeDigest ?? null,
-    completedDigest, requestHash
+    completedDigest, requestHash, lastStart
   });
   function refuseFixture(): never {
     counts.fixtureRefusals++;
@@ -232,7 +235,15 @@ export function createReaderReviewCheck() {
         if (result.kind === "ready") observePreparation(result.envelope);
         return result;
       },
-      start: (request) => service.start(request),
+      async start(request) {
+        counts.starts++;
+        const result = await service.start(request);
+        lastStart = {
+          kind: result.kind,
+          reason: result.kind === "blocked" || result.kind === "failed" ? result.reason : null
+        };
+        return result;
+      },
       stop: (request) => service.stop(request),
       cancelPrepare: (request) => service.cancelPrepare(request)
     };

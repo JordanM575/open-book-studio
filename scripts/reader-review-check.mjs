@@ -112,27 +112,42 @@ function assertGuards(snapshot) {
 function assertCompleted(snapshot) {
   assertGuards(snapshot);
   for (const [name, value] of Object.entries({
-    catalogues: 1, preparations: 1, readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
+    catalogues: 1, preparations: 1, starts: 1, readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
   })) assert.equal(snapshot[name], value, name);
+  assert.deepEqual(snapshot.lastStart, { kind: "completed", reason: null });
   assert.match(snapshot.preparedDigest, /^[a-f0-9]{64}$/);
   assert.equal(snapshot.completedDigest, snapshot.preparedDigest);
   assert.match(snapshot.requestHash, /^[a-f0-9]{64}$/);
   assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 }
 
-function readChildObservation(payload, observed) {
+function readChildObservation(payload) {
   const snapshot = JSON.parse(payload);
-  const fields = [
-    "catalogues", "preparations", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
-    "fixtureRefusals", "outboundAttempts", "permissionAttempts", "protectedStorageAttempts", "guardedStorageMethods",
-    "requestId", "preparedDigest", "completedDigest", "requestHash"
+  const counters = [
+    "catalogues", "preparations", "starts", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
+    "fixtureRefusals", "outboundAttempts", "permissionAttempts", "protectedStorageAttempts", "guardedStorageMethods"
   ];
+  const digests = ["preparedDigest", "completedDigest", "requestHash"];
+  const fields = [...counters, ...digests, "requestId", "lastStart"];
   assert.deepEqual(Object.keys(snapshot).sort(), [...fields].sort());
-  assertCompleted(snapshot);
-  assert.equal(snapshot.requestId, observed.requestId);
-  assert.equal(snapshot.preparedDigest, observed.preparedDigest);
-  assert.equal(snapshot.requestHash, observed.requestHash);
-  return Object.fromEntries(fields.map((field) => [field, snapshot[field]]));
+  for (const name of counters) assert(Number.isSafeInteger(snapshot[name]) && snapshot[name] >= 0);
+  for (const name of digests) {
+    if (snapshot[name] !== null) assert.match(snapshot[name], /^[a-f0-9]{64}$/);
+  }
+  if (snapshot.requestId !== null) {
+    assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
+  }
+  if (snapshot.lastStart !== null) {
+    assert.deepEqual(Object.keys(snapshot.lastStart).sort(), ["kind", "reason"]);
+    const { kind, reason } = snapshot.lastStart;
+    const reasons = new Map([
+      ["completed", [null]], ["stopped", [null]],
+      ["blocked", ["unavailable", "permission", "no-model", "invalid-selection", "scope-too-large", "consent", "terms", "changed"]],
+      ["failed", ["provider", "overflow", "malformed", "refused"]]
+    ]);
+    assert(snapshot.starts > 0 && reasons.get(kind)?.includes(reason));
+  }
+  return snapshot;
 }
 
 async function runJourney(page, application, libraryRoot, candidate, record) {
@@ -163,7 +178,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   const before = await fingerprint(libraryRoot);
   const initial = await observe();
   assertGuards(initial);
-  assert.equal(initial.catalogues + initial.preparations + initial.readerCredentialReads + initial.completionPosts, 0);
+  assert.equal(initial.catalogues + initial.preparations + initial.starts + initial.readerCredentialReads + initial.completionPosts, 0);
 
   record.phase = "keyboard preparation and disclosure";
   const opener = exactButton("Open reader review");
@@ -192,14 +207,30 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   assertGuards(prepared);
   assert.equal(prepared.catalogues, 1);
   assert.equal(prepared.preparations, 1);
+  assert.equal(prepared.starts, 0);
   assert.equal(prepared.readerCredentialReads, 0);
   assert.equal(prepared.completionPosts, 0);
   assert.deepEqual(await fingerprint(libraryRoot), before);
 
-  record.phase = "explicit Start and attributed finding";
+  record.phase = "activate explicit Start by keyboard";
   await activate(exactButton("Start with " + sample.providerName));
   const results = page.getByRole("region", { name: "Volatile reader results" });
   const run = results.getByRole("article", { name: "Reader run " + prepared.requestId });
+  record.phase = "wait for the completed attributed run";
+  try {
+    await run.waitFor();
+  } catch (error) {
+    record.startView = await within(page.evaluate((requestId) => {
+      const panel = document.querySelector("[data-reader-review-heading]")?.closest("section");
+      if (!panel) return "panel closed";
+      if (panel.querySelector(`[aria-label="Reader run ${requestId}"]`)) return "run present";
+      if (panel.querySelector(`[aria-label="Reader attempt ${requestId}"]`)) return "incomplete attempt present";
+      return [...panel.querySelectorAll("button")].some((button) => button.textContent?.startsWith("Start with "))
+        ? "disclosure present" : "no attributed run or attempt";
+    }, prepared.requestId).catch(() => null), 1_000);
+    throw error;
+  }
+  record.phase = "verify the finding, quotation and disabled historical navigation";
   const finding = run.getByRole("region", { name: "clarity finding" });
   await finding.getByText(sample.finding, { exact: true }).waitFor();
   assert.equal(await results.getByRole("article").count(), 1);
@@ -207,6 +238,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   assert((await finding.innerText()).includes("2 unverified quotations withheld"));
   const passage = finding.getByRole("button", { name: /^Show exact passage for finding-1,/ });
   assert(await passage.isDisabled());
+  record.phase = "verify the admitted synthetic completion";
   const observed = await observe();
   assertCompleted(observed);
 
@@ -300,7 +332,7 @@ async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5
 
 const result = {
   scenario: sample.scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
-  build: null, library: null, selection: null, observations: null, guardDenials: 0,
+  build: null, library: null, selection: null, startView: null, observations: null, guardDenials: 0,
   childExit: null, childGroupEmpty: false, cleaned: false
 };
 let scratch;
@@ -386,12 +418,14 @@ try {
       clearTimeout(watchdog);
       assert(stopped.graceful);
       assert.deepEqual(result.childExit, { code: 0, signal: null });
-      assert(!timedOut && result.guardDenials === 8 && loopbackConnections === 0);
       const { stdout, stderr, overflow } = receipt.logs;
       assert(!overflow && !sentinel.test(stdout) && !sentinel.test(stderr));
       const summaries = stdout.split("\n").filter((line) => line.startsWith(childMarker));
       assert.equal(summaries.length, 1);
-      result.observations = readChildObservation(summaries[0].slice(childMarker.length), observed);
+      result.observations = readChildObservation(summaries[0].slice(childMarker.length));
+      assert(!timedOut && result.guardDenials === 8 && loopbackConnections === 0);
+      assertCompleted(result.observations);
+      assert.deepEqual(result.observations, observed);
       const profile = join(scratch, "profile");
       assert(!(await readdir(profile)).includes("credentials.json"));
       for (const file of await filesIn(scratch, { skipVolatile: true })) {

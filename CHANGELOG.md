@@ -13,6 +13,7 @@ Update the `Unreleased` section before every commit.
 - Use the same commit stamp when building the desktop and web artifacts for the reader checks.
 
 ### Reader review verification
+- Record the failed step, synthetic Start outcome and bounded operation counts when reader verification stops early.
 - Add an opt-in built desktop check for keyboard preparation, explicit start, current-source checking and exact passage selection with a synthetic provider and library.
 - Wait for the reader check's startup scan and process group exit, and match the exact passage control and receipt to the observed run.
 - Pass the disclosed reader review instructions through the SDK's instruction field so an approved review can reach the selected provider.

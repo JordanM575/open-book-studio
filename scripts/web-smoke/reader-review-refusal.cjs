@@ -11,6 +11,16 @@ const checks = [
   "storage observer calibration", "workspace keyboard refusal", "unchanged library", "guarded window teardown"
 ];
 const counterNames = ["bookReads", "handleReads", "fileReads", "storageReads", "writes", "permissions", "providers", "requests"];
+const workspaceStages = {
+  baseline: "capture the workspace baseline",
+  open: "activate Open reader review by keyboard",
+  panel: "verify the unsupported panel and controls",
+  heading: "verify focus on the unsupported heading",
+  close: "activate Close review by keyboard",
+  opener: "verify the panel closed and focus returned",
+  counters: "verify zero workspace side effects",
+  adapter: "verify the original reader API"
+};
 const digest = /^[a-f0-9]{64}$/;
 
 function privateDirectory(path) {
@@ -48,7 +58,18 @@ function projectChecks(result, commit) {
   return result.checks.map((check) => {
     assert(checks.includes(check.name) && !names.has(check.name) && typeof check.ok === "boolean");
     names.add(check.name);
-    return { name: check.name, ok: check.ok };
+    const projected = { name: check.name, ok: check.ok };
+    if (check.phase !== undefined) {
+      assert(check.name === checks[4] && !check.ok && Object.values(workspaceStages).includes(check.phase));
+      projected.phase = check.phase;
+      if (check.nonzeroCounters !== undefined) {
+        const counters = check.nonzeroCounters;
+        assert(check.phase === workspaceStages.counters && Array.isArray(counters) && counters.length > 0 &&
+          new Set(counters).size === counters.length && counters.every((name) => counterNames.includes(name)));
+        projected.nonzeroCounters = counters;
+      }
+    }
+    return projected;
   });
 }
 
@@ -186,6 +207,8 @@ async function run({ window, app, url, profile, commit }) {
   const contents = window.webContents;
   const result = { scenario, ok: false, target: null, commit: null, checks: [], welcome: null, workspace: null,
     calibration: null, library: null, externalAttempts: null, consoleErrors: null };
+  let workspaceStage = workspaceStages.baseline;
+  let nonzeroCounters;
   const web = observeWindow(contents, new URL(url).origin);
   const evaluate = (fn, arg) => contents.executeJavaScript("(" + fn.toString() + ")(" + JSON.stringify(arg) + ")");
   async function waitFor(fn, arg) {
@@ -209,7 +232,12 @@ async function run({ window, app, url, profile, commit }) {
       await run();
       result.checks.push({ name: check, ok: true });
     } catch (error) {
-      result.checks.push({ name: check, ok: false });
+      const failed = { name: check, ok: false };
+      if (check === checks[4]) {
+        failed.phase = workspaceStage;
+        if (nonzeroCounters?.length) failed.nonzeroCounters = nonzeroCounters;
+      }
+      result.checks.push(failed);
       throw error;
     }
   }
@@ -338,22 +366,33 @@ async function run({ window, app, url, profile, commit }) {
     await step(checks[4], async () => {
       workspaceStart = await snapshot();
       nativeStart = { requests: web.requests, permissions: web.permissions };
+      workspaceStage = workspaceStages.open;
       await keyboardButton("Open reader review");
-      await waitFor((copy) => {
+      const unsupportedPanel = ({ copy, focus }) => {
         const heading = document.querySelector("[data-reader-review-heading]");
         const panel = heading?.closest("section");
         const reader = panel?.parentElement?.closest("section");
         const buttons = [...(panel?.querySelectorAll("button") ?? [])];
-        return heading?.textContent.trim() === "Structured reader review" && document.activeElement === heading &&
+        return heading?.textContent.trim() === "Structured reader review" && (!focus || document.activeElement === heading) &&
           panel.querySelector("[role=status]")?.textContent.trim() === copy &&
           buttons.some((button) => button.textContent.trim() === "Prepare review" && button.disabled) &&
           !buttons.some((button) => /^Start with\b/.test(button.textContent.trim())) &&
           !reader?.querySelector("fieldset") && !panel.querySelector('[aria-label^="Reader attempt "], [aria-label^="Reader run "]');
-      }, copy);
+      };
+      workspaceStage = workspaceStages.panel;
+      await waitFor(unsupportedPanel, { copy, focus: false });
+      workspaceStage = workspaceStages.heading;
+      await waitFor(unsupportedPanel, { copy, focus: true });
+      workspaceStage = workspaceStages.close;
       await keyboardButton("Close review");
+      workspaceStage = workspaceStages.opener;
       await waitFor(() => !document.querySelector("[data-reader-review-heading]") &&
         document.activeElement?.textContent.trim() === "Open reader review");
-      assert(quiet(await since(workspaceStart)));
+      workspaceStage = workspaceStages.counters;
+      const delta = await since(workspaceStart);
+      nonzeroCounters = counterNames.filter((name) => delta[name] !== 0);
+      assert.equal(nonzeroCounters.length, 0);
+      workspaceStage = workspaceStages.adapter;
       assert(await evaluate(() => window[Symbol.for("studio.web-reader-check")].readerUnchanged()));
     });
     await step(checks[5], async () => {

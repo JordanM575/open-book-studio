@@ -125,10 +125,10 @@ describe("synthetic catalogue and completion boundaries", () => {
     expect(prepared.usage).toMatchObject({ books: 1, items: 1, sourceBytes: 124 });
     expect(prepared.priceFacts).toMatchObject({ inputPerMillion: 1.25, outputPerMillion: 4.25, cachedInputPerMillion: 0.15 });
     expect(prepared.envelope.environment.estimatedCostUsd).toBeNull();
-    expect(check.snapshot()).toMatchObject({ catalogues: 1, preparations: 1, readerCredentialReads: 0, completionPosts: 0 });
+    expect(check.snapshot()).toMatchObject({ catalogues: 1, preparations: 1, starts: 0, lastStart: null, readerCredentialReads: 0, completionPosts: 0 });
     const start = { operation: "start" as const, requestId: prepared.requestId, scopeDigest: prepared.scopeDigest };
     expect(await reader.start({ ...start, scopeDigest: "0".repeat(64) })).toMatchObject({ kind: "blocked", reason: "changed" });
-    expect(check.snapshot().completionPosts).toBe(0);
+    expect(check.snapshot()).toMatchObject({ starts: 1, lastStart: { kind: "blocked", reason: "changed" }, completionPosts: 0 });
     const completed = await reader.start(start);
     expect(completed.kind).toBe("completed");
     if (completed.kind !== "completed") throw new Error("Expected synthetic reader finding");
@@ -142,9 +142,11 @@ describe("synthetic catalogue and completion boundaries", () => {
     });
     expect(sample.selected.body.indexOf(sample.quote.text)).toBe(13);
     expect(sample.selected.body.lastIndexOf(sample.quote.text)).toBe(sample.quote.start);
+    expect(check.snapshot()).toMatchObject({ starts: 2, lastStart: { kind: "completed", reason: null } });
     expect(await reader.start(start)).toMatchObject({ kind: "blocked", reason: "changed" });
     expect(check.snapshot()).toMatchObject({
-      catalogues: 1, preparations: 1, readerLists: 2, readerModels: 2, readerCredentialReads: 1,
+      catalogues: 1, preparations: 1, starts: 3, lastStart: { kind: "blocked", reason: "changed" },
+      readerLists: 2, readerModels: 2, readerCredentialReads: 1,
       completionPosts: 1, fixtureRefusals: 0, outboundAttempts: 0,
       preparedDigest: prepared.scopeDigest, completedDigest: prepared.scopeDigest
     });
