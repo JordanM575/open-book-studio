@@ -371,6 +371,63 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       return "chapter rail and prose loaded";
     });
 
+    await check("chapter history is reachable from the desktop toolbar", async () => {
+      const dialog = `[...document.querySelectorAll('[data-slot="dialog-title"]')]
+        .find((title) => title.textContent?.trim() === "Chapter history")?.closest('[role="dialog"]')`;
+      const label = "Selected chapter history smoke snapshot";
+      // A chapter-specific saved record distinguishes the actual IPC listing from an empty sibling.
+      const recordFile = await evaluate<string | null>(win, `(async () => {
+        const bookId = "book_smoke0001";
+        const chapterId = "ch_smoke0001";
+        const selected = document.querySelector('[data-testid="chapter-row"][aria-current="page"]');
+        if (selected?.getAttribute("data-chapter-id") !== chapterId) return null;
+        const book = await window.studio.books.open(bookId);
+        const chapter = book.ok && book.data.chapters.find((item) => item.id === chapterId);
+        if (!chapter) return null;
+        const captured = await window.studio.history.capture({
+          bookId, chapterId, label: ${JSON.stringify(label)},
+          source: { status: "saved", version: chapter.version, hash: chapter.hash }
+        });
+        if (!captured.ok || captured.data.meta.chapterId !== chapterId || captured.data.meta.bookId !== bookId) return null;
+        return captured.data.fileName;
+      })()`);
+      if (!recordFile) throw new Error("could not capture the selected chapter's synthetic history record");
+
+      const opened = await evaluate<boolean>(win, `(() => {
+        const opener = document.querySelector('[data-testid="open-chapter-history"]');
+        if (!opener || opener.disabled || innerWidth < 700) return false;
+        if (!opener.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return false;
+        const bounds = opener.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0 || bounds.left < 0 || bounds.top < 0 ||
+            bounds.right > innerWidth || bounds.bottom > innerHeight) return false;
+        const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+        if (!hit || !opener.contains(hit)) return false;
+        opener.focus();
+        opener.click();
+        return true;
+      })()`);
+      if (!opened) throw new Error("the Chapter history button is unavailable in the desktop toolbar");
+      try {
+        await waitUntil(
+          () => evaluate<boolean>(win, inPage(`[...((${dialog})?.querySelectorAll('[aria-label="History records"] li') ?? [])]
+            .some((row) => {
+              const fields = [...row.querySelectorAll("p")].map((field) => field.textContent?.trim());
+              return fields.includes(${JSON.stringify(label)}) && fields.includes(${JSON.stringify(recordFile)});
+            })`)),
+          "chapter history to list the selected chapter's captured record"
+        );
+        const current = await evaluate<boolean>(win, inPage(`(${dialog})?.textContent?.includes("The Light")`));
+        if (!current) throw new Error("the Chapter history dialog did not identify the selected chapter");
+      } finally {
+        await evaluate(win, `(${dialog})?.querySelector('button[aria-label="Close"]')?.click()`);
+        await waitUntil(
+          () => evaluate<boolean>(win, inPage(`!(${dialog})`)),
+          "chapter history to close"
+        );
+      }
+      return "visible desktop opener and the selected chapter's captured history record";
+    });
+
     await check("the continuation check-in panel reads nothing until asked", async () => {
       const panel = await evaluate<boolean>(win, inPage(`document.querySelector('[data-testid="continuation-checkin-panel"]')`));
       if (!panel) throw new Error("the continuation check-in panel is missing");

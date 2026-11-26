@@ -1510,6 +1510,18 @@ export function WorkspaceView({
             >
               <FileSearch size={16} />
             </Button>
+            {historyApi && selected ? (
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setHistoryOpen(true)}
+                aria-label="Chapter history"
+                title="Chapter history"
+                data-testid="open-chapter-history"
+              >
+                <History size={16} aria-hidden />
+              </Button>
+            ) : null}
             {exporting && exportingTarget ? (
               <div
                 className="flex items-center gap-2 text-(length:--text-caption-size) text-muted-foreground"
