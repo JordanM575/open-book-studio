@@ -99,15 +99,16 @@ no real manuscript, credential, live provider, paid service or device is in scop
   example, coverage, stale blocking, insufficient evidence, disposable replacement, and an integration
   run with no writer mock (a manuscript write would fail the test). The repeatable-phrase scenario
   stays with the deferred T008 scanner. No provider or network call exists on the run path.
-- [ ] T016 Add a synthetic-fixture smoke journey for start, results, evidence navigation, stale
-  state, cancel and insufficient evidence on each selected host surface. Covered on desktop (29/29
-  smoke): start, results, save-gate cancel (Keep writing), stale with Run again, an empty book
-  reporting insufficient evidence instead of no findings, and cancelling a slow run mid-analysis
-  so partial counts are discarded. Still open: evidence navigation (needs live findings from the
-  deferred scanner). The analysis counts in whitespace-aligned slices and yields between 256KB
-  budgets, so Cancel stays clickable on long books while small books analyze with no added
-  latency; the smoke review checks wait for report content, not the dialog shell
-  (`EditorHandle.getStatus()` also keeps a fast review click on the save choice).
+- [x] T016 Add a synthetic-fixture smoke journey for start, results, evidence navigation, stale
+  state, cancel and insufficient evidence on each selected host surface.
+  Completed 2026-11-25 for the desktop-first scope in T002. The unpackaged macOS arm64 build
+  at `e796143` passed 52/52 official smoke checks. All six manuscript review checks passed.
+  Keep writing preserved the unsaved edit, and a report opened on saved text. Opening a repetition
+  occurrence selected exactly “The lighthouse keeper” in The Light. A changed chapter made the
+  report stale, and a new run replaced it. An empty book reported insufficient evidence, and
+  Cancel run stopped a delayed read before analysis. The run used an isolated synthetic library.
+  The verified tree merged in [PR #127](https://github.com/JordanM575/open-book-studio/pull/127).
+  Inline viewing and retained reports have their own T018 and T019 acceptance.
 - [x] T017 Review keyboard and screen-reader access for definitions, coverage, findings, status and
   cancellation; use the existing design tokens and honor reduced motion/transparency. Sections use
   labelled headings, actions are named native buttons, status and stale updates use live regions, the
