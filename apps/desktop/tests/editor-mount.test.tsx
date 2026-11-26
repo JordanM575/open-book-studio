@@ -739,16 +739,54 @@ describe("mounted editor surface", () => {
     expect(document.querySelectorAll(".inline-review-mark")).toHaveLength(1);
   });
 
-  test("an edit hides the current marks instead of mapping them onto new text", async () => {
+  test("an edit retains verified historical quotes without navigating or restoring marks on undo", async () => {
     const mounted = mount();
     const editor = mounted.editor();
     const request = await reviewRequest(editor.getSnapshot());
-    mounted.rerender({ reviewRequest: request });
+    mounted.rerender({ reviewRequest: request, reviewLabel: "Synthetic review" });
     await testing.waitFor(() => expect(document.querySelectorAll(".inline-review-mark").length).toBe(2));
 
     type(`${CHAPTER.content}new words`);
     expect(document.querySelectorAll(".inline-review-mark")).toHaveLength(0);
-    expect(testing.within(document.body).queryByRole("complementary", { name: "Review findings" })).toBeNull();
+    const body = testing.within(document.body);
+    const aside = body.getByRole("complementary", { name: "Review findings" });
+    expect(testing.within(aside).getByRole("heading", { name: "Synthetic review" })).toBeTruthy();
+    expect(testing.within(aside).getByRole("status").textContent).toContain("Historical findings from saved revision 3");
+    expect(aside.textContent).toContain(PASSAGE);
+    expect(aside.textContent).toContain(SECOND);
+    expect(testing.within(aside).queryAllByRole("button")).toHaveLength(0);
+    expect(testing.within(aside).queryByRole("combobox")).toBeNull();
+    expect(editor.getLayer()).toBeNull();
+
+    testing.fireEvent.keyDown(mounted.surface(), { key: "z", metaKey: true });
+    expect(editorText()).toBe(CHAPTER.content);
+    expect(document.querySelectorAll(".inline-review-mark")).toHaveLength(0);
+    expect(aside.textContent).toContain(PASSAGE);
+    expect(testing.within(aside).queryAllByRole("button")).toHaveLength(0);
+    expect(mounted.save).not.toHaveBeenCalled();
+
+    mounted.rerender({ reviewRequest: request, reviewLabel: "Another review label" });
+    expect(testing.within(aside).getByRole("heading", { name: "Synthetic review" })).toBeTruthy();
+
+    mounted.rerender({ reviewRequest: null });
+    expect(body.queryByRole("complementary", { name: "Review findings" })).toBeNull();
+  });
+
+  test("a different owner cannot inherit historical findings from the previous editor visit", async () => {
+    const mounted = mount();
+    const editor = mounted.editor();
+    const request = await reviewRequest(editor.getSnapshot());
+    const body = testing.within(document.body);
+    mounted.rerender({ reviewRequest: request });
+    await testing.waitFor(() => expect(document.querySelectorAll(".inline-review-mark").length).toBe(2));
+
+    type(`${CHAPTER.content}new words`);
+    expect(body.getByRole("complementary", { name: "Review findings" }).textContent).toContain(PASSAGE);
+    mounted.rerender({ libraryId: "synthetic-other-library", reviewRequest: request });
+    expect(body.queryByRole("complementary", { name: "Review findings" })).toBeNull();
+    expect(document.querySelectorAll(".inline-review-mark")).toHaveLength(0);
+    await testing.act(async () => {});
+    expect(body.queryByRole("complementary", { name: "Review findings" })).toBeNull();
   });
 
   test("an invented layer is refused by the shared verifier and paints nothing", async () => {
@@ -789,7 +827,7 @@ describe("review aside corrections", () => {
     expect(aside.querySelector('button[aria-current="true"]')).toBeNull();
   });
 
-  test("the count names findings, not evidence spans, when a finding cites two passages", async () => {
+  test("a historical finding shows both quotes when it cites two passages", async () => {
     const mounted = mount();
     const editor = mounted.editor();
     const request = await reviewRequest(editor.getSnapshot());
@@ -806,6 +844,14 @@ describe("review aside corrections", () => {
     expect(body.getByTestId("review-count").textContent).toBe("2 of 2 findings shown");
     expect(aside.textContent).toContain("2 passages");
     expect(aside.querySelectorAll("li").length).toBe(2);
+
+    type(`${CHAPTER.content}another line`);
+    const historical = testing.within(aside).getAllByRole("listitem").find((row) => row.textContent?.includes("2 passages"));
+    expect(historical?.textContent).toContain(PASSAGE);
+    expect(historical?.textContent).toContain(SECOND);
+    expect(testing.within(aside).queryAllByRole("button")).toHaveLength(0);
+    expect(document.querySelectorAll(".inline-review-mark")).toHaveLength(0);
+    expect(mounted.save).not.toHaveBeenCalled();
   });
 });
 

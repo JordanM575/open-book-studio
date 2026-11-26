@@ -55,6 +55,9 @@ Update the `Unreleased` section before every commit.
 ### Review smoke evidence navigation
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
 
+### Inline review
+- Keep verified quotes readable as historical findings when the text changes. Clear the marks and passage controls until a fresh review verifies.
+
 ### Chapter history
 - Open the selected chapter's history directly from the desktop toolbar.
 - Verify the visible toolbar action and the exact captured record for the selected chapter in hidden smoke.
