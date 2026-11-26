@@ -150,6 +150,54 @@ function readChildObservation(payload) {
   return snapshot;
 }
 
+async function verifyAppearance(page) {
+  const cdp = await page.context().newCDPSession(page);
+  async function inspect(theme, motion = false, transparency = false) {
+    await cdp.send("Emulation.setEmulatedMedia", { features: [
+      { name: "prefers-color-scheme", value: theme },
+      { name: "prefers-reduced-motion", value: motion ? "reduce" : "no-preference" },
+      { name: "prefers-reduced-transparency", value: transparency ? "reduce" : "no-preference" }
+    ] });
+    const handle = await page.waitForFunction(({ theme, motion, transparency }) => {
+      const heading = document.querySelector("[data-reader-review-heading]");
+      const host = heading?.closest(".glass");
+      const close = [...(heading?.closest("section")?.querySelectorAll("button") ?? [])]
+        .find(button => button.textContent?.trim() === "Close review");
+      if (!host || !close || !heading.getClientRects().length || document.activeElement !== heading ||
+          document.documentElement.dataset.theme !== theme || !matchMedia(`(prefers-color-scheme: ${theme})`).matches ||
+          matchMedia("(prefers-reduced-motion: reduce)").matches !== motion ||
+          matchMedia("(prefers-reduced-transparency: reduce)").matches !== transparency) return false;
+      const transitionMs = Math.max(...getComputedStyle(close).transitionDuration.split(",")
+        .map(value => Number.parseFloat(value) * (value.trim().endsWith("ms") ? 1 : 1000)));
+      return {
+        foreground: getComputedStyle(heading).color,
+        backdrop: getComputedStyle(host).backdropFilter,
+        highlight: getComputedStyle(host, "::before").display,
+        transitionMs
+      };
+    }, { theme, motion, transparency });
+    try { return await handle.jsonValue(); } finally { await handle.dispose(); }
+  }
+  try {
+    const light = await inspect("light");
+    const dark = await inspect("dark");
+    const motion = await inspect("dark", true);
+    const transparency = await inspect("dark", false, true);
+    assert.notEqual(light.foreground, dark.foreground);
+    assert(dark.transitionMs > 0 && motion.transitionMs >= 0 && motion.transitionMs <= 0.01);
+    assert.notEqual(dark.backdrop, "none");
+    assert.notEqual(dark.highlight, "none");
+    assert.equal(motion.backdrop, dark.backdrop);
+    assert.equal(transparency.transitionMs, dark.transitionMs);
+    assert.equal(transparency.backdrop, "none");
+    assert.equal(transparency.highlight, "none");
+    return { lightAndDark: true, keyboardFocus: true, defaultTransitionMs: dark.transitionMs,
+      reducedTransitionMs: motion.transitionMs, backdropRemoved: true };
+  } finally {
+    try { await cdp.send("Emulation.setEmulatedMedia", { features: [] }); } finally { await cdp.detach(); }
+  }
+}
+
 async function runJourney(page, application, libraryRoot, candidate, record) {
   page.setDefaultTimeout(10_000);
   const observe = () => application.evaluate(() => globalThis[Symbol.for("studio.reader-review-check")].snapshot());
@@ -180,10 +228,13 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   assertGuards(initial);
   assert.equal(initial.catalogues + initial.preparations + initial.starts + initial.readerCredentialReads + initial.completionPosts, 0);
 
-  record.phase = "keyboard preparation and disclosure";
+  record.phase = "open reader with keyboard focus";
   const opener = exactButton("Open reader review");
   await activate(opener);
   await page.waitForFunction(() => document.activeElement?.hasAttribute("data-reader-review-heading"));
+  record.phase = "mounted reader theme and independent accessibility preferences";
+  record.appearance = await verifyAppearance(page);
+  record.phase = "keyboard preparation and disclosure";
   assert(await exactButton("Prepare review").isDisabled());
   await activate(page.getByRole("checkbox", { name: /Chapter 2: The arrival/ }), "Space");
   assert(await page.getByRole("checkbox", { name: /Chapter 2: The arrival/ }).isChecked());
@@ -332,7 +383,7 @@ async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5
 
 const result = {
   scenario: sample.scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
-  build: null, library: null, selection: null, startView: null, observations: null, guardDenials: 0,
+  build: null, library: null, selection: null, appearance: null, startView: null, observations: null, guardDenials: 0,
   childExit: null, childGroupEmpty: false, cleaned: false
 };
 let scratch;
