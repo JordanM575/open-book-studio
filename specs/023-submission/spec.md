@@ -3,7 +3,7 @@
 **Status:** In progress (2026-10-26)
 **Number:** 023
 **Depends on:** [021](../021-product-film/spec.md) film, [019](../019-illustrations/spec.md),
-[020](../020-sam-cutout/spec.md), [017](../017-voice-and-background/spec.md),
+[017](../017-voice-and-background/spec.md),
 [018](../018-agent-toolkit/spec.md), [022](../022-provider-compatibility/spec.md).
 
 ## Why
@@ -19,7 +19,7 @@ in a last-minute document on someone's desktop.
 | --- | --- |
 | Public repository | Apache-2.0, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`; no secrets or author data |
 | README | Problem, product, architecture, Meta models, setup, tests, and what was built during the event |
-| Sample library | `samples/the-salt-road` — original text, Story Bible, two chapters, an illustration and a cutout; opens in the app |
+| Sample library | `samples/the-salt-road` opens in the app with original text, Story Bible, two chapters, an illustration and an imported synthetic character figure |
 | Film | 3:00 master, 0:30 cut, 0:15 vertical, SRT and a public link |
 | Submission form | Indie Developer track, Build for Your World, solo, repository and video links |
 | Live demo | A fixture-only runbook with a recorded fallback if the provider is unavailable |
@@ -30,8 +30,8 @@ in a last-minute document on someone's desktop.
 - **FR-001** The submission MUST use the **Indie Developer** track and **Build for Your World**, solo.
 - **FR-002** The repository MUST be public at submission and contain no provider key, credential file,
   private library, personal path, email or author manuscript.
-- **FR-003** `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` MUST be present. The SAM License dependency
-  MUST be resolved or disclosed as in spec 020 FR-013.
+- **FR-003** `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` MUST be present and cover the shipped
+  dependencies. D-158 retired the Spec 020 cutout feature and its SAM dependency. [Decision record](../../docs/DECISIONS.md)
 - **FR-004** The README MUST state the problem, the product, the architecture, the Meta models used,
   how to install and run, how to run the tests, and a dated list of event-built features.
 - **FR-005** `samples/the-salt-road` MUST be original, open, complete and openable without an account.

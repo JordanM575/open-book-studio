@@ -10,8 +10,8 @@ post-submission update, not a replacement of the original event evidence.
 ## Phase 1 — Sample and packet
 
 - [x] T001 Commit `samples/the-salt-road` with the original two-chapter book, Story Bible, illustration
-  and cutout; no `.studio/`, `library.json` or personal data. Add `samples/README.md` with provenance
-  and the public-domain dedication.
+  and imported synthetic character figure. Keep `.studio/`, `library.json` and personal data out of
+  the sample. Add `samples/README.md` with provenance and the public-domain dedication.
 - [x] T002 Write `hackathon/SUBMISSION.md`: track/theme/solo entrant, product statement, event-built
   disclosure, Meta models, verification evidence and the form fields still to fill.
 - [x] T003 Map the judging rubric to the demo: impact, Meta tooling, technical depth and demo evidence.

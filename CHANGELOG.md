@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Submission sample
+- Record the sample's imported character figure and the licensing scope after the retirement of SAM cutouts.
+
 ### Workflow verification
 - Type-check authoring fixtures for extended records, invalidated task status and malformed question states.
 
