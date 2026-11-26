@@ -28,6 +28,14 @@ export interface BuildSigning {
 export interface BuildHost {
   platform: string;
   arch: string;
+  webCapabilities?: WebBuildCapabilities;
+}
+
+/** Passive API observations. Selecting a library or checking permissions belongs to the action. */
+export interface WebBuildCapabilities {
+  folderAccess: boolean;
+  browserStorage: boolean;
+  connectionStorage: boolean;
 }
 
 export interface BuildMetadata {
@@ -41,55 +49,76 @@ export interface BuildMetadata {
   arch: string;
 }
 
+type Availability = true | string;
+
+interface BrowserRequirement {
+  requires: keyof WebBuildCapabilities;
+  reason: string;
+}
+
 interface CapabilityRow {
   id: string;
   label: string;
-  desktop: boolean;
-  web: boolean;
-  reason?: string;
+  desktop: Availability;
+  web: Availability | BrowserRequirement;
 }
 
 /**
- * One capability table for both builds. A screen asks "is this available here?" instead of
- * scattering `isDesktop` checks, and About can explain every missing feature.
+ * Shared target declarations. The web host supplies passive observations for the capabilities
+ * that depend on an exposed browser API.
  */
 const CAPABILITIES: CapabilityRow[] = [
-  { id: "storage.folder", label: "Folder library", desktop: true, web: true },
+  {
+    id: "storage.folder",
+    label: "Folder library",
+    desktop: true,
+    web: {
+      requires: "folderAccess",
+      reason: "Opening a folder here requires a secure page and a browser folder picker. You can open a folder in the desktop app."
+    }
+  },
   {
     id: "storage.browser",
     label: "Browser storage",
-    desktop: false,
-    web: true,
-    reason: "Browser storage belongs to the web build. Use a folder library in the desktop app."
+    desktop: "Browser storage belongs to the web build. Use a folder library in the desktop app.",
+    web: {
+      requires: "browserStorage",
+      reason: "This browser needs site storage to keep a library here. Use a browser that offers it or open a folder in the desktop app."
+    }
   },
   { id: "archive", label: "Portable archive", desktop: true, web: true },
   {
     id: "export.docx",
     label: "Word export",
     desktop: true,
-    web: false,
-    reason: "Word export is available in the desktop app. Export an archive in the browser."
+    web: "Word export is available in the desktop app. Export an archive in the browser."
   },
   {
     id: "agent",
     label: "Writing agent",
     desktop: true,
-    web: false,
-    reason: "The browser build does not run the local agent host yet."
+    web: "Use the desktop app to run the writing agent."
   },
   {
     id: "providers.connections",
-    label: "Provider connections",
+    label: "Provider connection storage",
     desktop: true,
-    web: false,
-    reason: "The browser build has no provider credential vault yet."
+    web: {
+      requires: "connectionStorage",
+      reason: "Saving provider connections here requires browser site storage. Allow site storage or use the desktop app."
+    }
   },
   {
     id: "sync.review",
-    label: "Sync drift review",
-    desktop: false,
-    web: false,
-    reason: "The drift report interface is not built yet."
+    label: "Manual sync drift review",
+    desktop: true,
+    web: true
+  },
+  {
+    id: "sync.schedule",
+    label: "Drift check interval",
+    desktop: true,
+    web: "Set the check interval in the desktop app. Use Check for changes to review drift here."
   }
 ];
 
@@ -101,17 +130,26 @@ declare const __BUILD_COMMIT__: string | undefined;
 const DEV_VERSION = "0.0.0-dev";
 const UNKNOWN_COMMIT = "unknown";
 
-export function capabilitiesFor(target: BuildTarget): BuildCapability[] {
+/** Without host facts this lists what the target implements, for release records. */
+export function capabilitiesFor(target: BuildTarget, webCapabilities?: WebBuildCapabilities): BuildCapability[] {
   return CAPABILITIES.map((row) => {
-    const available = target === "desktop" ? row.desktop : row.web;
+    const availability = row[target];
+    let reason = typeof availability === "string" ? availability : undefined;
+    if (typeof availability === "object" && webCapabilities && !webCapabilities[availability.requires]) {
+      reason = availability.reason;
+    }
     return {
       id: row.id,
       label: row.label,
-      available,
-      ...(available ? {} : { reason: row.reason ?? "Not available in this build yet." })
+      available: reason === undefined,
+      ...(reason === undefined ? {} : { reason })
     };
   });
 }
+
+const UNOBSERVED_WEB_CAPABILITIES: WebBuildCapabilities = {
+  folderAccess: false, browserStorage: false, connectionStorage: false
+};
 
 export function buildMetadata(target: BuildTarget, host: BuildHost = { platform: "unknown", arch: "unknown" }): BuildMetadata {
   return {
@@ -119,7 +157,7 @@ export function buildMetadata(target: BuildTarget, host: BuildHost = { platform:
     version: typeof __BUILD_VERSION__ === "undefined" ? DEV_VERSION : __BUILD_VERSION__,
     commit: typeof __BUILD_COMMIT__ === "undefined" ? UNKNOWN_COMMIT : __BUILD_COMMIT__,
     schemaVersion: SCHEMA_VERSION,
-    capabilities: capabilitiesFor(target),
+    capabilities: capabilitiesFor(target, target === "web" ? host.webCapabilities ?? UNOBSERVED_WEB_CAPABILITIES : undefined),
     // Unsigned on every target until D-115 is accepted.
     signing: { status: "unsigned" },
     platform: host.platform,

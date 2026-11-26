@@ -9,6 +9,8 @@ const registered = typeof document === "undefined";
 if (registered) GlobalRegistrator.register({ url: "http://localhost" });
 await import("fake-indexeddb/auto");
 const { BrowserCredentialVault } = await import("../../src/storage/credentials");
+const { BrowserLibraries } = await import("../../src/runtime/browser-libraries");
+const { createBrowserStudioApi } = await import("../../src/runtime/browser-api");
 const { OPENROUTER_PKCE_KEY, cancelOpenRouterFlow, handleOpenRouterCallback, startOpenRouterFlow } = await import(
   "../../src/runtime/openrouter"
 );
@@ -189,6 +191,48 @@ describe("browser OpenRouter sign-in", () => {
     cancelOpenRouterFlow();
 
     await expect(flow).rejects.toMatchObject({ message: "Sign-in cancelled." });
+  });
+
+  test("a storage check refusal stops sign-in before the preparing popup opens", async () => {
+    const studio = createBrowserStudioApi(new BrowserLibraries());
+    const digestStarted = deferred<void>();
+    const digestResult = deferred<ArrayBuffer>();
+    const digest = spyOn(crypto.subtle, "digest").mockImplementationOnce(async () => {
+      digestStarted.resolve();
+      return digestResult.promise;
+    });
+    const put = spyOn(IDBObjectStore.prototype, "put").mockImplementationOnce(() => {
+      throw new DOMException("Denied", "QuotaExceededError");
+    });
+    const open = spyOn(window, "open").mockReturnValue(null);
+    try {
+      const attempt = studio.connections.startOpenRouter();
+      await digestStarted.promise;
+      expect(open).not.toHaveBeenCalled();
+
+      expect(await studio.connections.check()).toMatchObject({ ok: true, data: { available: false } });
+      expect(await studio.connections.check()).toMatchObject({ ok: true, data: { available: true } });
+      digestResult.resolve(new ArrayBuffer(32));
+      const refused = await attempt;
+      expect(open).not.toHaveBeenCalled();
+      expect(refused).toMatchObject({
+        ok: false,
+        error: { code: "unsupported", message: expect.stringContaining("Origin storage refused the check") }
+      });
+      expect(sessionStorage.getItem(OPENROUTER_PKCE_KEY)).toBeNull();
+
+      expect(await studio.connections.startOpenRouter()).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining("browser blocked") }
+      });
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      digestResult.resolve(new ArrayBuffer(32));
+      cancelOpenRouterFlow();
+      digest.mockRestore();
+      put.mockRestore();
+      open.mockRestore();
+    }
   });
 
   test("a state mismatch consumes the request, scrubs the callback and writes nothing", async () => {

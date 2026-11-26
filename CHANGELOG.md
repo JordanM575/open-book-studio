@@ -7,6 +7,12 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Browser storage and capabilities
+- Bound the browser persistence wait so site storage can open with an unconfirmed-persistence warning.
+- Show the folder, site storage and connection storage APIs exposed by the browser in About. Explain browser connection custody and distinguish manual sync review from the desktop interval.
+- Confirm storage access before browser sign-in and retire a preparing sign-in when an explicit storage check refuses access.
+- Verify site storage in isolated Chromium, Firefox and WebKit fixtures with CSP-safe validation and preserve the original diagnostic if artifact capture fails.
+
 ### Repository verification
 - Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.
 - Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.

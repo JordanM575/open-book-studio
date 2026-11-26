@@ -58,7 +58,7 @@ export async function openBrowserLibrary(
    */
   const libraries = await recover(root.getDirectoryHandle(LIBRARIES, { create: true }), timeout, failed);
   const handle = await recover(libraries.getDirectoryHandle(libraryId, { create: true }), timeout, failed);
-  const persistence = await requestPersistence();
+  const persistence = await requestPersistence(timeout);
   const port = new DirectoryHandleLibraryPort(handle, { lock: webLock, deviceName: "This browser" });
   return {
     libraryId,
@@ -74,10 +74,12 @@ export async function openBrowserLibrary(
   };
 }
 
-export async function requestPersistence(): Promise<StoragePersistence> {
-  if (!navigator.storage?.persist) return "not-supported";
+export async function requestPersistence(timeoutMs = OPEN_TIMEOUT_MS): Promise<StoragePersistence> {
+  if (typeof navigator.storage?.persist !== "function") return "not-supported";
   try {
-    return (await navigator.storage.persist()) ? "granted" : "not-granted";
+    // The directory can be usable while the browser leaves its persistence request pending.
+    const confirmed = await within(navigator.storage.persist(), timeoutMs, new Error("The storage persistence request timed out."));
+    return confirmed ? "granted" : "not-granted";
   } catch {
     return "not-granted";
   }

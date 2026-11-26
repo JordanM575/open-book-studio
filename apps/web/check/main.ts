@@ -1,3 +1,4 @@
+import "./csp-validation";
 import { createLibraryArchive } from "@ai-book-studio/core/archive/export";
 import { archiveSourceFromBytes, importLibraryArchive } from "@ai-book-studio/core/archive/import";
 import { LibraryService } from "@ai-book-studio/core/library/service";

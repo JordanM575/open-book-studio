@@ -20,6 +20,7 @@ const ACTIVE_PREFIX = "ai-book-studio.openrouter.active.";
 
 interface ActivePopup {
   cancel: () => void;
+  refuseBeforeOpen: (error: ProviderError) => void;
 }
 
 let active: ActivePopup | null = null;
@@ -84,6 +85,9 @@ export function startOpenRouterFlow(): Promise<ConnectionSummary> {
     };
 
     const session: ActivePopup = {
+      refuseBeforeOpen: (error) => {
+        if (!popup) finish(error);
+      },
       cancel: () => {
         if (cancelling) return;
         let status: string | null = null;
@@ -142,6 +146,11 @@ export function startOpenRouterFlow(): Promise<ConnectionSummary> {
 
 export function cancelOpenRouterFlow(): void {
   active?.cancel();
+}
+
+/** Invalidate a preparing sign-in when the explicit storage check refuses it. */
+export function refuseOpenRouterBeforePopup(error: ProviderError): void {
+  active?.refuseBeforeOpen(error);
 }
 
 /**

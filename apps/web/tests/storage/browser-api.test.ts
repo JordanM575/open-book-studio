@@ -1,9 +1,10 @@
 import "fake-indexeddb/auto";
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { Result, StudioApi } from "@ai-book-studio/core/ipc";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
 import { createBrowserStudioApi } from "../../src/runtime/browser-api";
 import { BrowserLibraries } from "../../src/runtime/browser-libraries";
+import { BrowserCredentialVault } from "../../src/storage/credentials";
 import { FakeDirectory } from "./support/fake-directory";
 
 /**
@@ -74,6 +75,152 @@ function refusal(result: Result<unknown>): string {
 }
 
 describe("before a library is open", () => {
+  test("cancels sign-in before a pending storage preflight returns", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const ready = Promise.withResolvers<Awaited<ReturnType<BrowserCredentialVault["status"]>>>();
+    const status = spyOn(BrowserCredentialVault.prototype, "status").mockImplementation(() => ready.promise);
+    let popupAttempts = 0;
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      addEventListener() {}, open() { popupAttempts++; return null; }
+    } });
+    try {
+      const studio = createBrowserStudioApi(new BrowserLibraries());
+      const signIn = studio.connections.startOpenRouter();
+      expect(status).toHaveBeenCalledTimes(1);
+      expect(value(await studio.connections.cancelOpenRouter())).toBeNull();
+      expect(await signIn).toMatchObject({ ok: false, error: { message: "Sign-in cancelled." } });
+      ready.resolve({ available: true, backend: "Browser origin storage", connections: 0, detail: "" });
+      await ready.promise;
+      expect(popupAttempts).toBe(0);
+    } finally {
+      status.mockRestore();
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("blocks sign-in after a storage write refusal even if metadata counts still work", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const transaction = IDBDatabase.prototype.transaction;
+    let refuseWriteMode = true;
+    const transactions = spyOn(IDBDatabase.prototype, "transaction").mockImplementation(function (this: IDBDatabase, names, mode, options) {
+      if (refuseWriteMode && mode === "readwrite") throw new DOMException("Denied", "SecurityError");
+      return transaction.call(this, names, mode, options);
+    });
+    let popupAttempts = 0;
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {
+      addEventListener() {}, open() { popupAttempts++; return null; }
+    } });
+    try {
+      const studio = createBrowserStudioApi(new BrowserLibraries());
+      expect(value(await studio.connections.list())).toEqual([]);
+      expect(value(await studio.connections.status()).available).toBe(false);
+      expect(await studio.connections.startOpenRouter()).toMatchObject({ ok: false, error: { code: "unsupported" } });
+      expect(value(await studio.connections.check()).available).toBe(false);
+      refuseWriteMode = false;
+      expect(value(await studio.connections.status()).available).toBe(false);
+      expect(await studio.connections.startOpenRouter()).toMatchObject({ ok: false, error: { code: "unsupported" } });
+      expect(value(await studio.connections.check())).toMatchObject({ available: true, connections: 0 });
+      expect(value(await studio.connections.status()).available).toBe(true);
+      expect(popupAttempts).toBe(0);
+    } finally {
+      transactions.mockRestore();
+      if (descriptor) Object.defineProperty(globalThis, "window", descriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+    }
+  });
+
+  test("waits for the storage transaction to settle after its count succeeds", async () => {
+    const count = IDBObjectStore.prototype.count;
+    let abortCount = true;
+    const counts = spyOn(IDBObjectStore.prototype, "count").mockImplementation(function (this: IDBObjectStore, query) {
+      const request = count.call(this, query);
+      if (abortCount) request.addEventListener("success", () => this.transaction.abort(), { once: true });
+      return request;
+    });
+    try {
+      const studio = createBrowserStudioApi(new BrowserLibraries());
+      expect(value(await studio.connections.status()).available).toBe(false);
+      expect(await studio.connections.startOpenRouter()).toMatchObject({ ok: false, error: { code: "unsupported" } });
+      expect(value(await studio.connections.check()).available).toBe(false);
+      abortCount = false;
+      expect(value(await studio.connections.status()).available).toBe(false);
+      expect(value(await studio.connections.check()).available).toBe(true);
+    } finally {
+      counts.mockRestore();
+    }
+  });
+
+  test("a browser that denies IndexedDB reports live refusal and cannot open a provider sign-in", async () => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const indexedDbDescriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+    let opened = 0;
+    try {
+      Object.defineProperty(globalThis, "window", { configurable: true, value: {
+        addEventListener() {},
+        open() { opened++; throw new Error("Unexpected sign-in popup"); }
+      } });
+      Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: {
+        open() { throw new DOMException("Denied", "SecurityError"); }
+      } });
+      const studio = createBrowserStudioApi(new BrowserLibraries());
+      expect(value(await studio.connections.available())).toBe(true);
+      const status = value(await studio.connections.status());
+      expect(status).toMatchObject({ available: false, backend: "Browser origin storage" });
+      expect(status.detail).toContain("Allow site data");
+      expect(value(await studio.connections.check()).available).toBe(false);
+      expect(await studio.connections.startOpenRouter()).toMatchObject({ ok: false, error: { code: "unsupported" } });
+      expect(opened).toBe(0);
+    } finally {
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (indexedDbDescriptor) Object.defineProperty(globalThis, "indexedDB", indexedDbDescriptor);
+      else Reflect.deleteProperty(globalThis, "indexedDB");
+    }
+  });
+
+  test("About observes browser capabilities without opening storage or asking for permission", async () => {
+    const picker = { calls: 0 };
+    const origin = { calls: 0 };
+    const database = { calls: 0 };
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const indexedDbDescriptor = Object.getOwnPropertyDescriptor(globalThis, "indexedDB");
+    const browserWindow = {
+      addEventListener() {},
+      showDirectoryPicker: () => { picker.calls++; throw new Error("Unexpected folder picker"); }
+    };
+    const storage = { getDirectory: () => { origin.calls++; throw new Error("Unexpected origin storage"); } };
+    try {
+      Object.defineProperty(globalThis, "window", { configurable: true, value: browserWindow });
+      Object.defineProperty(globalThis, "isSecureContext", { configurable: true, value: true });
+      Object.defineProperty(globalThis, "indexedDB", {
+        configurable: true, value: { open: () => { database.calls++; throw new Error("Unexpected database access"); } }
+      });
+      globals.navigator = { storage };
+      const studio = createBrowserStudioApi(new BrowserLibraries());
+      const available = async (id: string) => value(await studio.app.info()).capabilities.find((entry) => entry.id === id)?.available;
+      expect(await available("storage.folder")).toBe(true);
+      expect(await available("storage.browser")).toBe(true);
+      expect(await available("providers.connections")).toBe(true);
+      expect(await available("agent")).toBe(false);
+      expect(await available("sync.review")).toBe(true);
+      expect(await available("sync.schedule")).toBe(false);
+
+      Object.defineProperty(globalThis, "isSecureContext", { configurable: true, value: false });
+      expect(await available("storage.folder")).toBe(false);
+      globals.navigator = { storage: { getDirectory: {} } };
+      Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: { open: undefined } });
+      expect(await available("storage.browser")).toBe(false);
+      expect(await available("providers.connections")).toBe(false);
+      expect([picker.calls, origin.calls, database.calls]).toEqual([0, 0, 0]);
+    } finally {
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (indexedDbDescriptor) Object.defineProperty(globalThis, "indexedDB", indexedDbDescriptor);
+      else Reflect.deleteProperty(globalThis, "indexedDB");
+    }
+  });
+
   test("nothing is open, and using a book says what to do first", async () => {
     const studio = createBrowserStudioApi(new BrowserLibraries());
     expect(value(await studio.library.current())).toBeNull();
