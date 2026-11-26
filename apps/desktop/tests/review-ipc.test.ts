@@ -131,8 +131,8 @@ describe("registered readerReview:request channel and actual preload", () => {
     expect(calls).toHaveLength(before);
   });
 
-  const redactionMarker = "TESTONLYREDACTIONMATERIAL".repeat(2);
-  const redactionToken = ["sk", "or-v1", redactionMarker].join("-");
+  const redactionMarker = "TESTONLYREDACTIONMATERIAL";
+  const redactionToken = ["sk", "or-v1", redactionMarker.repeat(2)].join("-");
 
   test("service failures are redacted at the IPC boundary", async () => {
     const secret = redactionToken;
