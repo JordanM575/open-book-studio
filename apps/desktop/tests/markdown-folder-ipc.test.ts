@@ -1,5 +1,5 @@
-import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IPC, type MarkdownFolderCaptureResult, type MarkdownFolderPublishOutcome, type Result } from "@ai-book-studio/core/ipc";
@@ -8,6 +8,7 @@ import { DraftBuffer } from "../src/main/drafts";
 import { Library } from "../src/main/library/store";
 import { RecoveryStore } from "../src/main/recovery";
 import { mockElectron } from "./support/mock-electron";
+import { treeFingerprint } from "./support/tree-fingerprint";
 
 /*
  * Spec 035 T014-U transport: the Markdown folder channels through `registerIpc` with a real
@@ -40,11 +41,15 @@ afterAll(() => {
   mockElectron(tmpdir());
 });
 
-const savedEnv = process.env.STUDIO_EXPORT_PATH;
+let savedExportPath: string | undefined;
 const cleanups: string[] = [];
+beforeEach(() => {
+  savedExportPath = process.env.STUDIO_EXPORT_PATH;
+  delete process.env.STUDIO_EXPORT_PATH;
+});
 afterEach(async () => {
-  if (savedEnv === undefined) delete process.env.STUDIO_EXPORT_PATH;
-  else process.env.STUDIO_EXPORT_PATH = savedEnv;
+  if (savedExportPath === undefined) delete process.env.STUDIO_EXPORT_PATH;
+  else process.env.STUDIO_EXPORT_PATH = savedExportPath;
   answers.open.length = 0;
   askedOpen.length = 0;
   await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })));
@@ -159,10 +164,39 @@ describe("markdown folder IPC journey", () => {
     });
     expect(outcome.status).toBe("published");
     if (outcome.status !== "published") throw new Error("expected published outcome");
-    expect(outcome.destinationPath).toBe(join(parent, "the-salt-road-markdown"));
+    expect(outcome.destinationPath).toBe(join(await realpath(parent), "the-salt-road-markdown"));
     expect(outcome.files).toContain("README.md");
     expect(await readFile(join(outcome.destinationPath, "README.md"), "utf8")).toContain("Reading order");
     expect(askedOpen[0]).toEqual(expect.objectContaining({ title: "Choose where to put the Markdown folder" }));
+  });
+
+  test("publishing an image-free Markdown folder preserves the whole source tree", async () => {
+    const { root, library } = await setup();
+    const bookId = await bookWithLegacy(library);
+    const before = await treeFingerprint(root);
+    const capture = await data<MarkdownFolderCaptureResult>(IPC.books.exportMarkdownFolderCapture, bookId);
+    if (capture.status !== "ready") throw new Error("expected ready capture");
+    const parent = await temp("studio-md-folder-ipc-image-free-");
+    const folderName = capture.suggestedFolderName;
+    const destinationPath = join(await realpath(parent), folderName);
+    const chapterFile = "0002-chapter.md";
+    answers.open.push({ canceled: false, filePaths: [parent] });
+    const outcome = await data<MarkdownFolderPublishOutcome>(IPC.books.exportMarkdownFolderPublish, {
+      bookId,
+      attemptId: capture.attemptId,
+      folderName
+    });
+
+    expect(outcome).toEqual({
+      status: "published",
+      destinationPath,
+      files: ["README.md", "0001-title.md", chapterFile],
+      warnings: []
+    });
+    expect(await readFile(join(destinationPath, chapterFile), "utf8")).toBe("# The Tide\n\nThe salt road was under water.\n");
+    expect(await readdir(join(destinationPath, "images"))).toEqual([]);
+    expect(await readdir(parent)).toEqual([folderName]);
+    expect(await treeFingerprint(root)).toEqual(before);
   });
 
   test("a renderer-supplied destination or override is refused and publishes nothing", async () => {
@@ -238,7 +272,7 @@ describe("markdown folder IPC journey", () => {
     });
     expect(outcome.status).toBe("published");
     if (outcome.status !== "published") throw new Error("expected published outcome");
-    expect(outcome.destinationPath).toBe(join(parent, "Second Crossing"));
+    expect(outcome.destinationPath).toBe(join(await realpath(parent), "Second Crossing"));
     expect(askedOpen.at(-1)).toEqual(
       expect.objectContaining({ message: "The folder “Second Crossing” will be created in the folder you choose." })
     );
