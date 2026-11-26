@@ -56,6 +56,7 @@ Update the `Unreleased` section before every commit.
 - Wait for the prior review dialog to close before reopening the report. Capture the displayed review status if exact evidence navigation stalls.
 
 ### Chapter history
+- Check that a held draft blocks chapter snapshot capture while history compares the two saved revisions. Keep the draft held until capture replies, then verify the saved chapter and history are unchanged.
 - Open the selected chapter's history directly from the desktop toolbar.
 - Verify the visible toolbar action and the exact captured record for the selected chapter in hidden smoke.
 - Verify that opening and comparing the captured snapshot shows the exact saved text, focuses the detail heading, and leaves the chapter revision intact.

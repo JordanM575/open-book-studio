@@ -1388,6 +1388,71 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       return `snapshot version ${source.version} and current version ${current.version}, literal bodies, visible marked difference, focused details, and unchanged current revision`;
     });
 
+    let captureUnconfirmed = false;
+    await check("chapter history compares saved text while a synthetic draft is held", async () => {
+      if (!historySnapshot || !historyAutosave) throw new Error("the fixture snapshot or checked autosave is missing");
+      const { chapter: source } = historySnapshot;
+      const current = historyAutosave;
+      const scope = { bookId: historyBookId, chapterId: historyChapterId };
+      const library = studio.requireLibrary();
+      const before = await library.readChapter(scope.bookId, scope.chapterId);
+      if (before.version !== current.version || before.hash !== current.hash) {
+        throw new Error("the chapter no longer matches the checked autosave");
+      }
+      const historyBefore = JSON.stringify(await library.listChapterHistory(scope));
+      const holdsDraft = () => studio.drafts.holds(scope.bookId, scope.chapterId);
+      if (holdsDraft()) throw new Error("the fixture chapter already has a held draft");
+      const draft = {
+        ...scope,
+        content: `${current.content}\nA synthetic held draft that must stay out of history.\n`,
+        baseVersion: current.version,
+        baseHash: current.hash
+      };
+      let checkFailure: { error: unknown } | undefined;
+      try {
+        // Hold a copy in the host buffer while the mounted editor stays on the saved revision.
+        studio.drafts.set(draft);
+        if (!holdsDraft()) throw new Error("the synthetic draft was not held");
+        const request = {
+          ...scope,
+          label: "Held-draft smoke snapshot",
+          source: { status: "saved", version: current.version, hash: current.hash }
+        };
+        captureUnconfirmed = true;
+        // The launcher bounds this write-capable request. A local timeout could leave capture queued.
+        const refused: unknown = await win.webContents.executeJavaScript(`(async () => {
+          const result = await window.studio.history.capture(${JSON.stringify(request)});
+          return !result.ok && result.error.code === "saved-source-required";
+        })()`, true);
+        if (typeof refused !== "boolean") throw new Error("the capture result was not confirmed by the renderer");
+        captureUnconfirmed = false;
+        if (!refused) throw new Error("capture did not return saved-source-required for the held draft");
+        if (!holdsDraft()) throw new Error("capture released the held draft");
+        await browseChapterHistory(historySnapshot, current, current.content.slice(source.content.length));
+        if (!holdsDraft()) throw new Error("browsing or comparing history released the held draft");
+      } catch (error) {
+        checkFailure = { error };
+      }
+      if (!captureUnconfirmed) {
+        studio.drafts.release(draft);
+        if (holdsDraft()) throw new Error("the fixture chapter still has a held draft after cleanup");
+        const historyAfter = JSON.stringify(await library.listChapterHistory(scope));
+        const after = await library.readChapter(scope.bookId, scope.chapterId);
+        if (historyAfter !== historyBefore) {
+          throw new Error("the held-draft capture or comparison changed the history listing");
+        }
+        if (after.version !== before.version || after.hash !== before.hash) {
+          throw new Error("the held-draft check changed the saved chapter");
+        }
+      }
+      if (checkFailure) {
+        throw checkFailure.error;
+      }
+      return "capture refused with saved-source-required, mounted comparison showed only saved text, history and saved revision matched after release";
+    });
+    // Without an IPC acknowledgement, retain the hold and finish the failed run before any flush.
+    if (captureUnconfirmed) return;
+
     await check("undo survives a chapter switch", async () => {
       const rows = await evaluate<string[]>(
         win,
