@@ -14,6 +14,7 @@ Update the `Unreleased` section before every commit.
 - Type-check authoring fixtures for extended records, invalidated task status and malformed question states.
 
 ### Browser storage and capabilities
+- Document browser storage, archive transfer, sign-in and the desktop execution boundary.
 - Bound the browser persistence wait so site storage can open with an unconfirmed-persistence warning.
 - Show the folder, site storage and connection storage APIs exposed by the browser in About. Explain browser connection custody and distinguish manual sync review from the desktop interval.
 - Confirm storage access before browser sign-in and retire a preparing sign-in when an explicit storage check refuses access.
