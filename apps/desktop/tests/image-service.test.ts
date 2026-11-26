@@ -6,14 +6,9 @@ import { ImageService } from "../src/main/images";
 
 const KEY = "meta-image-key-123456";
 
-function png(): Uint8Array {
-  return new Uint8Array(
-    Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lK3Q6wAAAABJRU5ErkJggg==",
-      "base64"
-    )
-  );
-}
+// Complete synthetic 1x1 PNG from docx-intake-validation.test.ts.
+const TINY_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 function credential(provider: StoredCredential["provider"] = "meta"): StoredCredential {
   return {
@@ -37,13 +32,15 @@ function service(fetchImpl: typeof fetch, stored: StoredCredential[] = [credenti
 }
 
 describe("ImageService", () => {
-  test("posts the Muse Image request and returns real bytes", async () => {
+  test("posts one Muse Image request and returns the fixture bytes and usage", async () => {
+    let calls = 0;
     const captured: { url?: string; init?: RequestInit | undefined } = {};
     const fetchImpl = (async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      calls += 1;
       captured.url = String(url);
       captured.init = init;
       return Response.json({
-        data: [{ b64_json: Buffer.from(png()).toString("base64") }],
+        data: [{ b64_json: TINY_PNG_BASE64 }],
         output_format: "png",
         usage: { input_tokens: 10, output_tokens: 20 }
       });
@@ -57,12 +54,16 @@ describe("ImageService", () => {
       costUsd: 0.01,
       connectionLabel: "Meta"
     });
+    expect(result.bytes).toEqual(new Uint8Array(Buffer.from(TINY_PNG_BASE64, "base64")));
     expect(result.inspection).toMatchObject({ format: "png", width: 1, height: 1 });
+    expect(result.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
+    expect(calls).toBe(1);
     expect(captured.url).toBe("https://api.meta.ai/v1/images/generations");
     const init = captured.init;
     if (!init) throw new Error("the provider was never called");
+    expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>).authorization).toBe(`Bearer ${KEY}`);
-    expect(JSON.parse(String(captured.init?.body))).toMatchObject({
+    expect(JSON.parse(String(init.body))).toMatchObject({
       model: "muse-image-1.0",
       prompt: "a lighthouse",
       n: 1,
