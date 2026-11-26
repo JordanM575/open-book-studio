@@ -10,6 +10,7 @@ Update the `Unreleased` section before every commit.
 ### Repository verification
 - Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.
 - Generate synthetic reader IPC redaction values at runtime and check for partial marker leaks.
+- Drive the Markdown folder collision test at the staging-complete boundary.
 
 ### Browser reader verification
 - Settle workspace startup reads before measuring the unsupported reader control's side effects.
