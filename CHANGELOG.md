@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Glasses companion
+- Register assistant tools from the book catalog's read and non-destructive write tiers and verify the same boundary in the mounted check.
+
 ### Submission sample
 - Record the sample's imported character figure and the licensing scope after the retirement of SAM cutouts.
 

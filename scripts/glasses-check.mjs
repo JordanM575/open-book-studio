@@ -186,6 +186,16 @@ check(
  */
 const assistant = await browser.newPage({ viewport: { width: 600, height: 600 } });
 const assistantErrors = [];
+const glassesOrigin = new URL(glassesUrl).origin;
+let toolCatalogResponse;
+assistant.on("response", (response) => {
+  const { origin, pathname } = new URL(response.url());
+  if (origin === glassesOrigin &&
+      pathname === "/v1/books/book_glass0001/tools" &&
+      response.ok() && response.request().method() === "GET") {
+    toolCatalogResponse = response;
+  }
+});
 assistant.on("console", (message) => {
   if (message.type() === "error") assistantErrors.push(message.text());
 });
@@ -204,6 +214,9 @@ await assistant.addInitScript(() => {
 await assistant.goto(glassesUrl, { waitUntil: "networkidle" });
 await assistant.waitForTimeout(700);
 
+const toolCatalog = await toolCatalogResponse?.json().catch(() => null);
+const catalogTiers = new Map((Array.isArray(toolCatalog?.tools) ? toolCatalog.tools : [])
+  .map((tool) => [tool.name, tool.tier]));
 const registered = await assistant.evaluate(() =>
   (window.__tools ?? []).map((tool) => ({
     name: tool.name,
@@ -229,10 +242,12 @@ check(
   })()
 );
 check(
-  "the destructive tools are not offered to an assistant",
-  !["overwrite_chapter", "delete_chapter", "remove_memory", "merge_chapters"].some((name) =>
-    names.includes(name)
-  )
+  "the assistant only receives read and non-destructive write tools",
+  [...catalogTiers.values()].includes("destructive") && registered.every(({ name, annotations }) => {
+    const tier = catalogTiers.get(name);
+    return (tier === "read" || tier === "write") &&
+      annotations?.readOnlyHint === (tier === "read") && annotations?.consequentialHint === false;
+  })
 );
 check(
   "every tool carries a schema and an executable handler",
