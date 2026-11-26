@@ -98,6 +98,70 @@ async function saveFailureArtifacts(name, capture) {
   }
 }
 
+const twoTabCheckName = "two tabs serialize requests with Web Locks";
+
+async function queueTabLock(page, name, hold) {
+  await page.evaluate(({ name, hold }) => {
+    let release = () => {};
+    const gate = hold ? new Promise((resolve) => { release = resolve; }) : Promise.resolve();
+    const state = { entries: 0, completed: false, error: null, release };
+    window.browserMatrixLockState = state;
+    void window.browserMatrixWebLock(name, async () => {
+      state.entries += 1;
+      await gate;
+    }).then(
+      () => { state.completed = true; },
+      (error) => { state.error = error instanceof Error ? error.message : String(error); }
+    );
+  }, { name, hold });
+}
+
+async function checkTwoTabLocks(page, peer) {
+  const tabs = [page, peer];
+  const key = "check:two-tabs";
+  const wait = { polling: 50, timeout: 5_000 };
+  try {
+    const supported = await Promise.all(tabs.map((tab) => tab.evaluate(() =>
+      typeof navigator.locks?.query === "function" && typeof window.browserMatrixWebLock === "function"
+    )));
+    if (!supported.every(Boolean)) throw new Error("Both tabs must expose Web Locks and the fixture adapter.");
+
+    await queueTabLock(page, key, true);
+    await page.waitForFunction(() => window.browserMatrixLockState.entries === 1, null, wait);
+    await queueTabLock(peer, key, false);
+    await page.waitForFunction(async (name) => {
+      const { held, pending } = await navigator.locks.query();
+      return held.some((lock) => lock.name === name && lock.mode === "exclusive") &&
+        pending.some((lock) => lock.name === name && lock.mode === "exclusive");
+    }, `ai-book-studio:${key}`, wait);
+
+    const peerWaiting = await peer.evaluate(() => {
+      const state = window.browserMatrixLockState;
+      return state.entries === 0 && !state.completed && state.error === null;
+    });
+    if (!peerWaiting) throw new Error("The second tab entered while the first held the lock.");
+
+    await page.evaluate(() => window.browserMatrixLockState.release());
+    for (const tab of tabs) {
+      await tab.waitForFunction(() => {
+        const state = window.browserMatrixLockState;
+        return state.completed || state.error !== null;
+      }, null, wait);
+      const state = await tab.evaluate(() => {
+        const { entries, completed, error } = window.browserMatrixLockState;
+        return { entries, completed, error };
+      });
+      if (state.error !== null) throw new Error(state.error);
+      if (!state.completed || state.entries !== 1) throw new Error("Each tab must complete the lock callback once.");
+    }
+    return { name: twoTabCheckName, ok: true, detail: "second tab waited for the first to release the lock" };
+  } catch (error) {
+    return { name: twoTabCheckName, ok: false, detail: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await page.evaluate(() => window.browserMatrixLockState?.release()).catch(() => {});
+  }
+}
+
 async function checkEngine(name, context) {
   const page = context.pages()[0] ?? await context.newPage();
   const capture = await capturePage(page);
@@ -120,6 +184,11 @@ async function checkEngine(name, context) {
 
     const originCheck = checks.find((check) => check.name.includes("origin storage opens"));
     let restartCheck;
+    let twoTabCheck = {
+      name: twoTabCheckName,
+      detail: "skipped: second fixture page unavailable",
+      ok: false
+    };
     if (originCheck && !originCheck.ok) {
       restartCheck = {
         name: "OPFS survives a page restart",
@@ -150,6 +219,7 @@ async function checkEngine(name, context) {
         );
         restartCheck = found[0];
         if (!restartCheck) throw new Error("The restart page produced no check.");
+        twoTabCheck = await checkTwoTabLocks(page, restartPage);
       } catch (error) {
         restartCheck = {
           name: "OPFS survives a page restart",
@@ -162,10 +232,10 @@ async function checkEngine(name, context) {
         await restartPage.close();
       }
     }
-    checks.push(restartCheck);
-    console.log(
-      `[matrix] ${name} ${restartCheck.ok ? "ok  " : "FAIL"} ${restartCheck.name} — ${restartCheck.detail}`
-    );
+    checks.push(restartCheck, twoTabCheck);
+    for (const check of [restartCheck, twoTabCheck]) {
+      console.log(`[matrix] ${name} ${check.ok ? "ok  " : "FAIL"} ${check.name} — ${check.detail}`);
+    }
 
     if (errors.length > 0) {
       for (const error of errors) console.error(`[matrix] ${name} page error: ${error}`);
