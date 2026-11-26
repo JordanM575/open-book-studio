@@ -171,7 +171,7 @@ describe("projectInvalidatedTasks", () => {
     expect(JSON.stringify(keys)).toBe(before.keys);
     expect(JSON.stringify(direction)).toBe(before.direction);
     expect(JSON.stringify(digests)).toBe(before.digests);
-    expect(root.status).toBe("ready");
+    expect(Object.getOwnPropertyDescriptor(root, "status")?.value).toBe("ready");
     expect(root.retryAllowed).toBe(false);
     expect(root.revision).toBe(5);
 

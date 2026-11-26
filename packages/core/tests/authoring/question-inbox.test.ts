@@ -234,7 +234,7 @@ describe("projectQuestionInbox", () => {
     expect(inbox.questions[9_999]!.irreversibleChoice).toBe(false);
     expect(Object.hasOwn(inbox.questions[0]!, "irreversibleChoice")).toBe(false);
 
-    const refused = full.slice();
+    const refused: unknown[] = full.slice();
     refused[10] = { id: "q0010", state: "later" };
     expect(() => projectQuestionInbox(refused, owner)).toThrow("unknown-question-state");
   });

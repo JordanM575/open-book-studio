@@ -7,6 +7,9 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Workflow verification
+- Type-check authoring fixtures for extended records, invalidated task status and malformed question states.
+
 ### Browser storage and capabilities
 - Bound the browser persistence wait so site storage can open with an unconfirmed-persistence warning.
 - Show the folder, site storage and connection storage APIs exposed by the browser in About. Explain browser connection custody and distinguish manual sync review from the desktop interval.

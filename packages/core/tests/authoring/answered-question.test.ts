@@ -217,7 +217,7 @@ describe("projectAnsweredQuestion", () => {
     expect(fromNested.record).not.toBe(nestedRecord);
     expect(fromNested.state).toBe("answered");
     expect(nested.state).toBe("open");
-    expect(nested.record).toBe(nestedRecord);
+    expect(Object.getOwnPropertyDescriptor(nested, "record")?.value).toBe(nestedRecord);
   });
 
   test("lets the existing check refuse before the timestamp or digest is read", () => {
