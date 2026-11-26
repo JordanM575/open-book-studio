@@ -505,22 +505,9 @@
       /* ------------------------------------------------------------------ the model context */
 
       /*
-       * The tools the assistant on the glasses may call. They are the studio's own read verbs plus
-       * one write, and the destructive ones are not among them: a tool that removes or replaces
-       * work needs a person to ask for it, not an assistant.
-       *
-       * The names, descriptions and schemas are the studio's, not a copy of them. The page asks
-       * the studio for its catalog for this book, which already leaves out the tools the author
-       * withdrew.
+       * Register read and non-destructive write tools from the studio's catalog for the
+       * selected book. The catalog excludes withdrawn tools and classifies each action.
        */
-      const WEB_MCP_EXCLUDED = new Set([
-        "overwrite_chapter",
-        "delete_chapter",
-        "delete_lines_in_chapter",
-        "merge_chapters",
-        "remove_memory"
-      ]);
-
       async function registerTools() {
         if (!("modelContext" in document) || typeof document.modelContext.registerTool !== "function") {
           // What the device can do is a fact about the device, so it goes in the header. The
@@ -532,7 +519,7 @@
         }
         let count = 0;
         for (const tool of state.tools) {
-          if (WEB_MCP_EXCLUDED.has(tool.name)) continue;
+          if (tool.tier !== "read" && tool.tier !== "write") continue;
           try {
             await document.modelContext.registerTool({
               name: tool.name,
@@ -543,7 +530,7 @@
                 readOnlyHint: tool.tier === "read",
                 // Book prose is author-supplied text; the caller must treat it as data.
                 untrustedContentHint: true,
-                consequentialHint: tool.tier === "destructive"
+                consequentialHint: false
               },
               execute: async (args) => {
                 const result = await runTool(tool.name, args || {});
