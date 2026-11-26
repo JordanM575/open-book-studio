@@ -3,10 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Library } from "../src/main/library/store";
+import { buildEpub } from "../src/main/epub";
 import {
   buildDocx,
   buildMarkdown,
   collectDocxImages,
+  collectManuscriptImages,
   exportBookImages,
   exportManuscriptDocx,
   exportManuscriptEpub,
@@ -357,17 +359,17 @@ describe("all manuscript formats reject a symlinked source directory", () => {
   }
 });
 
+function realStat(path: string): Promise<DocxExportState | null> {
+  return stat(path)
+    .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
+    .catch(() => null);
+}
+
 describe("exportManuscriptDocx", () => {
   async function outside(): Promise<string> {
     const dir = await mkdtemp(join(tmpdir(), "abs-docx-out-"));
     cleanups.push(dir);
     return dir;
-  }
-
-  function realStat(path: string): Promise<DocxExportState | null> {
-    return stat(path)
-      .then((snapshot) => ({ mtimeMs: snapshot.mtimeMs, size: snapshot.size }))
-      .catch(() => null);
   }
 
   function baseDeps(dir: string, overrides: Partial<DocxExportDeps> = {}): DocxExportDeps {
@@ -538,6 +540,33 @@ describe("exportManuscriptDocx", () => {
     expect(await readdir(dir)).toEqual(["the-salt-road.docx"]);
     expect(Buffer.from(await readFile(result)).subarray(0, 2).toString()).toBe("PK");
   });
+});
+
+test("exportManuscriptEpub publishes an image-free EPUB outside the library", async () => {
+  const { library, bookId } = await fixture();
+  const before = await snapshotBook(library.root);
+  const detail = await library.readBook(bookId);
+  const { illustrations, warnings } = await collectManuscriptImages(detail, library);
+  expect(illustrations.size).toBe(0);
+  expect(warnings).toEqual([]);
+  const expected = Buffer.from(buildEpub(detail));
+
+  const dir = await mkdtemp(join(tmpdir(), "abs-epub-out-"));
+  cleanups.push(dir);
+  const fileName = "the-salt-road.epub";
+  const destination = join(dir, fileName);
+  const result = await exportManuscriptEpub(detail, illustrations, library.root, {
+    pickDestination: async (name) => join(dir, name),
+    confirmReplace: async () => false,
+    statDestination: realStat
+  });
+
+  expect(result).toBe(destination);
+  expect(await readdir(dir)).toEqual([fileName]);
+  const written = await readFile(destination);
+  expect(written).toEqual(expected);
+  expect(Object.keys(unzipSync(written)).filter((path) => path.startsWith("EPUB/images/"))).toEqual([]);
+  expect(await snapshotBook(library.root)).toEqual(before);
 });
 
 describe("markdown export", () => {
