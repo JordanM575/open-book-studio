@@ -21,7 +21,19 @@ Tasks are ordered. `[P]` means safe to do in parallel with another `[P]` task in
 - [x] T010 Implement IndexedDB storage for browser library metadata/handles and an OPFS adapter with the ordinary library directory layout in `apps/web/src/storage/indexeddb.ts` and `apps/web/src/storage/opfs.ts`.
 - [x] T011 Implement capability detection and cross-tab lock handling in `apps/web/src/storage/capabilities.ts` and the `webLock` wrapper in `directory-port.ts`; use feature detection, retain version/hash checks, and report when locking is unavailable.
 - [x] T012 Request origin-storage persistence where supported and report granted/not-granted/not-supported plus quota failures in `apps/web/src/storage/opfs.ts`; the summary warning is shared from `packages/core/src/library/storage.ts`.
-- [ ] T013 Add isolated real-browser adapter tests for picker cancellation, permission re-grant/revocation, OPFS restart, persistence denial, quota exhaustion, two tabs and no silent tier switch in `apps/web/tests/storage/`. Unit tests with fake handles now cover commit expectations, moves, device identity, picker cancellation, permission mapping, save failures, draft buffering, capability detection, persistence denial/unsupported/error paths and the cross-tab Web Lock request/fallback. `apps/web/check/` is a real-browser OPFS/conflict/archive/folder-mode harness; Playwright Chromium passes 16/16, including picker cancellation, a denied folder permission that keeps the pending folder, two-tab Web Lock serialization and an OPFS page-restart check, while Firefox/WebKit OPFS openings are recorded findings. The native folder picker and real Safari/Firefox remain.
+- [ ] T013 Add isolated real-browser adapter tests for picker cancellation, permission re-grant/revocation, OPFS restart, persistence denial, quota exhaustion, two tabs and no silent tier switch in `apps/web/tests/storage/`.
+  Unit tests with fake handles cover commit expectations, moves, device identity, picker cancellation,
+  permission mapping, save failures, draft buffering, capability detection, persistence denial,
+  unsupported and error paths, and the cross-tab Web Lock request and fallback.
+  The strict `apps/web/check/` run passed 16/16 each in Playwright Chromium, Firefox and WebKit
+  on `8c7b2fb` from [PR #129](https://github.com/JordanM575/open-book-studio/pull/129).
+  The fixtures use a simulated picker for folder selection and cancellation. The checks cover a
+  denied permission that keeps the pending folder and OPFS page restart. Where Web Locks are
+  available, the lock check verifies serialization for two requests in one page.
+  The stamped production web build also reopened the same saved
+  chapter revision and hash after restarting Firefox and Playwright WebKit. Two-tab Web Lock
+  serialization, native folder selection, permission re-grant and revocation, and standalone Safari
+  and Firefox target qualification remain open.
 
 ## Phase 3 — Honest save and recovery (User Story 2)
 
@@ -49,7 +61,11 @@ Tasks are ordered. `[P]` means safe to do in parallel with another `[P]` task in
   "Saved" status that also shows when nothing changed. A no-op save returns "saved"
   without a version bump (`LibraryService.saveChapter`), so the version check is what
   distinguishes a real commit. Verified 18/18 across three consecutive runs.
-- [ ] T027 Run the full Playwright/Node browser matrix plus `bun run typecheck`, `bun test`, `bun run build`, `bun run smoke` and packaged desktop smoke; the current Chromium results are recorded in `docs/research/browser-storage-matrix.md`. `scripts/browser-matrix.mjs` automates the real OPFS/conflict/archive/IndexedDB/folder-mode harness with picker-cancellation, denied-permission, two-tab lock and OPFS page-restart checks: Chromium passes 16/16; Firefox and WebKit OPFS openings fail in the Playwright builds and are recorded as findings; the app fails fast with a folder/archive recovery message. `bun run smoke:packaged` builds the unpacked app and runs the hidden suite against it: 16/16. Real Safari/Firefox and the folder-picker matrix remain.
+- [ ] T027 Run the full Playwright/Node browser matrix plus `bun run typecheck`, `bun test`, `bun run build`, `bun run smoke` and packaged desktop smoke.
+  [PR #129](https://github.com/JordanM575/open-book-studio/pull/129) passed all eight Linux verify
+  stages with 5,503 tests passing and one skip. Its strict browser matrix passed 48/48 across
+  Chromium, Firefox and WebKit in Playwright. Earlier packaged smoke passed 16/16 on its original
+  build. Matching desktop and packaged smoke and the remaining T013 cases still gate completion.
 - [x] T028 Update `docs/FORMAT.md`, `docs/ARCHITECTURE.md`, `specs/README.md`, `CHANGELOG.md`, and specs 011/013/014 links to match the delivered storage/archive behavior. The browser-storage commit contract, save-failure tests, web smoke journeys and spec 011 Phase 8 status are now documented.
 
 ## Dependencies and delivery
