@@ -1,3 +1,4 @@
+import type { Chapter } from "@ai-book-studio/core/schema";
 import type { BrowserWindow } from "electron";
 import { app } from "electron";
 import { createHash } from "node:crypto";
@@ -371,46 +372,37 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       return "chapter rail and prose loaded";
     });
 
-    await check("chapter history is reachable from the desktop toolbar", async () => {
+    const historyBookId = "book_smoke0001";
+    const historyChapterId = "ch_smoke0001";
+    const historyLabel = "Selected chapter history smoke snapshot";
+    type HistorySnapshot = { fileName: string; chapter: Chapter };
+    let historySnapshot: HistorySnapshot | null = null;
+
+    const browseChapterHistory = async (
+      snapshot: HistorySnapshot,
+      current: Chapter,
+      appendedText: string | null
+    ): Promise<void> => {
+      const { fileName, chapter: source } = snapshot;
       const dialog = `[...document.querySelectorAll('[data-slot="dialog-title"]')]
         .find((title) => title.textContent?.trim() === "Chapter history")?.closest('[role="dialog"]')`;
-      const bookId = "book_smoke0001";
-      const chapterId = "ch_smoke0001";
-      const label = "Selected chapter history smoke snapshot";
-      // A chapter-specific saved record distinguishes the actual IPC listing from an empty sibling.
-      const recordFile = await evaluate<string | null>(win, `(async () => {
-        const bookId = ${JSON.stringify(bookId)};
-        const chapterId = ${JSON.stringify(chapterId)};
-        const selected = document.querySelector('[data-testid="chapter-row"][aria-current="page"]');
-        if (selected?.getAttribute("data-chapter-id") !== chapterId) return null;
-        const book = await window.studio.books.open(bookId);
-        const chapter = book.ok && book.data.chapters.find((item) => item.id === chapterId);
-        if (!chapter) return null;
-        const captured = await window.studio.history.capture({
-          bookId, chapterId, label: ${JSON.stringify(label)},
-          source: { status: "saved", version: chapter.version, hash: chapter.hash }
-        });
-        if (!captured.ok || captured.data.meta.chapterId !== chapterId || captured.data.meta.bookId !== bookId) return null;
-        return captured.data.fileName;
-      })()`);
-      if (!recordFile) throw new Error("could not capture the selected chapter's synthetic history record");
-
-      const library = studio.requireLibrary();
-      const before = await library.readChapter(bookId, chapterId);
       const row = `[...((${dialog})?.querySelectorAll('[aria-label="History records"] li') ?? [])]
         .find((row) => {
           const fields = [...row.querySelectorAll("p")].map((field) => field.textContent?.trim());
-          return fields.includes(${JSON.stringify(label)}) && fields.includes(${JSON.stringify(recordFile)});
+          return fields.includes(${JSON.stringify(historyLabel)}) && fields.includes(${JSON.stringify(fileName)});
         })`;
       const detail = `(${dialog})?.querySelector('[aria-label="Selected history record"]')`;
+      const historyAction = (name: string) => `[...((${row})?.querySelectorAll("button") ?? [])]
+        .find((button) => button.textContent?.trim() === ${JSON.stringify(name)})`;
       const clickHistoryAction = (name: string) => evaluate<boolean>(win, `(() => {
-        const button = [...((${row})?.querySelectorAll("button") ?? [])]
-          .find((button) => button.textContent?.trim() === ${JSON.stringify(name)});
+        const button = ${historyAction(name)};
         if (!button || button.disabled) return false;
         button.click();
         return true;
       })()`);
       const opened = await evaluate<boolean>(win, `(() => {
+        const selected = document.querySelector('[data-testid="chapter-row"][aria-current="page"]');
+        if (selected?.getAttribute("data-chapter-id") !== ${JSON.stringify(historyChapterId)}) return false;
         const opener = document.querySelector('[data-testid="open-chapter-history"]');
         if (!opener || opener.disabled || innerWidth < 700) return false;
         if (!opener.checkVisibility({ visibilityProperty: true, opacityProperty: true })) return false;
@@ -429,17 +421,19 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
           () => evaluate<boolean>(win, inPage(row)),
           "chapter history to list the selected chapter's captured record"
         );
-        const current = await evaluate<boolean>(win, inPage(`(${dialog})?.textContent?.includes("The Light")`));
-        if (!current) throw new Error("the Chapter history dialog did not identify the selected chapter");
+        const identifiesChapter = await evaluate<boolean>(win, inPage(`(${dialog})?.textContent?.includes("The Light")`));
+        if (!identifiesChapter) throw new Error("the Chapter history dialog did not identify the selected chapter");
 
         if (!await clickHistoryAction("Open record")) throw new Error("the selected history row could not be opened");
         await waitUntil(
           () => evaluate<boolean>(win, inPage(`(() => {
             const record = ${detail};
             const heading = record?.querySelector("h2");
-            return heading?.textContent === ${JSON.stringify(`Read-only history · ${label}`)} &&
+            return heading?.textContent === ${JSON.stringify(`Read-only history · ${historyLabel}`)} &&
               document.activeElement === heading &&
-              record.querySelector('[aria-label="Snapshot body"] pre')?.textContent === ${JSON.stringify(before.content)};
+              (${historyAction("Open record")})?.getAttribute("aria-pressed") === "true" &&
+              record.querySelector("p")?.textContent === ${JSON.stringify(`Source version ${source.version} · raw file hash ${source.hash}`)} &&
+              record.querySelector('[aria-label="Snapshot body"] pre')?.textContent === ${JSON.stringify(source.content)};
           })()`)),
           "the read-only snapshot body and focused heading"
         );
@@ -449,14 +443,26 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
           () => evaluate<boolean>(win, inPage(`(() => {
             const record = ${detail};
             const heading = record?.querySelector("h2");
-            const body = ${JSON.stringify(before.content)};
-            return heading?.textContent === ${JSON.stringify(`Saved-text comparison · ${label}`)} &&
+            const historical = record?.querySelector('[aria-label="Historical saved text"]');
+            const saved = record?.querySelector('[aria-label="Current saved text"]');
+            const mark = saved?.querySelector("pre mark");
+            const appendedText = ${JSON.stringify(appendedText)};
+            const difference = [...(record?.querySelectorAll("p") ?? [])]
+              .find((line) => line.textContent?.startsWith("The saved bodies differ."));
+            const visible = (element) => element?.checkVisibility({ visibilityProperty: true, opacityProperty: true });
+            return heading?.textContent === ${JSON.stringify(`Saved-text comparison · ${historyLabel}`)} &&
               document.activeElement === heading &&
-              record.textContent?.includes("The saved bodies are identical.") &&
-              record.querySelector('[aria-label="Historical saved text"] pre')?.textContent === body &&
-              record.querySelector('[aria-label="Current saved text"] pre')?.textContent === body;
+              (${historyAction("Compare saved text")})?.getAttribute("aria-pressed") === "true" &&
+              historical?.querySelector("h3")?.textContent === ${JSON.stringify(`Snapshot · version ${source.version}`)} &&
+              historical.querySelector("pre")?.textContent === ${JSON.stringify(source.content)} &&
+              saved?.querySelector("h3")?.textContent === ${JSON.stringify(`Current saved body · version ${current.version}`)} &&
+              saved.querySelector("p")?.textContent === ${JSON.stringify(`Raw file hash: ${current.hash}`)} &&
+              saved.querySelector("pre")?.textContent === ${JSON.stringify(current.content)} &&
+              (appendedText === null ? record.textContent?.includes("The saved bodies are identical.") :
+                visible(difference) && visible(mark) && mark.textContent === appendedText && !historical.querySelector("pre mark"));
           })()`)),
-          "the matching snapshot and current saved bodies with the comparison heading focused"
+          appendedText === null ? "the matching saved bodies with the comparison heading focused" :
+            "the distinct saved bodies and marked difference with the comparison heading focused"
         );
       } finally {
         await evaluate(win, `(${dialog})?.querySelector('button[aria-label="Close"]')?.click()`);
@@ -465,10 +471,39 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
           "chapter history to close"
         );
       }
-      const after = await library.readChapter(bookId, chapterId);
-      if (after.version !== before.version || after.hash !== before.hash) {
+      const after = await studio.requireLibrary().readChapter(historyBookId, historyChapterId);
+      if (after.version !== current.version || after.hash !== current.hash) {
         throw new Error("opening or comparing history changed the saved chapter");
       }
+    };
+
+    await check("chapter history is reachable from the desktop toolbar", async () => {
+      // A chapter-specific saved record distinguishes the actual IPC listing from an empty sibling.
+      const captured = await evaluate<{ fileName: string; version: number; hash: string } | null>(win, `(async () => {
+        const bookId = ${JSON.stringify(historyBookId)};
+        const chapterId = ${JSON.stringify(historyChapterId)};
+        const selected = document.querySelector('[data-testid="chapter-row"][aria-current="page"]');
+        if (selected?.getAttribute("data-chapter-id") !== chapterId) return null;
+        const book = await window.studio.books.open(bookId);
+        const chapter = book.ok && book.data.chapters.find((item) => item.id === chapterId);
+        if (!chapter) return null;
+        const result = await window.studio.history.capture({
+          bookId, chapterId, label: ${JSON.stringify(historyLabel)},
+          source: { status: "saved", version: chapter.version, hash: chapter.hash }
+        });
+        if (!result.ok) return null;
+        const { fileName, meta } = result.data;
+        if (meta.bookId !== bookId || meta.chapterId !== chapterId || meta.kind !== "snapshot" ||
+            meta.sourceVersion !== chapter.version || meta.sourceHash !== chapter.hash) return null;
+        return { fileName, version: meta.sourceVersion, hash: meta.sourceHash };
+      })()`);
+      if (!captured?.fileName) throw new Error("could not capture the selected chapter's synthetic history record");
+      const chapter = await studio.requireLibrary().readChapter(historyBookId, historyChapterId);
+      if (chapter.version !== captured.version || chapter.hash !== captured.hash) {
+        throw new Error("the captured snapshot did not match the saved chapter");
+      }
+      historySnapshot = { fileName: captured.fileName, chapter };
+      await browseChapterHistory(historySnapshot, chapter, null);
       return "visible opener, exact saved bodies, focused details, and unchanged chapter revision";
     });
 
@@ -1288,6 +1323,7 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
       return "new conversation and history dialog";
     });
 
+    let historyAutosave: Chapter | null = null;
     await check("typing is saved to disk", async () => {
       const target = await evaluate<{ bookId: string; chapterId: string } | null>(
         win,
@@ -1334,7 +1370,22 @@ export async function runSmoke(win: BrowserWindow, studio: Studio): Promise<void
           ),
         "the save status to settle"
       );
+      if (bookId === historyBookId && chapterId === historyChapterId && after.content.endsWith(`${marker}\n`)) {
+        historyAutosave = after;
+      }
       return `version ${before.version} → ${after.version}, status Saved`;
+    });
+
+    await check("chapter history compares distinct saved revisions", async () => {
+      if (!historySnapshot || !historyAutosave) throw new Error("the fixture snapshot or checked autosave is missing");
+      const source = historySnapshot.chapter;
+      const current = historyAutosave;
+      if (current.version <= source.version || current.hash === source.hash ||
+          current.content === source.content || !current.content.startsWith(source.content)) {
+        throw new Error("the checked autosave did not confirm a newer saved revision with appended text");
+      }
+      await browseChapterHistory(historySnapshot, current, current.content.slice(source.content.length));
+      return `snapshot version ${source.version} and current version ${current.version}, literal bodies, visible marked difference, focused details, and unchanged current revision`;
     });
 
     await check("undo survives a chapter switch", async () => {

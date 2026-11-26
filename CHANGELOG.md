@@ -56,6 +56,7 @@ Update the `Unreleased` section before every commit.
 - Open the selected chapter's history directly from the desktop toolbar.
 - Verify the visible toolbar action and the exact captured record for the selected chapter in hidden smoke.
 - Verify that opening and comparing the captured snapshot shows the exact saved text, focuses the detail heading, and leaves the chapter revision intact.
+- Extend hidden smoke to compare that snapshot with a later autosave, checking both literal bodies, the marked difference, detail focus, and the newer saved version and hash after browsing.
 - Open the chapter history dialog only when the selected chapter has a bound history adapter. This restores the desktop renderer typecheck and preserves the unsupported-host behavior.
 
 ### Reader review T001 reconciliation (039 T001) task record
