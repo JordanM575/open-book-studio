@@ -13,22 +13,35 @@ const STORE = "connections";
  */
 export class BrowserCredentialVault implements CredentialVault {
   private database: Promise<IDBDatabase> | null = null;
+  private checkRefused = false;
 
   constructor(private readonly name: string = DEFAULT_DB) {}
 
   async isAvailable(): Promise<boolean> {
-    return typeof indexedDB !== "undefined";
+    // Checking for the API leaves the database closed.
+    try {
+      return typeof globalThis.indexedDB?.open === "function";
+    } catch {
+      return false;
+    }
   }
 
-  async status(): Promise<Omit<CredentialStatus, "connections">> {
-    const available = await this.isAvailable();
-    return {
-      available,
-      backend: "Browser origin storage",
-      detail: available
-        ? "Same-origin scripts can read this vault; clearing site data removes it."
-        : "This browser cannot store credentials."
-    };
+  async status(): Promise<CredentialStatus> {
+    const backend = "Browser origin storage";
+    try {
+      if (await this.isAvailable()) {
+        // A write-mode count opens the transaction required for sign-in without reading or
+        // writing connection values. A latched probe failure requires a fresh explicit check.
+        const connections = await this.request("readwrite", (store) => store.count());
+        if (this.checkRefused) {
+          return { available: false, backend, connections, detail: "Browser storage refused the check. Allow site data and run Check browser storage again." };
+        }
+        return { available: true, backend, connections, detail: "Clearing site data removes connections stored for this origin." };
+      }
+    } catch {
+      return { available: false, backend, connections: 0, detail: "Browser storage refused access. Allow site data and reload this page." };
+    }
+    return { available: false, backend, connections: 0, detail: "This browser cannot store connections. Use a browser with site storage or the desktop app." };
   }
 
   /**
@@ -36,7 +49,7 @@ export class BrowserCredentialVault implements CredentialVault {
    * never prompts, so unlike the desktop keychain this is safe to run, but it stays behind
    * the Check control to match the desktop contract.
    */
-  async check(): Promise<Omit<CredentialStatus, "connections">> {
+  async check(): Promise<CredentialStatus> {
     try {
       const probe = `credential-probe-${Date.now()}`;
       await this.request("readwrite", (store) => store.put({ id: probe }));
@@ -44,13 +57,17 @@ export class BrowserCredentialVault implements CredentialVault {
         const read = await this.request<unknown>("readonly", (store) => store.get(probe));
         if (!read) throw new Error("probe mismatch");
       } finally {
-        await this.request("readwrite", (store) => store.delete(probe)).catch(() => undefined);
+        await this.request("readwrite", (store) => store.delete(probe));
       }
-      return { available: true, backend: "Browser origin storage", detail: "" };
+      const connections = await this.request("readwrite", (store) => store.count());
+      this.checkRefused = false;
+      return { available: true, backend: "Browser origin storage", connections, detail: "" };
     } catch {
+      this.checkRefused = true;
       return {
         available: false,
         backend: "Browser origin storage",
+        connections: 0,
         detail: "Origin storage refused the check. The browser may be blocking site data."
       };
     }
@@ -120,7 +137,7 @@ export class BrowserCredentialVault implements CredentialVault {
     return new Promise<T>((resolve, reject) => {
       const transaction = db.transaction(STORE, mode);
       const request = work(transaction.objectStore(STORE));
-      request.onsuccess = () => resolve(request.result);
+      transaction.oncomplete = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error("The credential request failed."));
       transaction.onabort = () => reject(transaction.error ?? new Error("The credential transaction was aborted."));
     });

@@ -26,7 +26,7 @@ export function browserStorageWarning(persistence: StoragePersistence): string {
     return "This library lives in this browser's storage. Clearing site data or losing the profile removes it, even when the browser has granted persistent storage.";
   }
   if (persistence === "not-granted") {
-    return "This library lives in this browser's storage. The browser did not grant persistent storage, so it may remove it when space is low. Export an archive to keep a copy.";
+    return "This library lives in this browser's storage. The browser has not confirmed persistent storage, so it may remove it when space is low. Export an archive to keep a copy.";
   }
   return "This library lives in this browser's storage. This browser cannot promise to keep it; clearing site data removes it. Export an archive to keep a copy.";
 }

@@ -5,12 +5,14 @@ import { LibraryError, LibraryPortError } from "@ai-book-studio/core/library/err
 import { buildMetadata } from "@ai-book-studio/core/build";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
 import { EXTERNAL_LINKS } from "@ai-book-studio/core/providers/links";
+import { ProviderError } from "@ai-book-studio/core/providers/types";
 import type { UsageSummary } from "@ai-book-studio/core/providers/usage";
 import { exportBrowserArchive, importBrowserArchive, pickArchiveFile } from "../storage/archive-io";
+import { detectStorageCapabilities } from "../storage/capabilities";
 import { BrowserCredentialVault } from "../storage/credentials";
 import { BrowserDraftBuffer, flushDraftsOnHide } from "../storage/drafts";
 import { type BrowserLibraries, browserRuntime } from "./browser-libraries";
-import { cancelOpenRouterFlow, startOpenRouterFlow } from "./openrouter";
+import { cancelOpenRouterFlow, refuseOpenRouterBeforePopup, startOpenRouterFlow } from "./openrouter";
 import { fetchLicenses } from "./licenses";
 import { ambientStatus } from "@ai-book-studio/core/agent/ambient";
 import { createPlanningApi, planningHandler } from "@ai-book-studio/core/library/planning-api";
@@ -38,12 +40,13 @@ const EMPTY_USAGE: UsageSummary = {
  * The renderer's `window.studio` contract over browser storage.
  *
  * Library, book, chapter, conflict, draft and archive operations are real. Desktop-only features
- * (Word export, the agent, provider connections and revealing a folder) return a specific,
+ * (Word export, the agent and revealing a folder) return a specific,
  * author-readable refusal instead of pretending to work.
  */
 export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
   const drafts = new BrowserDraftBuffer();
   const credentials = new BrowserCredentialVault();
+  let signInPreflight: AbortController | null = null;
   const markCommitted = (): void => {
     if (libraries.summary) libraries.summary.lastCommittedAt = new Date().toISOString();
   };
@@ -69,7 +72,14 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
     app: {
       // The browser reports its own platform channel as "web"; CPU architecture is
       // not reliably detectable there, so it stays honestly unknown.
-      info: () => safe(async () => buildMetadata("web", { platform: "web", arch: "unknown" })),
+      info: () => safe(async () => {
+        const { folderAccess, browserStorage } = detectStorageCapabilities();
+        return buildMetadata("web", {
+          platform: "web",
+          arch: "unknown",
+          webCapabilities: { folderAccess, browserStorage, connectionStorage: await credentials.isAvailable() }
+        });
+      }),
       licenses: () => safe(() => fetchLicenses()),
       // A browser build has no second copy to refuse; tabs take turns through a storage lock.
       onSecondInstance: () => () => {},
@@ -314,24 +324,16 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
     connections: {
       list: () => safe(() => credentials.list()),
       available: () => safe(() => credentials.isAvailable()),
-      status: () =>
-        safe(async () => {
-          const state = (await credentials.status?.()) ?? {
-            available: await credentials.isAvailable(),
-            backend: "Browser origin storage",
-            detail: ""
-          };
-          return { ...state, connections: (await credentials.list()).length };
-        }),
-      check: () =>
-        safe(async () => {
-          const state = (await credentials.check?.()) ?? {
-            available: await credentials.isAvailable(),
-            backend: "Browser origin storage",
-            detail: ""
-          };
-          return { ...state, connections: (await credentials.list()).length };
-        }),
+      status: () => safe(() => credentials.status()),
+      check: () => safe(async () => {
+        const status = await credentials.check();
+        if (!status.available) {
+          const refusal = new ProviderError("unsupported", status.detail);
+          signInPreflight?.abort(refusal);
+          refuseOpenRouterBeforePopup(refusal);
+        }
+        return status;
+      }),
       addKey: () =>
         Promise.resolve(
           failure(
@@ -339,10 +341,24 @@ export function createBrowserStudioApi(libraries: BrowserLibraries): StudioApi {
             "Manual provider keys are not available in the browser build yet. Use Sign in with OpenRouter, or the desktop app."
           )
         ),
-      startOpenRouter: () => safe(() => startOpenRouterFlow()),
+      startOpenRouter: async () => {
+        if (signInPreflight) return failure("invalid", "A storage check is already running for browser sign-in.");
+        const attempt = new AbortController();
+        signInPreflight = attempt;
+        const cancelled = new Promise<null>((resolve) => attempt.signal.addEventListener("abort", () => resolve(null), { once: true }));
+        try {
+          const status = await Promise.race([credentials.status(), cancelled]);
+          if (attempt.signal.aborted || !status) return failureFrom(attempt.signal.reason);
+          if (!status.available) return failure("unsupported", status.detail);
+          return safe(startOpenRouterFlow);
+        } finally {
+          if (signInPreflight === attempt) signInPreflight = null;
+        }
+      },
       cancelOpenRouter: () =>
         safe(async (): Promise<null> => {
-          cancelOpenRouterFlow();
+          if (signInPreflight) signInPreflight.abort(new ProviderError("auth", "Sign-in cancelled."));
+          else cancelOpenRouterFlow();
           return null;
         }),
       remove: (connectionId) =>
@@ -551,6 +567,9 @@ function failure(code: StudioError["code"], message: string): Result<never> {
 }
 
 function failureFrom(error: unknown): Result<never> {
+  if (error instanceof ProviderError && error.code === "unsupported") {
+    return failure("unsupported", error.message);
+  }
   if (error instanceof LibraryError) {
     return failure(error.code, error.message);
   }

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { toLibraryPath } from "@ai-book-studio/core/library/path";
 import {
   newBrowserLibraryId,
   openBrowserLibrary,
@@ -63,6 +64,21 @@ describe("opening a library in the browser", () => {
     expect(library.summary.persistence).toBe("not-granted");
     // The author is told the difference, because a browser may evict an unpromised origin.
     expect(library.summary.warning ?? "").not.toBe("");
+  });
+
+  test("opens the library when the browser leaves persistence pending", async () => {
+    const persistence = Promise.withResolvers<boolean>();
+    const root = secureNavigator({ persist: () => persistence.promise });
+    const library = await openBrowserLibrary("library_pending", { timeoutMs: 10 });
+
+    expect(root.directories.get("libraries")?.directories.has("library_pending")).toBe(true);
+    expect(await library.port.listDirectory(toLibraryPath([]))).toEqual([]);
+    expect(library.summary).toMatchObject({ tier: "browser", permission: "granted", persistence: "not-granted" });
+    expect(library.summary.warning).toContain("has not confirmed persistent storage");
+
+    persistence.resolve(true);
+    await persistence.promise;
+    expect(library.summary.persistence).toBe("not-granted");
   });
 
   test("says plainly when the browser has no origin storage at all", async () => {

@@ -1,3 +1,4 @@
+import "./csp-validation";
 import { LibraryService } from "@ai-book-studio/core/library/service";
 import { browserRuntime } from "../src/runtime/browser-libraries";
 import {

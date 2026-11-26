@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { CheckCircle2, ExternalLink, KeyRound, Loader2, Monitor, Moon, Sun, Trash2 } from "lucide-react";
 import type { BuildMetadata } from "@ai-book-studio/core/build";
 import { BROWSER_CREDENTIAL_DISCLOSURE } from "@ai-book-studio/core/providers/credentials";
@@ -171,6 +171,8 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   const providersRef = useRef<HTMLElement>(null);
   const [liveStorage, setLiveStorage] = useState<StorageSummary | undefined>(storage);
   const [build, setBuild] = useState<BuildMetadata | null>(null);
+  const browserBuild = (build?.target ?? window.studio?.platform) === "web";
+  const browserConnectionStorage = browserBuild ? build?.capabilities.find((capability) => capability.id === "providers.connections") : undefined;
 
   // The summary is a snapshot on LibraryInfo; ask the live library when the dialog opens so a
   // just-confirmed save shows its new time instead of the value from page load.
@@ -221,8 +223,11 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   const [voicePreferencesSupported, setVoicePreferencesSupported] = useState(false);
   const [savingVoicePreferences, setSavingVoicePreferences] = useState(false);
   const [storageAvailable, setStorageAvailable] = useState<boolean | null>(null);
+  const connectionsUnavailable = storageAvailable === false || browserConnectionStorage?.available === false;
   const [credentialStatus, setCredentialStatus] = useState<CredentialStatus | null>(null);
   const [checkingKeychain, setCheckingKeychain] = useState(false);
+  const connectBlocked = connectionsUnavailable || (browserBuild && (storageAvailable !== true || checkingKeychain));
+  const storageVisit = useRef<{ read: number } | null>(null);
   const [keyProvider, setKeyProvider] = useState<ProviderId>("openai");
   const [keySecret, setKeySecret] = useState("");
   const [keyLabel, setKeyLabel] = useState("");
@@ -245,22 +250,38 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
     : [];
   const selectedSpeakingModel = speakingChoices.find((choice) => choice.id === voicePreferences?.speaking.model);
 
+  useLayoutEffect(() => {
+    if (!browserBuild) return;
+    storageVisit.current = open ? { read: 0 } : null;
+    setStorageAvailable(null);
+    setCredentialStatus(null);
+    setCheckingKeychain(false);
+    return () => { storageVisit.current = null; };
+  }, [browserBuild, open]);
+
   const refresh = useCallback(async () => {
+    const visit = storageVisit.current;
+    const read = visit ? ++visit.read : 0;
+    const isCurrent = () => !browserBuild || (visit !== null && visit === storageVisit.current && read === visit.read);
     // Check times are volatile: a fresh open forgets every previous explicit Test.
       setChecks({});
       setVoice(null);
       setVoicePreferences(null);
       setVoicePreferencesSupported(false);
     try {
-      const [providerList, connectionList, status] = await Promise.all([
+      const [providerList, connectionResult, status] = await Promise.all([
         must(window.studio.providers.list()),
-        must(window.studio.connections.list()),
+        window.studio.connections.list(),
         must(window.studio.connections.status())
       ]);
+      if (!isCurrent()) return;
       setProviders(providerList);
-      setConnections(connectionList);
       setCredentialStatus(status);
       setStorageAvailable(status.available);
+      if (!connectionResult.ok && (!browserBuild || status.available)) {
+        throw new Error(connectionResult.error.message);
+      }
+      setConnections(connectionResult.ok ? connectionResult.data : []);
       // Voice availability is read, never probed: these calls inspect configured
       // capability and credential metadata, and carry no check time.
       try {
@@ -279,10 +300,12 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
       }
       setVoice({ speakers: null });
     } catch (error) {
+      if (!isCurrent()) return;
       onNotice(error);
       setConnections([]);
+      if (browserBuild) setStorageAvailable(false);
     }
-  }, [onNotice]);
+  }, [browserBuild, onNotice]);
 
   const saveVoicePreferences = useCallback(async (preferences: VoicePreferences): Promise<void> => {
     setSavingVoicePreferences(true);
@@ -301,15 +324,19 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   }, [onNotice, onVoiceConfigurationChanged]);
 
   const checkKeychain = async (): Promise<void> => {
+    const visit = storageVisit.current;
+    const read = visit ? ++visit.read : 0;
+    const isCurrent = () => !browserBuild || (visit !== null && visit === storageVisit.current && read === visit.read);
     setCheckingKeychain(true);
     try {
       const status = await must(window.studio.connections.check());
+      if (!isCurrent()) return;
       setCredentialStatus(status);
       setStorageAvailable(status.available);
     } catch (error) {
-      onNotice(error);
+      if (isCurrent()) onNotice(error);
     } finally {
-      setCheckingKeychain(false);
+      if (!browserBuild || visit === storageVisit.current) setCheckingKeychain(false);
     }
   };
 
@@ -318,6 +345,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
   }, [open, refresh]);
 
   const connect = async (): Promise<void> => {
+    if (connectBlocked || waiting) return;
     setWaiting(true);
     setResult((current) => ({ ...current, openrouter: "" }));
     try {
@@ -327,7 +355,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
       setResult((current) => ({
         ...current,
         openrouter:
-          build?.target === "web"
+          browserBuild
             ? "Connected. Your key is in this browser's origin storage."
             : "Connected. Your key is in this computer's protected storage."
       }));
@@ -498,21 +526,24 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
 
         <section ref={providersRef} tabIndex={-1} className="mt-6 outline-none">
           <h3 className="text-(length:--text-callout-size) font-medium">Provider connections</h3>
-          <p className="mt-1 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-muted-foreground">
-            {build?.target === "web"
-              ? "Bring your own account. Keys are kept in this browser's origin storage, never in your book folder."
+          <p className="mt-1 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-muted-foreground"
+            data-testid={browserBuild ? "browser-credential-disclosure" : undefined}>
+            {browserBuild
+              ? BROWSER_CREDENTIAL_DISCLOSURE
               : "Bring your own account. Keys are kept on this computer, never in your book folder."}
           </p>
           {credentialStatus ? (
             <div className="mt-3 flex flex-wrap items-start justify-between gap-3 rounded-[var(--corner-lg)] border border-border bg-card/60 p-3">
               <div className="min-w-0">
                 <p className="text-(length:--text-subheadline-size) font-medium">
-                  {credentialStatus.available ? "Unlocked" : "Locked or unavailable"} · {credentialStatus.backend}
+                  {browserBuild
+                    ? (credentialStatus.available ? "Available" : "Unavailable")
+                    : (credentialStatus.available ? "Unlocked" : "Locked or unavailable")} · {credentialStatus.backend}
                 </p>
-                <p className="mt-0.5 text-(length:--text-caption-size) text-muted-foreground">
-                  {credentialStatus.connections} {credentialStatus.connections === 1 ? "connection" : "connections"} · secrets are
-                  encrypted before they reach the credential file.
-                </p>
+                {(!browserBuild || credentialStatus.available) ? <p className="mt-0.5 text-(length:--text-caption-size) text-muted-foreground">
+                  {credentialStatus.connections} {credentialStatus.connections === 1 ? "connection" : "connections"} ·{" "}
+                  {browserBuild ? "keys are stored for this site in this browser profile." : "secrets are encrypted before they reach the credential file."}
+                </p> : null}
                 {credentialStatus.detail ? (
                   <p className="mt-1 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-destructive-text">
                     {credentialStatus.detail}
@@ -528,7 +559,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
                 data-testid="check-keychain"
               >
                 {checkingKeychain ? <Loader2 size={13} className="animate-spin" /> : null}
-                Check keychain
+                {browserBuild ? "Check browser storage" : "Check keychain"}
               </Button>
             </div>
           ) : null}
@@ -547,10 +578,10 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
                   {result.openrouter}
                 </p>
               ) : null}
-              {storageAvailable === false ? (
+              {connectionsUnavailable ? (
                 <p className="mt-2 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-destructive-text">
-                  {build?.target === "web"
-                    ? "Provider connections are not enabled in the browser build yet. When they are, credentials will live in this browser's origin storage, not the operating system keychain."
+                  {browserBuild
+                    ? (browserConnectionStorage?.reason ?? "Allow storage for this site to save a provider connection here.")
                     : "This computer's protected storage is locked, so a key cannot be saved. Unlock your keychain or keyring, then reopen this window."}
                 </p>
               ) : null}
@@ -564,7 +595,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
                 variant="primary"
                 size="sm"
                 className="shrink-0"
-                disabled={storageAvailable === false}
+                disabled={connectBlocked}
                 onClick={() => void connect()}
               >
                 Connect
@@ -1015,7 +1046,7 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
                 </div>
                 <div className="flex flex-wrap justify-between gap-2">
                   <dt className="text-muted-foreground">Platform</dt>
-                  <dd>{window.studio.platform}</dd>
+                  <dd>{build.platform}</dd>
                 </div>
                 <div className="flex flex-wrap justify-between gap-2">
                   <dt className="text-muted-foreground">Architecture</dt>
@@ -1034,14 +1065,6 @@ export function SettingsDialog({ open, onOpenChange, onNotice, theme, libraryRoo
                   </dd>
                 </div>
               </dl>
-              {build.target === "web" ? (
-                <p
-                  className="mt-3 rounded-[var(--corner-md)] bg-[var(--secondary)] px-3 py-2 text-(length:--text-caption-size) leading-[var(--text-caption-leading)] text-muted-foreground"
-                  data-testid="browser-credential-disclosure"
-                >
-                  {BROWSER_CREDENTIAL_DISCLOSURE}
-                </p>
-              ) : null}
               <ul className="mt-3 space-y-1.5 text-(length:--text-caption-size)" aria-label="Capabilities">
                 {build.capabilities.map((capability) => (
                   <li key={capability.id} className="flex flex-wrap items-baseline gap-x-2">

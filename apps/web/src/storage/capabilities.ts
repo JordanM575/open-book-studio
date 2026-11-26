@@ -14,12 +14,13 @@ export interface StorageCapabilities {
  */
 export function detectStorageCapabilities(): StorageCapabilities {
   const secureContext = globalThis.isSecureContext === true;
-  const picker = typeof window !== "undefined" && "showDirectoryPicker" in window;
+  const browser = typeof window === "undefined" ? undefined : (window as Window & { showDirectoryPicker?: unknown });
+  const storage = typeof navigator === "undefined" ? undefined : navigator.storage;
   return {
     secureContext,
-    folderAccess: secureContext && picker,
-    browserStorage: typeof navigator !== "undefined" && Boolean(navigator.storage?.getDirectory),
-    persistence: typeof navigator !== "undefined" && Boolean(navigator.storage?.persist),
+    folderAccess: secureContext && typeof browser?.showDirectoryPicker === "function",
+    browserStorage: typeof storage?.getDirectory === "function",
+    persistence: typeof storage?.persist === "function",
     locks: typeof navigator !== "undefined" && Boolean(navigator.locks)
   };
 }

@@ -48,6 +48,13 @@ describe("browser storage capabilities", () => {
     expect(noPicker.browserStorage).toBe(true);
   });
 
+  test("ignores noncallable folder, storage and persistence properties", () => {
+    setGlobal("isSecureContext", true);
+    setGlobal("window", { showDirectoryPicker: undefined });
+    setGlobal("navigator", { storage: { getDirectory: {}, persist: true } });
+    expect(detectStorageCapabilities()).toMatchObject({ folderAccess: false, browserStorage: false, persistence: false });
+  });
+
   test("reports persistence denial, unsupported and failure honestly", async () => {
     setGlobal("navigator", {});
     expect(await requestPersistence()).toBe("not-supported");

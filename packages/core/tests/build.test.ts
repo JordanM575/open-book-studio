@@ -26,7 +26,7 @@ describe("build metadata", () => {
 
   test("desktop and web capabilities come from one table", () => {
     const desktop = new Map(buildMetadata("desktop").capabilities.map((capability) => [capability.id, capability]));
-    const web = new Map(buildMetadata("web").capabilities.map((capability) => [capability.id, capability]));
+    const web = new Map(capabilitiesFor("web").map((capability) => [capability.id, capability]));
 
     expect(desktop.get("storage.folder")?.available).toBe(true);
     expect(web.get("storage.folder")?.available).toBe(true);
@@ -34,9 +34,29 @@ describe("build metadata", () => {
     expect(web.get("storage.browser")?.available).toBe(true);
     expect(desktop.get("agent")?.available).toBe(true);
     expect(web.get("agent")?.available).toBe(false);
-    expect(web.get("agent")?.reason).toContain("browser");
+    expect(web.get("agent")?.reason).toContain("desktop app");
     expect(desktop.get("archive")?.available).toBe(true);
     expect(web.get("archive")?.available).toBe(true);
+    expect(desktop.get("sync.review")?.available).toBe(true);
+    expect(web.get("sync.review")?.available).toBe(true);
+    expect(web.get("sync.schedule")).toMatchObject({ available: false, reason: expect.stringContaining("Check for changes") });
+  });
+
+  test("About resolves browser capability declarations against each host observation", () => {
+    const host = { platform: "web", arch: "unknown" };
+    const capabilities = (metadata: ReturnType<typeof buildMetadata>) => new Map(
+      metadata.capabilities.map((capability) => [capability.id, capability])
+    );
+    const available = capabilities(buildMetadata("web", {
+      ...host, webCapabilities: { folderAccess: true, browserStorage: true, connectionStorage: true }
+    }));
+    const unavailable = capabilities(buildMetadata("web", host));
+    for (const id of ["storage.folder", "storage.browser", "providers.connections"]) {
+      expect(available.get(id)?.available).toBe(true);
+      expect(unavailable.get(id)).toMatchObject({ available: false, reason: expect.any(String) });
+    }
+    expect(available.get("agent")?.available).toBe(false);
+    expect(unavailable.get("sync.review")?.available).toBe(true);
   });
 
   test("every unavailable capability explains itself", () => {
