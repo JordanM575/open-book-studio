@@ -15,7 +15,7 @@ import { AiSdkReviewTransport } from "./transport";
 import sample from "./reader-review-sample.json";
 
 const SCENARIO_FLAG = "STUDIO_READER_REVIEW_CHECK";
-const scenarios = [sample.scenario, sample.preStartScenario];
+const scenarios = [sample.scenario, sample.preStartScenario, sample.staleScenario];
 const launchFlags = new Set([
   SCENARIO_FLAG, "STUDIO_TEST", "STUDIO_HEADLESS", "STUDIO_TEST_MEMORY_VAULT",
   "STUDIO_USER_DATA", "STUDIO_WINDOW_SIZE"

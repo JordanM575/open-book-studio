@@ -20,6 +20,7 @@
  *   instance    a second copy on the same profile: refused, nothing written, the open copy says so
  *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
  *   reader-review-prestart  the built reader's keyboard cancellation and retired-disclosure refusal (opt-in, macOS)
+ *   reader-review-stale  the built reader's refusal after a checked source edit (opt-in, macOS)
  *   reader-review-web  the built browser reader refusal (opt-in)
  *
  *   bun run e2e            build, then run everything
@@ -40,7 +41,7 @@ const CHECKS = [
   { id: "web", script: "scripts/web-smoke.mjs", what: "the browser build and its storage" },
   {
     id: "reader-review-web", script: "scripts/web-smoke.mjs", args: ["--reader-review-refusal"],
-    what: "the isolated built browser reader refusal", optIn: true
+    what: "the isolated built browser reader refusal", optIn: true, stampCommit: true
   },
   { id: "audit", script: "scripts/ui-audit.mjs", what: "the real window at 1440x900, for dead ends" },
   {
@@ -72,14 +73,21 @@ const CHECKS = [
     script: "scripts/reader-review-check.mjs",
     args: ["keyboard-exact-passage"],
     what: "the isolated built desktop reader keyboard journey",
-    optIn: true
+    optIn: true, stampCommit: true
   },
   {
     id: "reader-review-prestart",
     script: "scripts/reader-review-check.mjs",
     args: ["keyboard-prestart-cancel"],
     what: "keyboard cancellation and refusal of a retired reader disclosure",
-    optIn: true
+    optIn: true, stampCommit: true
+  },
+  {
+    id: "reader-review-stale",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-changed-source-refusal"],
+    what: "the mounted reader refusal after a checked save changes the selected source",
+    optIn: true, stampCommit: true
   }
 ];
 
@@ -107,7 +115,7 @@ if (build) {
   const commands = webOnly ? ["build:web"] : ["build", "build:web", "toolkit:build"];
   console.log(webOnly ? "[e2e] building the web app…" : "[e2e] building the desktop app, the web build and the toolkit…");
   const env = { ...process.env };
-  if (selection.some((check) => check.id === "reader-review" || check.id === "reader-review-web" || check.id === "reader-review-prestart")) {
+  if (selection.some((check) => check.stampCommit)) {
     env.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   }
   for (const command of commands) {

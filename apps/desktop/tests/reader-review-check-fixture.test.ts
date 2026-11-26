@@ -63,7 +63,7 @@ async function preparedFixture(scenario = sample.scenario) {
   });
   expect(prepared.kind).toBe("ready");
   if (prepared.kind !== "ready") throw new Error("Expected synthetic disclosure");
-  return { libraryRoot, before, check, reader, prepared };
+  return { library, libraryRoot, before, check, reader, prepared };
 }
 
 describe("reader check launch admission", () => {
@@ -171,5 +171,30 @@ describe("synthetic catalogue and completion boundaries", () => {
       lastStart: { kind: "blocked", reason: "changed" }
     });
     expect(await treeFingerprint(libraryRoot)).toEqual(before);
+  });
+
+  test("a checked save blocks the disclosed Start even when the selected excerpt stays exact", async () => {
+    const { library, libraryRoot, before, check, reader, prepared } = await preparedFixture(sample.staleScenario);
+    const editedContent = sample.selected.body + "\nThe author confirms the arrival.\n";
+    const saved = await library.saveChapter(sample.book.id, sample.selected.id, editedContent, {
+      baseVersion: 1, baseHash: sample.selected.hash
+    });
+    expect(saved.status).toBe("saved");
+    if (saved.status !== "saved") throw new Error("Expected the checked synthetic save");
+    expect(saved.chapter.version).toBe(2);
+    expect(saved.chapter.hash).not.toBe(sample.selected.hash);
+    expect(saved.chapter.content).toBe(editedContent);
+    expect(saved.chapter.content.startsWith(sample.selected.body)).toBe(true);
+    const afterEdit = await treeFingerprint(libraryRoot);
+    expect(afterEdit).not.toEqual(before);
+    expect(await reader.start({ operation: "start", requestId: prepared.requestId, scopeDigest: prepared.scopeDigest }))
+      .toEqual({ kind: "blocked", reason: "changed" });
+    expect(check.snapshot()).toMatchObject({
+      catalogues: 1, preparations: 1, cancelledPreparations: 0, starts: 1, readerLists: 2, readerModels: 2,
+      readerCredentialReads: 0, completionPosts: 0, fixtureRefusals: 0, outboundAttempts: 0,
+      preparedDigest: prepared.scopeDigest, completedDigest: null, requestHash: null,
+      lastStart: { kind: "blocked", reason: "changed" }
+    });
+    expect(await treeFingerprint(libraryRoot)).toEqual(afterEdit);
   });
 });
