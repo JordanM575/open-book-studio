@@ -230,9 +230,8 @@ export async function acceptRun(run: ReaderRun, envelope: ReviewEnvelope): Promi
   if (run.kind !== "reader-review" || !Array.isArray(run.findings) || run.findings.length > REVIEW_LIMITS.findings) {
     throw new Error("Invalid reader result");
   }
-  // IPC copies the envelope. Validate its content and digest in this renderer before comparing scope.
-  const returnedEnvelope = await validateReviewEnvelope(run.envelope);
-  if (returnedEnvelope.scopeDigest !== envelope.scopeDigest) throw new Error("Invalid reader result scope");
+  const preparedEnvelope = reviewDisclosure(envelope);
+  const { runId, startedAt, completedAt, envelope: returnedEnvelope } = run;
   const findings = run.findings.map((finding) => {
     if (!Array.isArray(finding.evidence) || !Array.isArray(finding.invalidEvidence) ||
         finding.evidence.length + finding.invalidEvidence.length > REVIEW_LIMITS.evidence) throw new Error("Invalid evidence");
@@ -243,7 +242,10 @@ export async function acceptRun(run: ReaderRun, envelope: ReviewEnvelope): Promi
       evidence: [...finding.evidence.map((entry: ReaderRun["findings"][number]["evidence"][number]) => entry.citation), ...finding.invalidEvidence.map(() => null)]
     };
   });
-  return buildReaderRun({ runId: run.runId, startedAt: run.startedAt, completedAt: run.completedAt, envelope,
-    output: JSON.stringify({ runId: run.runId, readerId: envelope.profile?.id,
-      readerVersion: envelope.profile?.version, findings }) });
+  // Serialize the admitted result before yielding to the returned envelope's digest check.
+  const output = JSON.stringify({ runId, readerId: preparedEnvelope.profile?.id,
+    readerVersion: preparedEnvelope.profile?.version, findings });
+  const verifiedEnvelope = await validateReviewEnvelope(returnedEnvelope);
+  if (verifiedEnvelope.scopeDigest !== preparedEnvelope.scopeDigest) throw new Error("Invalid reader result scope");
+  return buildReaderRun({ runId, startedAt, completedAt, envelope: preparedEnvelope, output });
 }

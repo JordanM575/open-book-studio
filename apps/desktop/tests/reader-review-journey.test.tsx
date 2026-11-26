@@ -5,12 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Catalogue } from "@ai-book-studio/core/providers/models";
 import { ProviderError, type ConnectionSummary, type ModelInfo, type StoredCredential } from "@ai-book-studio/core/providers/types";
-import type { ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { validateReviewEnvelope, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
 import type { ReaderReviewApi } from "@ai-book-studio/core/review/reader-api";
 import { Library } from "../src/main/library/store";
 import { ReaderReviewService, type ReviewProviders } from "../src/main/review/service";
 import type { ReviewTransport } from "../src/main/review/transport";
-import { citationNavigationCopy, revalidationFailureCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
+import { acceptRun, citationNavigationCopy, revalidationFailureCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
 import { treeFingerprint, expectTreeUnchanged } from "./support/tree-fingerprint";
 import { mountDom, unmountDom } from "./support/dom";
 
@@ -194,6 +194,35 @@ describe("mounted selected-source reader journey", () => {
     expect(body().queryByRole("article", { name: /Reader run review-/ })).toBeNull();
     expect(f.transport.calls).toHaveLength(1);
     expectTreeUnchanged(before, await fingerprint(f));
+  });
+
+  test("captures copied run values before the envelope digest settles", async () => {
+    const f = await fixture();
+    f.transport.output = outputWithEvidence;
+    const ready = await f.api.prepare({ prepareId: "snapshot-fixture", bookId: f.book.id, profileId: "reader-alpha", prompt: "",
+      chapters: [{ chapterId: f.chapter.id, ranges: [{ start: 0, end: f.chapter.content.length }] }] });
+    if (!ready.ok || ready.data.kind !== "ready") throw new Error("Expected a synthetic disclosure");
+    const envelope = await validateReviewEnvelope(ready.data.envelope);
+    const outcome = await f.api.start({ requestId: envelope.requestId, scopeDigest: envelope.scopeDigest });
+    if (!outcome.ok || outcome.data.kind !== "completed") throw new Error("Expected a synthetic completed run");
+    const run = outcome.data.run;
+    const finding = run.findings[0];
+    const citation = finding?.evidence[0]?.citation;
+    if (!finding || !citation) throw new Error("Expected one synthetic finding and citation");
+    const completedAt = run.completedAt;
+    const accepted = acceptRun(run, envelope);
+    let laterReads = 0;
+    Object.defineProperty(finding, "interpretation", {
+      enumerable: true,
+      get() { laterReads++; return "Later synthetic impression."; }
+    });
+    Object.defineProperty(citation, "quote", { value: "Later synthetic quotation." });
+    Object.defineProperty(run, "completedAt", { value: "2026-11-07T12:01:00Z" });
+    const result = await accepted;
+    expect(laterReads).toBe(0);
+    expect(result.completedAt).toBe(completedAt);
+    expect(result.findings[0]?.interpretation).toBe("Synthetic reader impression.");
+    expect(result.findings[0]?.evidence[0]?.citation.quote).toBe(f.chapter.content);
   });
 
   test("closing a prepared disclosure cancels it without a provider call", async () => {
