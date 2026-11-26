@@ -10,7 +10,7 @@ import type { ReaderReviewApi } from "@ai-book-studio/core/review/reader-api";
 import { Library } from "../src/main/library/store";
 import { ReaderReviewService, type ReviewProviders } from "../src/main/review/service";
 import type { ReviewTransport } from "../src/main/review/transport";
-import { citationNavigationCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
+import { citationNavigationCopy, revalidationFailureCopy, sourceCheckCopy, sourceStatusCopy, staleSourceStatusCopy, unavailableSourceStatusCopy } from "../../../packages/app/src/components/reader-review/contracts";
 import { treeFingerprint, expectTreeUnchanged } from "./support/tree-fingerprint";
 import { mountDom, unmountDom } from "./support/dom";
 
@@ -122,8 +122,8 @@ async function fixture(options: { model?: Partial<ModelInfo>; allowContributorTr
   const calls = { prepare: 0, start: 0, stop: 0, cancelPrepare: 0, loadBook: 0 };
   const api: ReaderReviewApi = {
     support: async () => ({ ok: true, data: await service.support() }),
-    prepare: async (request) => { calls.prepare++; return { ok: true, data: await service.prepare({ operation: "prepare", ...request }) }; },
-    start: async (request) => { calls.start++; return { ok: true, data: await service.start({ operation: "start", ...request }) }; },
+    prepare: async (request) => { calls.prepare++; return { ok: true, data: structuredClone(await service.prepare({ operation: "prepare", ...request })) }; },
+    start: async (request) => { calls.start++; return { ok: true, data: structuredClone(await service.start({ operation: "start", ...request })) }; },
     stop: async (request) => { calls.stop++; return { ok: true, data: await service.stop({ operation: "stop", ...request }) }; },
     cancelPrepare: async (request) => { calls.cancelPrepare++; return { ok: true, data: await service.cancelPrepare({ operation: "cancelPrepare", ...request }) }; }
   };
@@ -172,6 +172,27 @@ describe("mounted selected-source reader journey", () => {
     expect(body().getByRole("article", { name: /Reader run review-/ })).toBeTruthy();
     expect(f.transport.calls).toHaveLength(1);
     expect(f.calls.start).toBe(1);
+    expectTreeUnchanged(before, await fingerprint(f));
+  });
+
+  test("a copied completed run that changes the disclosed scope without updating its digest is withheld", async () => {
+    const f = await fixture();
+    const before = await fingerprint(f);
+    const startRequest = f.api.start;
+    f.api.start = async (request) => {
+      const result = await startRequest(request);
+      if (!result.ok || result.data.kind !== "completed") throw new Error("Expected a synthetic completed run");
+      const run = result.data.run;
+      return { ok: true, data: { kind: "completed", run: {
+        ...run, envelope: { ...run.envelope, prompt: "Changed after the synthetic response." }
+      } } };
+    };
+    await openAndSelect(f);
+    await disclose();
+    click("Start with Meta");
+    await testing.waitFor(() => expect(status()).toBe(revalidationFailureCopy));
+    expect(body().queryByRole("article", { name: /Reader run review-/ })).toBeNull();
+    expect(f.transport.calls).toHaveLength(1);
     expectTreeUnchanged(before, await fingerprint(f));
   });
 

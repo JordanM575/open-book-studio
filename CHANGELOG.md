@@ -8,11 +8,13 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Browser reader verification
+- Settle workspace startup reads before measuring the unsupported reader control's side effects.
 - Add an opt-in built web check for reader review refusal at welcome and in the workspace, with storage and process cleanup checks.
 - Verify the served browser build, trusted keyboard activation, and complete process exit in the reader refusal check.
 - Use the same commit stamp when building the desktop and web artifacts for the reader checks.
 
 ### Reader review verification
+- Revalidate completed reader runs copied across the desktop bridge before displaying their scoped findings.
 - Record the failed step, synthetic Start outcome and bounded operation counts when reader verification stops early.
 - Add an opt-in built desktop check for keyboard preparation, explicit start, current-source checking and exact passage selection with a synthetic provider and library.
 - Wait for the reader check's startup scan and process group exit, and match the exact passage control and receipt to the observed run.

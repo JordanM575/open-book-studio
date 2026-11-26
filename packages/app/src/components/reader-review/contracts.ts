@@ -1,5 +1,5 @@
 import { assertReviewData, freeze, REVIEW_LIMITS, timestampSchema } from "@ai-book-studio/core/review/contract";
-import { reviewDisclosure, type CurrentSource, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
+import { reviewDisclosure, validateReviewEnvelope, type CurrentSource, type ReviewEnvelope } from "@ai-book-studio/core/review/envelope";
 import { buildReaderRun, type Citation, type ReaderRun } from "@ai-book-studio/core/review/findings";
 import type {
   ReaderReviewConnection, ReaderReviewPriceFacts, ReaderReviewStopResult, ReaderReviewTerms
@@ -227,8 +227,12 @@ export function acceptPreparation(value: PreparedReaderReview, bookId: string): 
 /** Recompute evidence/subjectivity from the core run; never trust display labels or verified flags. */
 export async function acceptRun(run: ReaderRun, envelope: ReviewEnvelope): Promise<ReaderRun> {
   assertReviewData(run);
-  if (run.kind !== "reader-review" || reviewDisclosure(run.envelope).scopeDigest !== envelope.scopeDigest ||
-      !Array.isArray(run.findings) || run.findings.length > REVIEW_LIMITS.findings) throw new Error("Invalid reader result");
+  if (run.kind !== "reader-review" || !Array.isArray(run.findings) || run.findings.length > REVIEW_LIMITS.findings) {
+    throw new Error("Invalid reader result");
+  }
+  // IPC copies the envelope. Validate its content and digest in this renderer before comparing scope.
+  const returnedEnvelope = await validateReviewEnvelope(run.envelope);
+  if (returnedEnvelope.scopeDigest !== envelope.scopeDigest) throw new Error("Invalid reader result scope");
   const findings = run.findings.map((finding) => {
     if (!Array.isArray(finding.evidence) || !Array.isArray(finding.invalidEvidence) ||
         finding.evidence.length + finding.invalidEvidence.length > REVIEW_LIMITS.evidence) throw new Error("Invalid evidence");

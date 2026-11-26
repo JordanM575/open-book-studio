@@ -109,6 +109,22 @@ function observeStorage() {
   const counts = { bookReads: 0, handleReads: 0, fileReads: 0, storageReads: 0, writes: 0, permissions: 0, providers: 0, requests: 0 };
   const reader = window.studio.readerReview;
   const readerMethods = Object.entries(reader);
+  const planning = window.studio.planning;
+  const startupReads = ["read", "progress", "listCopies"];
+  const settledPlanningReads = new Set();
+  let pendingPlanningReads = 0;
+  for (const name of startupReads) {
+    const original = planning?.[name];
+    if (typeof original !== "function") throw new Error("Missing workspace planning reader");
+    Object.defineProperty(planning, name, {
+      configurable: true, writable: true,
+      async value(...args) {
+        pendingPlanningReads++;
+        try { return await Reflect.apply(original, this, args); }
+        finally { pendingPlanningReads--; settledPlanningReads.add(name); }
+      }
+    });
+  }
   function wrap(target, key, group, required = true) {
     const original = target?.[key];
     if (typeof original !== "function") {
@@ -159,6 +175,7 @@ function observeStorage() {
   Object.defineProperty(window, Symbol.for("studio.web-reader-check"), {
     value: Object.freeze({
       snapshot: () => ({ ...counts }),
+      planningStartupSettled: () => pendingPlanningReads === 0 && settledPlanningReads.size === startupReads.length,
       readerUnchanged: () => window.studio.readerReview === reader && readerMethods.every(([key, method]) => reader[key] === method)
     })
   });
@@ -323,6 +340,10 @@ async function run({ window, app, url, profile, commit }) {
       await window.loadURL(url);
       await waitFor(() => [...document.querySelectorAll("[data-testid=book-card]")]
         .some((node) => node.textContent.includes("Web reader fixture")));
+      // Emulating focus after the workspace mounts can refresh the planning sidebar.
+      contents.debugger.attach("1.3");
+      await contents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+      await waitFor(() => document.hasFocus());
       fixture = await evaluate(async ({ bookId, chapterId, version, hash }) => {
         const data = (result) => { if (!result.ok) throw new Error("Web fixture setup failed"); return result.data; };
         const saved = data(await window.studio.chapters.save({
@@ -339,11 +360,12 @@ async function run({ window, app, url, profile, commit }) {
       assert.equal(fixture.version, 2);
       assert.match(fixture.hash, digest);
       assert(typeof fixture.committedAt === "string" && Number.isFinite(Date.parse(fixture.committedAt)));
+      await evaluate(observeStorage);
       await evaluate(() => [...document.querySelectorAll("[data-testid=book-card]")]
         .find((node) => node.textContent.includes("Web reader fixture")).click());
       await waitFor(() => Boolean(document.querySelector("[data-testid=manuscript-text]") &&
         [...document.querySelectorAll("button")].some((node) => node.textContent.trim() === "Open reader review")));
-      await evaluate(observeStorage);
+      await waitFor(() => window[Symbol.for("studio.web-reader-check")].planningStartupSettled());
     });
     await step(checks[3], async () => {
       const initial = await snapshot();
@@ -360,8 +382,6 @@ async function run({ window, app, url, profile, commit }) {
       assert.equal(readbackCounts.bookReads, 1);
       assert(readbackCounts.fileReads > 0 && readbackCounts.handleReads > 0 && readbackCounts.storageReads > 0);
       for (const name of ["writes", "permissions", "providers", "requests"]) assert.equal(readbackCounts[name], 0);
-      contents.debugger.attach("1.3");
-      await contents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
     });
     await step(checks[4], async () => {
       workspaceStart = await snapshot();
