@@ -112,7 +112,8 @@ function assertGuards(snapshot) {
 function assertCompleted(snapshot) {
   assertGuards(snapshot);
   for (const [name, value] of Object.entries({
-    catalogues: 1, preparations: 1, starts: 1, readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
+    catalogues: 1, preparations: 1, cancelledPreparations: 0, starts: 1,
+    readerLists: 2, readerModels: 2, readerCredentialReads: 1, completionPosts: 1
   })) assert.equal(snapshot[name], value, name);
   assert.deepEqual(snapshot.lastStart, { kind: "completed", reason: null });
   assert.match(snapshot.preparedDigest, /^[a-f0-9]{64}$/);
@@ -121,10 +122,21 @@ function assertCompleted(snapshot) {
   assert.match(snapshot.requestId, /^review-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/);
 }
 
+function assertCancelled(snapshot) {
+  assertGuards(snapshot);
+  for (const [name, value] of Object.entries({
+    catalogues: 1, preparations: 1, cancelledPreparations: 1, starts: 1,
+    readerLists: 1, readerModels: 1, readerCredentialReads: 0, completionPosts: 0
+  })) assert.equal(snapshot[name], value, name);
+  assert.deepEqual(snapshot.lastStart, { kind: "blocked", reason: "changed" });
+  assert.equal(snapshot.completedDigest, null);
+  assert.equal(snapshot.requestHash, null);
+}
+
 function readChildObservation(payload) {
   const snapshot = JSON.parse(payload);
   const counters = [
-    "catalogues", "preparations", "starts", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
+    "catalogues", "preparations", "cancelledPreparations", "starts", "readerLists", "readerModels", "readerCredentialReads", "completionPosts",
     "fixtureRefusals", "outboundAttempts", "permissionAttempts", "protectedStorageAttempts", "guardedStorageMethods"
   ];
   const digests = ["preparedDigest", "completedDigest", "requestHash"];
@@ -230,10 +242,17 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
 
   record.phase = "open reader with keyboard focus";
   const opener = exactButton("Open reader review");
+  const closeReview = async () => {
+    await activate(exactButton("Close review"));
+    await opener.waitFor();
+    await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "Open reader review");
+  };
   await activate(opener);
   await page.waitForFunction(() => document.activeElement?.hasAttribute("data-reader-review-heading"));
-  record.phase = "mounted reader theme and independent accessibility preferences";
-  record.appearance = await verifyAppearance(page);
+  if (record.scenario === sample.scenario) {
+    record.phase = "mounted reader theme and independent accessibility preferences";
+    record.appearance = await verifyAppearance(page);
+  }
   record.phase = "keyboard preparation and disclosure";
   assert(await exactButton("Prepare review").isDisabled());
   await activate(page.getByRole("checkbox", { name: /Chapter 2: The arrival/ }), "Space");
@@ -259,9 +278,37 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
   assert.equal(prepared.catalogues, 1);
   assert.equal(prepared.preparations, 1);
   assert.equal(prepared.starts, 0);
+  assert.equal(prepared.cancelledPreparations, 0);
   assert.equal(prepared.readerCredentialReads, 0);
   assert.equal(prepared.completionPosts, 0);
   assert.deepEqual(await fingerprint(libraryRoot), before);
+
+  if (record.scenario === sample.preStartScenario) {
+    record.phase = "cancel prepared reader review by keyboard";
+    await closeReview();
+    const deadline = Date.now() + 10_000;
+    let afterClose = await observe();
+    while (afterClose.cancelledPreparations === 0 && Date.now() < deadline) {
+      await delay(50);
+      afterClose = await observe();
+    }
+    assert.equal(afterClose.cancelledPreparations, 1);
+    assert.equal(afterClose.starts + afterClose.readerCredentialReads + afterClose.completionPosts, 0);
+    assertGuards(afterClose);
+    record.phase = "refuse a Start with the retired disclosure";
+    const refused = await page.evaluate(async ({ requestId, scopeDigest }) => {
+      const reply = await window.studio.readerReview.start({ requestId, scopeDigest });
+      return reply.ok && reply.data.kind === "blocked" && reply.data.reason === "changed";
+    }, { requestId: prepared.requestId, scopeDigest: prepared.preparedDigest });
+    assert(refused);
+    const observed = await observe();
+    assertCancelled(observed);
+    assert.equal(observed.preparedDigest, prepared.preparedDigest);
+    assert.equal(await page.getByRole("region", { name: "Volatile reader results" }).count(), 0);
+    assert.deepEqual(await fingerprint(libraryRoot), before);
+    record.library = before;
+    return observed;
+  }
 
   record.phase = "activate explicit Start by keyboard";
   await activate(exactButton("Start with " + sample.providerName));
@@ -318,9 +365,7 @@ async function runJourney(page, application, libraryRoot, candidate, record) {
       document.querySelector('[data-testid="save-status"]')?.textContent?.trim() === "Saved";
   }, sample.quote);
   record.selection = { start: sample.quote.start, end: sample.quote.end, saved: true };
-  await activate(exactButton("Close review"));
-  await opener.waitFor();
-  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === "Open reader review");
+  await closeReview();
   assert.deepEqual(await fingerprint(libraryRoot), before);
   record.library = before;
   return observed;
@@ -381,8 +426,9 @@ async function stopOwnedChild(application, receipt, graceMs = 15_000, reapMs = 5
   return { graceful: false, exit, groupEmpty: exit !== null && await receipt.waitForGroup(reapMs) };
 }
 
+const scenario = [sample.scenario, sample.preStartScenario].find(name => name === process.argv[2]) ?? null;
 const result = {
-  scenario: sample.scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
+  scenario, ok: false, phase: "macOS Seatbelt host prerequisite", candidate: null,
   build: null, library: null, selection: null, appearance: null, startView: null, observations: null, guardDenials: 0,
   childExit: null, childGroupEmpty: false, cleaned: false
 };
@@ -402,7 +448,7 @@ try {
   assert.equal(process.platform, "darwin");
   await access(sandbox, constants.X_OK);
   result.phase = "scenario and exact built artifact prerequisite";
-  assert.deepEqual(process.argv.slice(2), [sample.scenario]);
+  assert(scenario && process.argv.length === 3);
   assert.equal(git("status", "--porcelain=v1", "--untracked-files=all"), "");
   result.candidate = git("rev-parse", "HEAD");
   assert.match(result.candidate, /^[a-f0-9]{40}$/);
@@ -437,7 +483,7 @@ try {
     executablePath: launcher, args: ["--no-sandbox", "--use-mock-keychain", appDir], cwd: appDir,
     artifactsDir: artifacts, timeout: 40_000,
     env: {
-      ...headlessEnvironment(process.env), STUDIO_READER_REVIEW_CHECK: sample.scenario, STUDIO_TEST: "1",
+      ...headlessEnvironment(process.env), STUDIO_READER_REVIEW_CHECK: scenario, STUDIO_TEST: "1",
       STUDIO_HEADLESS: "1", STUDIO_TEST_MEMORY_VAULT: "1", STUDIO_USER_DATA: fixture.profile, STUDIO_WINDOW_SIZE: "1440x900"
     }
   });
@@ -475,7 +521,8 @@ try {
       assert.equal(summaries.length, 1);
       result.observations = readChildObservation(summaries[0].slice(childMarker.length));
       assert(!timedOut && result.guardDenials === 8 && loopbackConnections === 0);
-      assertCompleted(result.observations);
+      const assertScenario = scenario === sample.preStartScenario ? assertCancelled : assertCompleted;
+      assertScenario(result.observations);
       assert.deepEqual(result.observations, observed);
       const profile = join(scratch, "profile");
       assert(!(await readdir(profile)).includes("credentials.json"));

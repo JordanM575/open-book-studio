@@ -14,6 +14,7 @@ Update the `Unreleased` section before every commit.
 - Use the same commit stamp when building the desktop and web artifacts for the reader checks.
 
 ### Reader review verification
+- Add an opt-in keyboard check for cancelling a prepared disclosure and refusing Start for the retired request.
 - Exercise keyboard focus, light and dark appearance, and independent reduced-motion and reduced-transparency preferences in the built reader check.
 - Revalidate completed reader runs copied across the desktop bridge before displaying their scoped findings.
 - Record the failed step, synthetic Start outcome and bounded operation counts when reader verification stops early.

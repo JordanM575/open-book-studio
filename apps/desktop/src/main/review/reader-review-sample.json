@@ -1,5 +1,6 @@
 {
   "scenario": "keyboard-exact-passage",
+  "preStartScenario": "keyboard-prestart-cancel",
   "scratchPrefix": "studio-reader-review-check-",
   "sentinelPrefix": "reader-review-fixture-secret-",
   "book": {

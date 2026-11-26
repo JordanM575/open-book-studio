@@ -14,7 +14,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function fixture() {
+async function fixture(scenario = sample.scenario) {
   const scratch = await mkdtemp(join(await realpath(tmpdir()), sample.scratchPrefix));
   roots.push(scratch);
   const profile = join(scratch, "profile");
@@ -39,12 +39,31 @@ async function fixture() {
   }
   const launch = {
     env: {
-      STUDIO_READER_REVIEW_CHECK: sample.scenario, STUDIO_TEST: "1", STUDIO_HEADLESS: "1",
+      STUDIO_READER_REVIEW_CHECK: scenario, STUDIO_TEST: "1", STUDIO_HEADLESS: "1",
       STUDIO_TEST_MEMORY_VAULT: "1", STUDIO_USER_DATA: profile, STUDIO_WINDOW_SIZE: "1440x900"
     },
     packaged: false, headless: true, appPath, entry
   };
   return { scratch, profile, libraryRoot, chapters, settings, launch };
+}
+
+async function preparedFixture(scenario = sample.scenario) {
+  const { launch, libraryRoot } = await fixture(scenario);
+  admitReaderReviewCheck(launch);
+  const library = await Library.open(libraryRoot);
+  const before = await treeFingerprint(libraryRoot);
+  const check = createReaderReviewCheck();
+  const vault = new MemoryVault();
+  await check.seed(vault);
+  const providers = new ProviderService(vault, async () => { throw new Error("Unexpected external link"); }, check.catalogueFetch);
+  const reader = check.createReader(() => library, providers);
+  const prepared = await reader.prepare({
+    operation: "prepare", prepareId: "prepare-fixture", bookId: sample.book.id, profileId: "reader-alpha", prompt: "",
+    chapters: [{ chapterId: sample.selected.id, ranges: [{ start: 0, end: sample.selected.body.length }] }]
+  });
+  expect(prepared.kind).toBe("ready");
+  if (prepared.kind !== "ready") throw new Error("Expected synthetic disclosure");
+  return { libraryRoot, before, check, reader, prepared };
 }
 
 describe("reader check launch admission", () => {
@@ -107,21 +126,7 @@ describe("synthetic catalogue and completion boundaries", () => {
   });
 
   test("real service and SDK bind one admitted POST to the exact prepared source", async () => {
-    const { launch, libraryRoot } = await fixture();
-    admitReaderReviewCheck(launch);
-    const library = await Library.open(libraryRoot);
-    const before = await treeFingerprint(libraryRoot);
-    const check = createReaderReviewCheck();
-    const vault = new MemoryVault();
-    await check.seed(vault);
-    const providers = new ProviderService(vault, async () => { throw new Error("Unexpected external link"); }, check.catalogueFetch);
-    const reader = check.createReader(() => library, providers);
-    const prepared = await reader.prepare({
-      operation: "prepare", prepareId: "prepare-fixture", bookId: sample.book.id, profileId: "reader-alpha", prompt: "",
-      chapters: [{ chapterId: sample.selected.id, ranges: [{ start: 0, end: sample.selected.body.length }] }]
-    });
-    expect(prepared.kind).toBe("ready");
-    if (prepared.kind !== "ready") throw new Error("Expected synthetic disclosure");
+    const { libraryRoot, before, check, reader, prepared } = await preparedFixture();
     expect(prepared.usage).toMatchObject({ books: 1, items: 1, sourceBytes: 124 });
     expect(prepared.priceFacts).toMatchObject({ inputPerMillion: 1.25, outputPerMillion: 4.25, cachedInputPerMillion: 0.15 });
     expect(prepared.envelope.environment.estimatedCostUsd).toBeNull();
@@ -149,6 +154,21 @@ describe("synthetic catalogue and completion boundaries", () => {
       readerLists: 2, readerModels: 2, readerCredentialReads: 1,
       completionPosts: 1, fixtureRefusals: 0, outboundAttempts: 0,
       preparedDigest: prepared.scopeDigest, completedDigest: prepared.scopeDigest
+    });
+    expect(await treeFingerprint(libraryRoot)).toEqual(before);
+  });
+
+  test("a cancelled synthetic disclosure blocks its exact Start with no credential or completion", async () => {
+    const { libraryRoot, before, check, reader, prepared } = await preparedFixture(sample.preStartScenario);
+    expect(check.snapshot()).toMatchObject({ preparations: 1, cancelledPreparations: 0, completionPosts: 0 });
+    expect(await reader.cancelPrepare({ operation: "cancelPrepare", prepareId: prepared.prepareId })).toBe("cancelled");
+    expect(await reader.start({ operation: "start", requestId: prepared.requestId, scopeDigest: prepared.scopeDigest }))
+      .toEqual({ kind: "blocked", reason: "changed" });
+    expect(check.snapshot()).toMatchObject({
+      catalogues: 1, preparations: 1, cancelledPreparations: 1, starts: 1, readerLists: 1, readerModels: 1,
+      readerCredentialReads: 0, completionPosts: 0, fixtureRefusals: 0, outboundAttempts: 0,
+      preparedDigest: prepared.scopeDigest, completedDigest: null, requestHash: null,
+      lastStart: { kind: "blocked", reason: "changed" }
     });
     expect(await treeFingerprint(libraryRoot)).toEqual(before);
   });

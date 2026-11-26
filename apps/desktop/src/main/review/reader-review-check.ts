@@ -15,6 +15,7 @@ import { AiSdkReviewTransport } from "./transport";
 import sample from "./reader-review-sample.json";
 
 const SCENARIO_FLAG = "STUDIO_READER_REVIEW_CHECK";
+const scenarios = [sample.scenario, sample.preStartScenario];
 const launchFlags = new Set([
   SCENARIO_FLAG, "STUDIO_TEST", "STUDIO_HEADLESS", "STUDIO_TEST_MEMORY_VAULT",
   "STUDIO_USER_DATA", "STUDIO_WINDOW_SIZE"
@@ -76,7 +77,7 @@ export function readerReviewCheckRequested(env: Launch["env"]): boolean {
 export function admitReaderReviewCheck({ env, packaged, headless, appPath, entry }: Launch): string {
   const profile = env.STUDIO_USER_DATA;
   const uid = process.getuid?.();
-  if (packaged || !headless || env[SCENARIO_FLAG] !== sample.scenario ||
+  if (packaged || !headless || !scenarios.some(scenario => env[SCENARIO_FLAG] === scenario) ||
       env.STUDIO_TEST !== "1" || env.STUDIO_HEADLESS !== "1" || env.STUDIO_TEST_MEMORY_VAULT !== "1" ||
       env.STUDIO_WINDOW_SIZE !== "1440x900" || !profile || uid === undefined ||
       Object.keys(env).some((flag) => flag.startsWith("STUDIO_") && !launchFlags.has(flag)) ||
@@ -117,7 +118,7 @@ const observationKey = Symbol.for("studio.reader-review-check");
 export function createReaderReviewCheck() {
   const secret = sample.sentinelPrefix + randomBytes(24).toString("hex");
   const counts = {
-    catalogues: 0, preparations: 0, starts: 0, readerLists: 0, readerModels: 0, readerCredentialReads: 0,
+    catalogues: 0, preparations: 0, cancelledPreparations: 0, starts: 0, readerLists: 0, readerModels: 0, readerCredentialReads: 0,
     completionPosts: 0, fixtureRefusals: 0, outboundAttempts: 0, permissionAttempts: 0,
     protectedStorageAttempts: 0, guardedStorageMethods: 0
   };
@@ -245,7 +246,11 @@ export function createReaderReviewCheck() {
         return result;
       },
       stop: (request) => service.stop(request),
-      cancelPrepare: (request) => service.cancelPrepare(request)
+      async cancelPrepare(request) {
+        const result = await service.cancelPrepare(request);
+        if (result === "cancelled") counts.cancelledPreparations++;
+        return result;
+      }
     };
   }
 

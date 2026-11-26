@@ -19,6 +19,7 @@
  *   offline     writing through export with every outbound connection denied (macOS only)
  *   instance    a second copy on the same profile: refused, nothing written, the open copy says so
  *   reader-review  the built reader keyboard journey with an isolated synthetic provider (opt-in, macOS)
+ *   reader-review-prestart  the built reader's keyboard cancellation and retired-disclosure refusal (opt-in, macOS)
  *   reader-review-web  the built browser reader refusal (opt-in)
  *
  *   bun run e2e            build, then run everything
@@ -72,6 +73,13 @@ const CHECKS = [
     args: ["keyboard-exact-passage"],
     what: "the isolated built desktop reader keyboard journey",
     optIn: true
+  },
+  {
+    id: "reader-review-prestart",
+    script: "scripts/reader-review-check.mjs",
+    args: ["keyboard-prestart-cancel"],
+    what: "keyboard cancellation and refusal of a retired reader disclosure",
+    optIn: true
   }
 ];
 
@@ -99,7 +107,7 @@ if (build) {
   const commands = webOnly ? ["build:web"] : ["build", "build:web", "toolkit:build"];
   console.log(webOnly ? "[e2e] building the web app…" : "[e2e] building the desktop app, the web build and the toolkit…");
   const env = { ...process.env };
-  if (selection.some((check) => check.id === "reader-review" || check.id === "reader-review-web")) {
+  if (selection.some((check) => check.id === "reader-review" || check.id === "reader-review-web" || check.id === "reader-review-prestart")) {
     env.GIT_COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
   }
   for (const command of commands) {
