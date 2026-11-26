@@ -13,8 +13,10 @@
  */
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
+import { devNull } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { redactLine } from "./failure-artifacts.mjs";
 
 /**
  * The floor, kept a little under the current numbers so a refactor does not fail for noise.
@@ -125,6 +127,74 @@ export function belowFloor(measured, floor = FLOOR) {
   return below;
 }
 
+const MAX_FAILURES = 5;
+const MAX_TEST_NAME = 120;
+const MAX_TEST_PATH = 160;
+const TEST_PATH = /^(?:apps|packages)\/[\w-]+\/tests\/(?:[\w-]+\/)*[\w.-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const BUN_FOOTER = /\r?\n[ ]*([1-9]\d*) fail\r?\n(?:[ ]*\d+ (?:errors?|expect\(\) calls?)\r?\n)*Ran \d+ tests? across \d+ files?\. \[\d+(?:\.\d+)?(?:ms|s)\]\r?\n$/;
+
+function failedTests(stderr, root) {
+  const footer = BUN_FOOTER.exec(stderr);
+  if (!footer) return [];
+  try {
+    parseCoverageTable(stderr);
+  } catch {
+    return [];
+  }
+
+  const candidates = [];
+  let file = "";
+  let count = 0;
+  for (const line of stderr.slice(0, footer.index).split(/\r?\n/)) {
+    const header = /^(.+\.[cm]?[jt]sx?):$/.exec(line);
+    if (header) file = header[1];
+    if (!line.startsWith("(fail)")) continue;
+    const failure = /^\(fail\) (.+) \[\d+(?:\.\d+)?(?:ms|s)\]$/.exec(line);
+    if (!failure) return [];
+    count += 1;
+    if (candidates.length === MAX_FAILURES || file.length > MAX_TEST_PATH || !TEST_PATH.test(file)) continue;
+    const label = failure[1];
+    if (/[\p{C}\p{Zl}\p{Zp}]/u.test(label) || redactLine(label) !== label || redactLine(file) !== file) continue;
+    candidates.push({ file, name: label.split(" > ").at(-1) });
+  }
+  // An assertion or console write can look exactly like a result on stderr.
+  if (count !== Number(footer[1])) return [];
+
+  const sources = new Map();
+  return candidates.flatMap(({ file, name }) => {
+    // Use a committed test declaration as the output source. A plausible stderr line or a
+    // test-created file alone cannot authorize printing its text.
+    if (!sources.has(file)) {
+      const source = spawnSync("git", ["--git-dir=.git", "cat-file", "blob", `HEAD:${file}`], {
+        cwd: root,
+        env: {
+          PATH: process.env.PATH,
+          SystemRoot: process.env.SystemRoot,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: devNull,
+          GIT_NO_LAZY_FETCH: "1",
+          GIT_NO_REPLACE_OBJECTS: "1"
+        },
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 256 * 1024
+      });
+      sources.set(file, source.status === 0 && !source.error ? source.stdout : "");
+    }
+    const declarations = sources.get(file).matchAll(
+      /^[ \t]*(?:test|it)(?:\.(?:concurrent|serial|failing))?\([ \t]*(?:"([^"\\\r\n]+)"|'([^'\\\r\n]+)')[ \t]*,/gm
+    );
+    for (const declaration of declarations) {
+      const title = declaration[1] ?? declaration[2];
+      if (title !== name) continue;
+      const characters = [...title];
+      const displayed = characters.length > MAX_TEST_NAME ? `${characters.slice(0, MAX_TEST_NAME - 1).join("")}…` : title;
+      return [`[coverage] failed test in ${file} · ${displayed}`];
+    }
+    return [];
+  });
+}
+
 /**
  * The verdict on one run: what to print, on which stream, and the exit code.
  *
@@ -137,7 +207,11 @@ export function judge(run, root, { raise = false, floor = FLOOR } = {}) {
     const message = output.includes("All files")
       ? "[coverage] the test suite failed, which matters more than the number"
       : "[coverage] the test run did not complete";
-    return { code: 1, messages: [["error", message]] };
+    const messages = [["error", message]];
+    if (run.status === 1 && !run.error && !run.signal && run.stderr) {
+      for (const identity of failedTests(run.stderr, root)) messages.push(["error", identity]);
+    }
+    return { code: 1, messages };
   }
 
   let measured;
