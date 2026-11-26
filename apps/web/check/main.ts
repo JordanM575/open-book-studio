@@ -84,10 +84,8 @@ async function run(): Promise<void> {
   let library: BrowserLibrary | null = null;
   await check("origin storage opens", async () => {
     if (!capabilities.browserStorage) throw new Error("OPFS is unavailable in this browser.");
-    library = await Promise.race([
-      openBrowserLibrary(folderId),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("OPFS did not open within 10 seconds.")), 10_000))
-    ]);
+    // The adapter bounds each directory step and the optional persistence request.
+    library = await openBrowserLibrary(folderId);
     return "OPFS root available";
   });
   if (!library) {
