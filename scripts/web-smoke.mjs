@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync, spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
-import { headlessEnvironment } from "./headless-environment.mjs";
+import { headlessEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 import readerRefusal from "./web-smoke/reader-review-refusal.cjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -108,9 +108,8 @@ async function waitForGroup(pid, milliseconds) {
 }
 
 async function runChild(electron, appDir, env) {
-  const mockKeychain = readerCheck && process.platform === "darwin" ? ["--use-mock-keychain"] : [];
   const ownGroup = readerCheck && process.platform !== "win32";
-  const child = spawn(electron, [...mockKeychain, appDir], { cwd: root, env, stdio: "inherit", detached: ownGroup });
+  const child = spawn(electron, [...mockKeychainArgs(), appDir], { cwd: root, env, stdio: "inherit", detached: ownGroup });
   const terminate = () => {
     if (ownGroup && child.pid) {
       try { process.kill(-child.pid, "SIGKILL"); } catch { /* Group settlement remains authoritative. */ }

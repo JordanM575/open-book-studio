@@ -28,6 +28,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const appDir = join(root, "apps", "desktop");
@@ -363,19 +364,8 @@ await writeFile(
 );
 await writeFile(join(profile, "studio.json"), `${JSON.stringify({ libraryRoot }, null, 2)}\n`);
 
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
-// This shell may carry a fetch proxy installed for the coding agent itself. The app must not
-// inherit it, or any other proxy: the point of the check is where the app's own requests go.
-delete env.NODE_OPTIONS;
-for (const key of Object.keys(env)) {
-  if (key.startsWith("HEADROOM_") || /^(https?|all|no)_proxy$/i.test(key)) delete env[key];
-}
-env.STUDIO_TEST = "1";
-env.STUDIO_HEADLESS = "1";
+const env = headlessDesktopEnvironment(process.env, profile, "memory");
 env.STUDIO_BACKEND = "1";
-env.STUDIO_TEST_MEMORY_VAULT = "1";
-env.STUDIO_USER_DATA = profile;
 env.STUDIO_BACKEND_FILE = backendFile;
 
 const fake = await startFakeProvider();
@@ -419,7 +409,7 @@ const watchdog = setTimeout(() => {
 }, 240_000);
 
 async function journey() {
-  app = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env });
+  app = await _electron.launch({ executablePath: electronPath, args: [...mockKeychainArgs(), appDir], cwd: appDir, env });
   const child = app.process();
   child.stdout?.on("data", (part) => {
     appOutput += part.toString("utf8");

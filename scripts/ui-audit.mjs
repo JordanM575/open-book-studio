@@ -20,6 +20,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 import playwright from "playwright";
 
 const { _electron } = playwright;
@@ -56,20 +57,11 @@ await cp(fixture, libraryRoot, { recursive: true });
 await mkdir(profile, { recursive: true });
 await writeFile(join(profile, "studio.json"), `${JSON.stringify({ libraryRoot }, null, 2)}\n`);
 
-const env = { ...process.env };
-delete env.ELECTRON_RUN_AS_NODE;
-// This shell may carry a fetch proxy installed for the coding agent itself. The app must not
-// inherit it: the proxy authorises the agent's own traffic, not the app's, and every provider
-// request would come back as an unauthorised refusal that has nothing to do with the app.
-delete env.NODE_OPTIONS;
-for (const key of Object.keys(env)) if (key.startsWith("HEADROOM_")) delete env[key];
-env.STUDIO_TEST = "1";
-env.STUDIO_HEADLESS = "1";
-env.STUDIO_USER_DATA = profile;
+const env = headlessDesktopEnvironment(process.env, profile);
 env.STUDIO_WINDOW_SIZE = `${width}x${height}`;
 
 const electronPath = createRequire(join(appDir, "package.json"))("electron");
-const app = await _electron.launch({ executablePath: electronPath, args: [appDir], cwd: appDir, env });
+const app = await _electron.launch({ executablePath: electronPath, args: [...mockKeychainArgs(), appDir], cwd: appDir, env });
 
 const page = await app.firstWindow();
 const problems = [];

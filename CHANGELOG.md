@@ -8,6 +8,7 @@ Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
 ### Repository verification
+- Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.
 - Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.
 - Generate synthetic reader IPC redaction values at runtime and check for partial marker leaks.
 - Drive the Markdown folder collision test at the staging-complete boundary.

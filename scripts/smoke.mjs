@@ -17,7 +17,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { headlessEnvironment } from "./headless-environment.mjs";
+import { headlessDesktopEnvironment, mockKeychainArgs } from "./headless-environment.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const appDir = join(root, "apps", "desktop");
@@ -195,13 +195,8 @@ function pngSquare(size, [r, g, b]) {
 // ELECTRON_RUN_AS_NODE (it would start Electron as plain Node), not NODE_OPTIONS or a fetch proxy
 // installed for the coding agent itself (it authorises the agent's traffic, not the app's), and
 // not a provider key.
-const env = headlessEnvironment(process.env);
-env.STUDIO_TEST = "1";
-// The hidden run never asks the operating system for protected storage either.
-env.STUDIO_NO_KEYCHAIN = "1";
-env.STUDIO_HEADLESS = "1";
+const env = headlessDesktopEnvironment(process.env, profile);
 env.STUDIO_SMOKE = "1";
-env.STUDIO_USER_DATA = profile;
 env.STUDIO_EXPORT_PATH = join(temp, "exports");
 
 /*
@@ -284,7 +279,7 @@ console.log(`[smoke] ${packaged ? "packaged" : "hidden"} run · profile ${profil
 // shutdown path stalls; every line is still echoed unchanged.
 const child = packaged
   ? spawn(packagedApp, [], { cwd: root, env, stdio: ["inherit", "pipe", "inherit"] })
-  : spawn(electronPath, [appDir], { cwd: appDir, env, stdio: ["inherit", "pipe", "inherit"] });
+  : spawn(electronPath, [...mockKeychainArgs(), appDir], { cwd: appDir, env, stdio: ["inherit", "pipe", "inherit"] });
 
 let reported = null;
 let grace = null;

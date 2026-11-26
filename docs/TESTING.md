@@ -113,6 +113,11 @@ as unavailable and a save is refused, with nothing written. Either flag alone, o
 keeps protected storage. `apps/desktop/tests/credential-isolation.test.ts` proves each case with the
 shared Electron mock, and `apps/desktop/tests/headless-environment.test.ts` covers the allowlist.
 
+The default desktop checks use the same allowlisted fixture launcher. The `agent` check
+explicitly selects the in-memory vault for its loopback fixture. Other unpackaged desktop
+checks select the test cipher that refuses protected storage. macOS Electron launches also
+use Chromium's mock keychain. The web harness uses its own temporary browser profile.
+
 A hidden window is never visible, so the studio treats every finished turn as one to notify about.
 A hidden run now logs those notifications instead of posting them
 (`apps/desktop/src/main/launch-mode.ts`). The check still turns desktop notifications off inside the
