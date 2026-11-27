@@ -492,6 +492,8 @@ describe("saved reviews mounted over the real browser adapter and Library", () =
     const after = required(value(await api.readDispositions(scope, run.runId, report.hash)));
     expect(after.record.dispositions[0]?.events.at(-1)?.note).toBe("  \n");
     expect(writes).toBe(1);
+    // The storage write can be visible before its receipt settles the panel.
+    await testing.waitFor(() => expect(page().getByText(/Saved disposition: ignored · No local changes/)).toBeTruthy());
     const note = page().getByRole("textbox", { name: "Local note for finding-1" });
     testing.fireEvent.change(note, { target: { value: "temporarily entered" } });
     testing.fireEvent.change(note, { target: { value: "" } });

@@ -922,6 +922,7 @@ Update the `Unreleased` section before every commit.
   038 T022 stay unchecked.
 
 ### Checked saved-review dispositions and recovery
+- Wait for the confirmed disposition state before submitting the next edit in the saved-review test.
 
 - Complete the authorized saved-record mutation slice through the existing Library queue/writer:
   desktop forwarding, inspected raw disposition baselines, complete stale-history conflict copies,
