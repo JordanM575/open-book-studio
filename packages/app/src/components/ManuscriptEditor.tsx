@@ -109,6 +109,15 @@ interface Base {
   title: string;
 }
 
+interface ReviewPresentation {
+  editor: InlineEditor;
+  request: unknown;
+  scope: string;
+  layer: ValidatedInlineLayer;
+  historical: boolean;
+  label: string | undefined;
+}
+
 /** The shared verifier is host-neutral; one frozen port serves every mounted visit. */
 const sharedEvidencePort = createSharedEvidencePort();
 
@@ -142,7 +151,9 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   const [selectionEmpty, setSelectionEmpty] = useState(true);
   const [replaceArmed, setReplaceArmed] = useState(false);
   const [editor, setEditor] = useState<InlineEditor | null>(null);
-  const [layer, setLayer] = useState<ValidatedInlineLayer | null>(null);
+  const [review, setReview] = useState<ReviewPresentation | null>(null);
+  const reviewLabelRef = useRef(reviewLabel);
+  reviewLabelRef.current = reviewLabel;
   const [active, setActive] = useState<InlineSpan | null>(null);
   const clearActive = useCallback(() => setActive(null), []);
   const [announcement, setAnnouncement] = useState("");
@@ -161,6 +172,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   /** The words the last conflicted save kept as a copy, the base it was checked against, and its status. */
   const kept = useRef<{ text: string; hash: string; status: SaveStatus } | null>(null);
   const [viewGeneration] = useState(() => `${chapter.id}:${++visitCounter}`);
+  const reviewScope = JSON.stringify([libraryId, bookId, chapter.id, viewGeneration]);
   const sourceEpoch = useRef(1);
   /** Failed text saves since the last one that landed; it picks the next retry delay. */
   const failures = useRef(0);
@@ -514,14 +526,20 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   runCommandRef.current = runCommand;
 
   const handleInspection = useCallback((inspection: InlineInspection) => {
-    setActive(inspection.active);
     const current = editorRef.current;
-    const spans = current?.getLayer()?.spans ?? [];
+    const inspectedLayer = current?.getLayer();
+    if (!current || !inspectedLayer) return;
+    setActive(inspection.active);
+    const { spans } = inspectedLayer;
     const index = spans.findIndex((span) => inlineSpanKey(span) === inlineSpanKey(inspection.active));
     setAnnouncement(describeInspection(inspection, index, spans.length));
     if (inspection.action === "return") {
       const key = findingKey(inspection.active);
-      requestAnimationFrame(() => rowRefs.current.get(key)?.focus());
+      requestAnimationFrame(() => {
+        if (editorRef.current === current && current.getLayer() === inspectedLayer) {
+          rowRefs.current.get(key)?.focus();
+        }
+      });
     }
   }, []);
   const handleInspectionRef = useRef(handleInspection);
@@ -529,9 +547,11 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 
   const handleReviewStatus = useCallback((next: "hidden" | "filtered" | "stale" | "ready") => {
     if (next === "stale") {
-      setLayer(null);
+      const label = reviewLabelRef.current;
+      setReview((previous) =>
+        previous && !previous.historical ? { ...previous, historical: true, label } : previous
+      );
       setActive(null);
-      setAnnouncement("The review marks are hidden because the text changed. The findings are no longer current.");
       return;
     }
     if (next === "filtered") {
@@ -585,19 +605,16 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
   }, [editor]);
 
   // Host-supplied synthetic request: the trusted port verifies it; nothing is sent or saved here.
-  useEffect(() => {
+  useLayoutEffect(() => {
+    setReview(null);
+    setActive(null);
+    setAnnouncement("");
     if (!editor) return;
     if (reviewRequest === undefined || reviewRequest === null) {
-      // The host withdrew its request: no marks, no list, and no late proof may paint one.
       editor.discardEvidence();
-      setLayer(null);
-      setActive(null);
-      setAnnouncement("");
       return;
     }
     let live = true;
-    setLayer(null);
-    setActive(null);
     void editor.showEvidence(reviewRequest).then((result) => {
       if (!live) return;
       if (result !== "applied") {
@@ -609,15 +626,18 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
         return;
       }
       const next = editor.getLayer();
-      setLayer(next);
+      if (next) {
+        setReview({ editor, request: reviewRequest, scope: reviewScope, layer: next, historical: false, label: undefined });
+      }
       setAnnouncement(
         next ? `${formatCount(next.spans.length)} ${pluralize(next.spans.length, "finding")} verified for this saved text.` : ""
       );
     });
     return () => {
       live = false;
+      editor.discardEvidence();
     };
-  }, [editor, reviewRequest]);
+  }, [editor, reviewRequest, reviewScope]);
 
   const disarmReplace = (): void => {
     replaceArmRef.current = null;
@@ -708,10 +728,12 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 
   const words = countWords(content);
   const lines = content.split("\n").filter((line) => line.trim().length > 0).length;
+  const visibleReview =
+    review?.editor === editor && review.request === reviewRequest && review.scope === reviewScope ? review : null;
 
   const sheet = (
     <div
-      className={layer ? "min-w-0 flex-1" : "w-full"}
+      className={visibleReview ? "min-w-0 flex-1" : "w-full"}
       data-testid="manuscript-editor"
     >
       <div className="rounded-[var(--corner-xl)] bg-[var(--manuscript-bg)] px-5 pt-8 pb-16 shadow-[var(--elevation-2)] min-[700px]:px-10 min-[700px]:pt-12 min-[700px]:pb-24 lg:px-14">
@@ -785,7 +807,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     </div>
   );
 
-  if (!layer) {
+  if (!visibleReview) {
     return <div className="mx-auto w-full max-w-[760px]">{sheet}</div>;
   }
 
@@ -795,9 +817,9 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
     <div className="mx-auto flex w-full max-w-[1120px] items-start gap-6">
       {sheet}
       <ReviewFindingsAside
-        editor={editor}
-        layer={layer}
-        label={reviewLabel}
+        editor={visibleReview.historical ? null : visibleReview.editor}
+        layer={visibleReview.layer}
+        label={visibleReview.historical ? visibleReview.label : reviewLabel}
         active={active}
         onClearActive={clearActive}
         announcement={announcement}
@@ -813,7 +835,7 @@ export const ManuscriptEditor = forwardRef<EditorHandle, Props>(function Manuscr
 /** The heading the findings list uses when a host gives none. */
 const DEFAULT_REVIEW_LABEL = "Review findings";
 
-/** One row per finding, in source order; each row has an equivalent control in the text toolbar. */
+/** Current findings offer text navigation. Historical findings keep the verified quote readable. */
 function ReviewFindingsAside({
   editor,
   layer,
@@ -834,7 +856,9 @@ function ReviewFindingsAside({
   const [category, setCategory] = useState("all");
   const lastCategory = useRef(category);
   const categories = [...new Set(layer.spans.map((span) => span.category))].sort();
-  const visible = category === "all" ? layer.spans : layer.spans.filter((span) => span.category === category);
+  const visible = !editor || category === "all" ? layer.spans : layer.spans.filter((span) => span.category === category);
+  const rows = groupFindings(visible);
+  const totalFindings = visible === layer.spans ? rows.length : groupFindings(layer.spans).length;
 
   useEffect(() => {
     if (!editor) return;
@@ -852,6 +876,7 @@ function ReviewFindingsAside({
   }, [category, editor, layer, onClearActive]);
 
   const activeKey = active ? findingKey(active) : null;
+  const rowClass = "w-full rounded-[var(--corner-sm)] border border-[var(--border)] px-2 py-1 text-left";
 
   return (
     <aside
@@ -860,11 +885,11 @@ function ReviewFindingsAside({
     >
       <h2 className="text-(length:--text-subheadline-size) font-semibold">{label || DEFAULT_REVIEW_LABEL}</h2>
       <p className="mt-1 text-muted-foreground" data-testid="review-count">
-        {formatCount(groupFindings(visible).length)} of {formatCount(groupFindings(layer.spans).length)}{" "}
-        {pluralize(groupFindings(layer.spans).length, "finding")} shown
+        {formatCount(rows.length)} of {formatCount(totalFindings)}{" "}
+        {pluralize(totalFindings, "finding")} shown
       </p>
 
-      {categories.length > 1 ? (
+      {editor && categories.length > 1 ? (
         <label className="mt-3 block">
           <span className="text-muted-foreground">Show</span>
           <select
@@ -883,35 +908,54 @@ function ReviewFindingsAside({
         </label>
       ) : null}
 
-      <div className="mt-3">
-        <InlineReviewControls editor={editor} />
-      </div>
+      {editor ? (
+        <div className="mt-3">
+          <InlineReviewControls editor={editor} />
+        </div>
+      ) : null}
 
       <ol className="mt-3 space-y-2">
-        {groupFindings(visible).map((row, index) => (
-          <li key={row.key}>
-            <button
-              type="button"
-              ref={(element) => onRow(row.key, element)}
-              {...(row.key === activeKey ? { "aria-current": true as const } : {})}
-              aria-label={`Show ${row.category} finding ${index + 1} in the text`}
-              onClick={() => {
-                if (!editor) return;
-                if (!editor.inspectSpan(row.span)) editor.inspectAt(row.span.from);
-              }}
-              disabled={!editor}
-              className="w-full rounded-[var(--corner-sm)] border border-[var(--border)] px-2 py-1 text-left focus-visible:outline-2 focus-visible:outline-[var(--primary)] aria-[current=true]:border-[var(--primary)]"
-            >
-              <span className="font-medium">{row.category}</span>
-              {row.count > 1 ? <span className="text-muted-foreground"> · {row.count} passages</span> : null}
-              <span className="mt-1 block line-clamp-3 text-muted-foreground">“{row.quote}”</span>
-            </button>
-          </li>
-        ))}
+        {rows.map((row, index) => {
+          const [first] = row.spans;
+          const quotations = editor ? [first] : row.spans;
+          const details = (
+            <>
+              <span className="font-medium">{first.category}</span>
+              {row.spans.length > 1 ? <span className="text-muted-foreground"> · {row.spans.length} passages</span> : null}
+              {quotations.map((span) => (
+                <span
+                  key={inlineSpanKey(span)}
+                  className={editor ? "mt-1 block line-clamp-3 text-muted-foreground" : "mt-1 block whitespace-pre-wrap break-words text-muted-foreground"}
+                >
+                  “{editor ? span.quote.replace(/\s+/g, " ").trim().slice(0, 120) : span.quote}”
+                </span>
+              ))}
+            </>
+          );
+          return (
+            <li key={row.key}>
+              {editor ? (
+                <button
+                  type="button"
+                  ref={(element) => onRow(row.key, element)}
+                  {...(row.key === activeKey ? { "aria-current": true as const } : {})}
+                  aria-label={`Show ${first.category} finding ${index + 1} in the text`}
+                  onClick={() => {
+                    if (editor.getLayer() !== layer) return;
+                    if (!editor.inspectSpan(first)) editor.inspectAt(first.from);
+                  }}
+                  className={`${rowClass} focus-visible:outline-2 focus-visible:outline-[var(--primary)] aria-[current=true]:border-[var(--primary)]`}
+                >
+                  {details}
+                </button>
+              ) : <div className={rowClass}>{details}</div>}
+            </li>
+          );
+        })}
       </ol>
 
       <p role="status" aria-live="polite" className="mt-3 min-h-4 text-muted-foreground">
-        {announcement}
+        {editor ? announcement : `Historical findings from saved revision ${layer.source.version}. Review marks are hidden.`}
       </p>
     </aside>
   );
@@ -919,10 +963,7 @@ function ReviewFindingsAside({
 
 interface FindingRow {
   key: string;
-  category: string;
-  quote: string;
-  count: number;
-  span: InlineSpan;
+  spans: [InlineSpan, ...InlineSpan[]];
 }
 
 function findingKey(span: InlineSpan): string {
@@ -945,17 +986,8 @@ function groupFindings(spans: readonly InlineSpan[]): FindingRow[] {
   for (const span of spans) {
     const key = findingKey(span);
     const existing = rows.get(key);
-    if (existing) {
-      rows.set(key, { ...existing, count: existing.count + 1 });
-      continue;
-    }
-    rows.set(key, {
-      key,
-      category: span.category,
-      quote: span.quote.replace(/\s+/g, " ").trim().slice(0, 120),
-      count: 1,
-      span
-    });
+    if (existing) existing.spans.push(span);
+    else rows.set(key, { key, spans: [span] });
   }
   return [...rows.values()];
 }
