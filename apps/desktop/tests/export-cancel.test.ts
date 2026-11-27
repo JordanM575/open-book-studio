@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { lstat, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,8 @@ import {
   type ExportDeps
 } from "../src/main/export";
 import { ExportAttemptRegistry } from "../src/main/export-attempts";
+import { sha256 } from "../src/main/library/own-writes";
+import { treeFingerprint } from "./support/tree-fingerprint";
 
 /*
  * Spec 035 T016: attempt-bound cancellation for the four single-file targets, at the
@@ -137,6 +139,77 @@ describe("single-file export cancellation", () => {
     expect(cancelledExportOutcome(error)).toEqual({ status: "cancelled", message: CANCELLED });
     expect(await readFile(destination, "utf8")).toBe("SYNTHETIC_PRIOR_OUTPUT");
     expect(await readdir(out)).toEqual(["prior.pdf"]);
+  });
+
+  test("pdf: an accepted cancel during replacement consent prevents a late approval from staging", async () => {
+    const { library, detail, out } = await fixture();
+    const bookId = detail.book.id;
+    const bookRoot = join(library.root, "books", bookId);
+    const [chapter] = detail.chapters;
+    if (!chapter) throw new Error("expected a saved chapter in the fixture");
+    const chapterPath = join(bookRoot, "chapters", chapter.path);
+    const savedChapter = await readFile(chapterPath);
+    const savedSources = await treeFingerprint(bookRoot);
+
+    const destination = join(out, "prior.pdf");
+    await writeFile(destination, "%PDF-1.4\n% SYNTHETIC_PRIOR_OUTPUT\n%%EOF\n");
+    const priorOutput = await readFile(destination);
+    const priorHash = sha256(priorOutput);
+    const inventory = await readdir(out);
+
+    const registry = new ExportAttemptRegistry();
+    const attemptId = "22222222-2222-4222-8222-222222222222";
+    const begun = registry.begin(bookId, "pdf", attemptId);
+    if (!begun.ok) throw new Error("expected begin to succeed");
+
+    const asked = Promise.withResolvers<string>();
+    const consent = Promise.withResolvers<boolean>();
+    const confirmReplace = mock(async (path: string) => {
+      asked.resolve(path);
+      return consent.promise;
+    });
+    const renderPdf = mock(async (html: string) => Buffer.from(`%PDF-SYNTHETIC\n${html}`));
+    const openStage = mock(open);
+    const onPublishStart = mock(begun.onPublishStart);
+    const result = exportManuscriptPdf(detail, new Map(), library.root, {
+      ...dependencies(destination),
+      signal: begun.signal,
+      confirmReplace,
+      renderPdf,
+      atomic: { open: openStage },
+      onPublishStart
+    }).catch((error: unknown) => error).finally(() => registry.settle(attemptId));
+
+    try {
+      const promptedPath = await Promise.race([
+        asked.promise,
+        result.then((outcome) => {
+          throw new Error("PDF export settled before requesting replacement", { cause: outcome });
+        })
+      ]);
+      expect(promptedPath).toBe(destination);
+      expect(renderPdf.mock.calls).toEqual([[expect.stringContaining("SYNTHETIC_SAVED_BODY")]]);
+      expect(begun.signal.aborted).toBe(false);
+      expect(registry.cancel(bookId, attemptId)).toEqual({ status: "accepted", attemptId });
+      expect(begun.signal.aborted).toBe(true);
+      consent.resolve(true);
+      expect(cancelledExportOutcome(await result)).toEqual({ status: "cancelled", message: CANCELLED });
+    } finally {
+      // Release the prompt and drain the export if an assertion failed while consent was pending.
+      consent.resolve(false);
+      await result;
+    }
+
+    expect(confirmReplace.mock.calls).toEqual([[destination]]);
+    expect(openStage).toHaveBeenCalledTimes(0);
+    expect(onPublishStart).toHaveBeenCalledTimes(0);
+    const output = await readFile(destination);
+    expect(output).toEqual(priorOutput);
+    expect(sha256(output)).toBe(priorHash);
+    expect(await readdir(out)).toEqual(inventory);
+    expect(await readFile(chapterPath)).toEqual(savedChapter);
+    expect(await treeFingerprint(bookRoot)).toEqual(savedSources);
+    expect(registry.cancel(bookId, attemptId)).toEqual({ status: "already-settled", attemptId });
   });
 
   test("a temp that cannot be unlinked still settles cancelled and names the exact path", async () => {
