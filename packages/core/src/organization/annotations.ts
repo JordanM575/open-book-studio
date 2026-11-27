@@ -76,11 +76,48 @@ export const annotationSaveSchema = z.strictObject({
 export type AnnotationSaveRequest = z.infer<typeof annotationSaveSchema>;
 export type AnnotationDraft = AnnotationSaveRequest["draft"];
 
+type InspectedAnnotation = { id: string; note: string | null; excerpt: string };
+export type AnnotationAnchorInspection =
+  | { status: "verified"; annotation: InspectedAnnotation; anchor: SavedSpan }
+  | { status: "stale"; annotation: InspectedAnnotation }
+  | { status: "unavailable"; annotation: InspectedAnnotation | null };
+
 export class AnnotationService {
   private readonly sidecar: CheckedSidecar<Annotations>;
   constructor(private readonly host: GoalHost) { this.sidecar = new CheckedSidecar(host, "annotations", annotationsSchema); }
 
   read(bookId: string): Promise<SidecarRead<Annotations>> { return this.sidecar.read(bookId); }
+
+  /** The destination editor still has to confirm the same clean source before selecting the span. */
+  async inspectAnchor(bookId: string, annotationId: string): Promise<AnnotationAnchorInspection> {
+    let annotation: InspectedAnnotation | null = null;
+    try {
+      return await this.host.withBook<AnnotationAnchorInspection>(bookId, async () => {
+        await assertSidecarOwner(this.host, bookId);
+        const { data } = await this.sidecar.readCurrent(bookId);
+        const record = data?.annotations.find((entry) => entry.id === annotationId);
+        if (!record || record.archived) return { status: "unavailable", annotation: null };
+
+        const { chapterId, chapterVersion, chapterHash, startOffset, endOffset, excerpt } = record.anchor;
+        annotation = { id: record.id, note: record.kind === "note" ? record.note : null, excerpt };
+        const detail = await this.host.readSavedBook(bookId);
+        // Read issues can hide another file with the same chapter ID.
+        if (detail.chapterReadIssues.length > 0) return { status: "unavailable", annotation };
+        const chapter = oneChapter(detail, bookId, chapterId);
+        if (!await this.chapterMatches(chapter, bookId)) return { status: "unavailable", annotation };
+        if (chapter.version !== chapterVersion || chapter.hash !== chapterHash ||
+          !bodySpan(chapter.content, startOffset, endOffset) || chapter.content.slice(startOffset, endOffset) !== excerpt) {
+          return { status: "stale", annotation };
+        }
+        return {
+          status: "verified", annotation,
+          anchor: { kind: "saved-body-span", bookId, chapterId, chapterVersion, chapterHash, startOffset, endOffset, excerpt }
+        };
+      });
+    } catch {
+      return { status: "unavailable", annotation };
+    }
+  }
 
   async save(input: unknown, attempt?: SidecarAttempt): Promise<SidecarSave<Annotations>> {
     const request = parseRequest(annotationSaveSchema, input);

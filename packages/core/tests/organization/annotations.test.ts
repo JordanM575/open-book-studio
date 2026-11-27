@@ -1,6 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { LibraryPortError } from "../../src/library/errors";
 import { bookFilePath, chapterPath, chaptersPath } from "../../src/library/paths";
 import { libraryPathFromArchivePath, toLibraryPath } from "../../src/library/path";
+import { AnnotationService } from "../../src/organization/annotations";
 import { sidecarPath, SidecarRefusalError } from "../../src/planning/checked-sidecar";
 import { decoder, encoder, SIDECAR_BYTES } from "../../src/planning/schema";
 import { envelope, fixture } from "../planning/fixture";
@@ -10,6 +12,140 @@ function span(content: string, excerpt: string) {
   if (start < 0) throw new Error("Excerpt missing");
   return { startOffset: start, endOffset: start + excerpt.length, excerpt };
 }
+
+async function inspectionFixture() {
+  const f = await fixture();
+  const content = "😀 Salt on the floor.\nThe door was open.\nSalt on the floor.";
+  const excerpt = "Salt on the floor.";
+  const startOffset = content.lastIndexOf(excerpt);
+  const chapter = await f.library.createChapter(f.book.id, { title: "Saved", content });
+  const read = await f.library.annotations.read(f.book.id);
+  const saved = await f.library.annotations.save({
+    ...envelope(read),
+    draft: {
+      kind: "create-note", note: "  Keep the second mention.\n",
+      anchor: { chapterId: chapter.id, startOffset, endOffset: startOffset + excerpt.length, excerpt }
+    }
+  });
+  if (saved.status !== "saved" || !saved.current.data) throw new Error("Expected a saved note");
+  const data = saved.current.data;
+  const record = data.annotations[0];
+  if (record?.kind !== "note") throw new Error("Expected a note record");
+  const annotation = { id: record.id, note: record.note, excerpt };
+  const chapterFile = chapterPath(f.book.id, chapter.path);
+  const annotationFile = sidecarPath(f.book.id, "annotations");
+  const writeRecord = (next: typeof record) => f.writeRaw(annotationFile, { ...data, annotations: [next] });
+  const inspect = async (id = record.id, service = f.library.annotations) => {
+    const files = [chapterFile, annotationFile];
+    const before = await Promise.all(files.map((path) => f.port.readFile(path)));
+    const commit = spyOn(f.port, "commitFile");
+    try {
+      const result = await service.inspectAnchor(f.book.id, id);
+      expect(commit).not.toHaveBeenCalled();
+      expect(f.commits).toHaveLength(0);
+      expect(f.layouts).toHaveLength(0);
+      const after = await Promise.all(files.map((path) => f.port.readFile(path)));
+      expect(after.map((snapshot) => snapshot?.sha256)).toEqual(before.map((snapshot) => snapshot?.sha256));
+      expect(after.map((snapshot) => snapshot?.bytes)).toEqual(before.map((snapshot) => snapshot?.bytes));
+      return result;
+    } finally {
+      commit.mockRestore();
+    }
+  };
+  return { ...f, chapter, chapterFile, annotationFile, record, annotation, writeRecord, inspect };
+}
+
+describe("read-only annotation anchor inspection", () => {
+  test("returns the stored occurrence of a repeated quotation", async () => {
+    const f = await inspectionFixture();
+    expect(f.chapter.content.indexOf(f.annotation.excerpt)).toBeLessThan(f.record.anchor.startOffset);
+    await f.writeRecord({ ...f.record, anchor: { ...f.record.anchor, future: "preserve on disk" } });
+    expect(await f.inspect()).toEqual({ status: "verified", annotation: f.annotation, anchor: f.record.anchor });
+  });
+
+  test("a newer version makes the note stale even when the stored hash matches", async () => {
+    const f = await inspectionFixture();
+    await f.writeRecord({ ...f.record, anchor: { ...f.record.anchor, chapterVersion: f.chapter.version - 1 } });
+    expect(await f.inspect()).toEqual({ status: "stale", annotation: f.annotation });
+  });
+
+  test("different raw line endings make the note stale despite the same version and canonical body", async () => {
+    const f = await inspectionFixture();
+    await f.writeRaw(f.chapterFile, (await f.raw(f.chapterFile)).replaceAll("\n", "\r\n"));
+    const changed = await f.library.readChapter(f.book.id, f.chapter.id);
+    expect(changed.version).toBe(f.chapter.version);
+    expect(changed.content).toBe(f.chapter.content);
+    expect(changed.hash).not.toBe(f.chapter.hash);
+    expect(await f.inspect()).toEqual({ status: "stale", annotation: f.annotation });
+  });
+
+  test("a missing source leaves the authored note available", async () => {
+    const f = await inspectionFixture();
+    await f.port.removeFile(f.chapterFile);
+    expect(await f.inspect()).toEqual({ status: "unavailable", annotation: f.annotation });
+  });
+
+  test("unreadable chapter bytes cannot verify a matching passage", async () => {
+    const f = await inspectionFixture();
+    const bytes = encoder.encode(await f.raw(f.chapterFile));
+    await f.port.commitFile(f.chapterFile, new Uint8Array([...bytes, 0xff]), { kind: "any" });
+    expect(await f.inspect()).toEqual({ status: "unavailable", annotation: f.annotation });
+  });
+
+  test("a source read failure after enumeration leaves the note available", async () => {
+    const f = await inspectionFixture();
+    f.host.storage.readFile = async (path) => {
+      if (path.join("/") === f.chapterFile.join("/")) throw new LibraryPortError("permission-required", "Fixture read refused");
+      return f.port.readFile(path);
+    };
+    expect(await f.inspect(f.record.id, new AnnotationService(f.host))).toEqual({ status: "unavailable", annotation: f.annotation });
+  });
+
+  test("a same-ID copy makes the source ambiguous in the saved-book reader", async () => {
+    const f = await inspectionFixture();
+    await f.writeRaw(chapterPath(f.book.id, "9000-source-copy.md"), await f.raw(f.chapterFile));
+    expect(await f.inspect()).toEqual({ status: "unavailable", annotation: f.annotation });
+  });
+
+  test("a chapter claiming a different owner is unavailable", async () => {
+    const f = await inspectionFixture();
+    const raw = await f.raw(f.chapterFile);
+    await f.writeRaw(f.chapterFile, raw.replace(/^---\n/, `---\nbookId: ${f.other.id}\n`));
+    expect(await f.inspect()).toEqual({ status: "unavailable", annotation: f.annotation });
+  });
+
+  test("a mismatched owning book withholds its sidecar", async () => {
+    const f = await inspectionFixture();
+    await f.mutateBook({ id: f.other.id });
+    expect(await f.inspect()).toEqual({ status: "unavailable", annotation: null });
+  });
+
+  test("archived and missing notes do not resolve a source", async () => {
+    const f = await inspectionFixture();
+    const service = new AnnotationService(f.host);
+    const source = spyOn(f.host, "readSavedBook");
+    await f.writeRecord({ ...f.record, archived: true });
+    expect(await f.inspect(f.record.id, service)).toEqual({ status: "unavailable", annotation: null });
+    expect(await f.inspect("ann_missing", service)).toEqual({ status: "unavailable", annotation: null });
+    await f.port.removeFile(f.annotationFile);
+    expect(await f.inspect(f.record.id, service)).toEqual({ status: "unavailable", annotation: null });
+    expect(source).not.toHaveBeenCalled();
+  });
+
+  test("a literal match at a span that splits a surrogate pair is stale", async () => {
+    const f = await inspectionFixture();
+    const excerpt = f.chapter.content.slice(1, 2);
+    await f.writeRecord({ ...f.record, anchor: { ...f.record.anchor, startOffset: 1, endOffset: 2, excerpt } });
+    expect(await f.inspect()).toEqual({ status: "stale", annotation: { ...f.annotation, excerpt } });
+  });
+
+  test("a different excerpt at the stored span does not trigger a search", async () => {
+    const f = await inspectionFixture();
+    const { startOffset, endOffset } = f.record.anchor;
+    await f.writeRecord({ ...f.record, anchor: { ...f.record.anchor, startOffset: startOffset - 1, endOffset: endOffset - 1 } });
+    expect(await f.inspect()).toEqual({ status: "stale", annotation: f.annotation });
+  });
+});
 
 describe("checked saved-span annotations", () => {
   test("a confirmed saved span creates a bookmark and a note without changing the chapter", async () => {
