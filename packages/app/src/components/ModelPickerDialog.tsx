@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type FormEvent, type RefObject, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Check, Loader2, Search } from "lucide-react";
 import type { BookMeta } from "@ai-book-studio/core/schema";
 import type { ConnectionSummary, ModelInfo, ProviderDescription, ProviderId } from "@ai-book-studio/core/providers/types";
@@ -37,7 +37,19 @@ interface Props {
   onConflictCopy?: (() => void) | undefined;
 }
 
-export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initial, handoff, onCataloguesLoaded, onOpenSettings, onConflictCopy }: Props) {
+type CataloguesByProvider = Map<ProviderId, Map<string, Catalogue>>;
+
+export function ModelPickerDialog(props: Props) {
+  const { open, book, onPick, handoff } = props;
+  // The workspace preview keeps settled catalogues across picker visits.
+  const cataloguesRef = useRef<CataloguesByProvider>(new Map());
+  const visitKey = JSON.stringify([open, book.id, Boolean(onPick), handoff?.provider, handoff?.modelId, handoff?.connectionId]);
+  return <ModelPickerVisit key={visitKey} {...props} cataloguesRef={cataloguesRef} />;
+}
+
+function ModelPickerVisit({
+  open, book, onClose, onSaved, onPick, initial, handoff, onCataloguesLoaded, onOpenSettings, onConflictCopy, cataloguesRef
+}: Props & { cataloguesRef: RefObject<CataloguesByProvider> }) {
   const turnMode = Boolean(onPick);
   const initialConnectionId = initial?.connectionId ?? book.defaultConnectionId;
   const initialModelId = initial?.modelId ?? book.defaultModelId;
@@ -59,40 +71,47 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
   const [manualResult, setManualResult] = useState<{ error: boolean; text: string } | null>(null);
   const manualInput = useRef<HTMLInputElement>(null);
   const manualInputId = useId();
-  // Handoff seed for the provider filter and the post-load candidate check. A ref so the load
-  // callbacks read the current seed without being re-created on every render.
+  const visitRef = useRef<AbortController | null>(null);
+  const manualCheckRef = useRef<symbol | null>(null);
+  const savingRef = useRef(false);
+  // The keyed visit fixes the handoff fields while its lookups are active.
   const handoffRef = useRef(handoff);
   handoffRef.current = handoff;
-  // While a handoff is re-resolving its connection, the catalogue load waits for that list.
-  const handoffPendingRef = useRef(false);
   const connectionsRef = useRef<ConnectionSummary[]>([]);
-  const cataloguesRef = useRef(new Map<string, Catalogue>());
   const onCataloguesLoadedRef = useRef(onCataloguesLoaded);
   onCataloguesLoadedRef.current = onCataloguesLoaded;
   // Handoff mode needs to know when the connection list has settled before it can say "no usable connection".
   const [connectionsLoaded, setConnectionsLoaded] = useState(false);
+  const handoffPending = handoff !== undefined && !connectionsLoaded;
   // A model id only matters to the writing agent, which the browser build does not run.
   const manualAllowed = window.studio.platform !== "web";
 
   const emitCatalogues = useCallback((list: ConnectionSummary[]) => {
     onCataloguesLoadedRef.current?.({
       connections: list,
-      loads: [...cataloguesRef.current].map(([connectionId, catalogue]) => ({ connectionId, catalogue }))
+      loads: [...cataloguesRef.current.values()].flatMap((catalogues) => {
+        const loads = [...catalogues].map(([connectionId, catalogue]) => ({ connectionId, catalogue }));
+        // The preview takes the last available load per provider. Keep manual-only fallbacks first.
+        return [
+          ...loads.filter(({ catalogue }) => catalogue.listError),
+          ...loads.filter(({ catalogue }) => !catalogue.listError)
+        ];
+      })
     });
-  }, []);
+  }, [cataloguesRef]);
 
-  const loadConnections = useCallback(async () => {
+  const loadConnections = useCallback(async (signal: AbortSignal, visit: AbortSignal) => {
     setError(null);
     try {
       const [providerList, connectionList] = await Promise.all([
         must(window.studio.providers.list()),
         must(window.studio.connections.list())
       ]);
+      if (signal.aborted || visit.aborted) return;
       setProviders(providerList);
       setConnections(connectionList);
       connectionsRef.current = connectionList;
       setConnectionsLoaded(true);
-      handoffPendingRef.current = false;
       setConnectionId((current) => {
         const seed = handoffRef.current;
         if (seed) {
@@ -106,17 +125,35 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
       });
       emitCatalogues(connectionList);
     } catch (cause) {
+      if (signal.aborted || visit.aborted) return;
       setConnectionsLoaded(true);
-      handoffPendingRef.current = false;
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   }, [initialConnectionId, emitCatalogues]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open) return;
+    const visit = new AbortController();
+    visitRef.current = visit;
+    return () => visit.abort();
+  }, [open]);
+
+  // Reset before paint and retire each lookup when its inputs change.
+  useLayoutEffect(() => {
+    setConnectionsLoaded(false);
+    const visit = visitRef.current?.signal;
+    if (!open || !visit || visit.aborted) return;
+    const lookup = new AbortController();
+    manualCheckRef.current = null;
+    setChecking(false);
     // A handoff starts with no selection until the connection and the candidate are verified.
     const seed = handoffRef.current;
-    handoffPendingRef.current = Boolean(seed);
+    if (seed) {
+      setConnections([]);
+      setModels([]);
+      setListFailed(false);
+      setLoading(false);
+    }
     setConnectionId(seed ? null : initialConnectionId);
     setChosen(seed ? null : initialModelId);
     setAllowContributor(book.allowContributorTraining);
@@ -124,19 +161,30 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     setManualOpen(false);
     setManualId("");
     setManualResult(null);
-    void loadConnections();
+    void loadConnections(lookup.signal, visit);
+    return () => lookup.abort();
   }, [open, initialConnectionId, initialModelId, book.allowContributorTraining, loadConnections]);
 
-  const loadModels = useCallback(async (id: string) => {
+  const loadModels = useCallback(async ({ id, provider }: ConnectionSummary, signal: AbortSignal, visit: AbortSignal) => {
     setLoading(true);
     setError(null);
     setListFailed(false);
     setModels([]);
     try {
       const catalogue = await must(window.studio.providers.models(id));
+      if (signal.aborted || visit.aborted) return;
       setModels(catalogue.models);
-      cataloguesRef.current.set(id, catalogue);
-      emitCatalogues(connectionsRef.current);
+      let catalogues = cataloguesRef.current.get(provider);
+      if (!catalogues) {
+        catalogues = new Map();
+        cataloguesRef.current.set(provider, catalogues);
+      }
+      const previous = catalogues.get(id);
+      // A failed list can refresh a manual fallback, while a complete list keeps its last success.
+      if (!catalogue.listError || !previous || previous.listError) {
+        catalogues.delete(id);
+        catalogues.set(id, catalogue);
+      }
       if (catalogue.listError) {
         setError(catalogue.listError);
         setListFailed(true);
@@ -152,18 +200,25 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
           setError(`${reason} Nothing has changed.`);
         }
       }
+      emitCatalogues(connectionsRef.current);
     } catch (cause) {
+      if (signal.aborted || visit.aborted) return;
       setError(cause instanceof Error ? cause.message : String(cause));
       setListFailed(true);
     } finally {
-      setLoading(false);
+      if (!signal.aborted && !visit.aborted) setLoading(false);
     }
-  }, [emitCatalogues]);
+  }, [cataloguesRef, emitCatalogues]);
 
-  useEffect(() => {
-    if (!open || !connectionId || handoffPendingRef.current) return;
-    void loadModels(connectionId);
-  }, [open, connectionId, loadModels]);
+  useLayoutEffect(() => {
+    const visit = visitRef.current?.signal;
+    if (!open || !connectionId || !connectionsLoaded || !visit || visit.aborted) return;
+    const connection = connectionsRef.current.find((item) => item.id === connectionId);
+    if (!connection) return;
+    const lookup = new AbortController();
+    void loadModels(connection, lookup.signal, visit);
+    return () => lookup.abort();
+  }, [open, connectionId, connectionsLoaded, loadModels]);
 
   const savedModelMissing =
     !handoff &&
@@ -183,7 +238,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     : null;
   const visibleConnections = handoffConnections ?? connections;
   const providerName = (id: ConnectionSummary["provider"]) => providers.find((provider) => provider.id === id)?.name ?? id;
-  const connection = connections.find((item) => item.id === connectionId) ?? null;
+  const connection = handoffPending ? null : connections.find((item) => item.id === connectionId) ?? null;
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     const sorted = [...models].sort((a, b) => Number(canRunAgent(b)) - Number(canRunAgent(a)) || a.name.localeCompare(b.name));
@@ -198,10 +253,18 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     if (manualOpen) manualInput.current?.focus();
   }, [manualOpen]);
 
+  const closeVisit = () => {
+    const visit = visitRef.current;
+    if (!visit || visit.signal.aborted) return;
+    visit.abort();
+    onClose();
+  };
+
   const addManual = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
+    const visit = visitRef.current?.signal;
     const id = manualId.trim();
-    if (!connection || !id || checking) return;
+    if (!visit || visit.aborted || !connection || !id || manualCheckRef.current || savingRef.current) return;
     setManualResult(null);
     const listed = models.find((model) => model.id === id);
     if (listed) {
@@ -209,9 +272,13 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
       setManualResult({ error: false, text: "This connection already lists that model, so nothing was sent." });
       return;
     }
+    const check = Symbol();
+    manualCheckRef.current = check;
+    const isCurrent = () => !visit.aborted && manualCheckRef.current === check;
     setChecking(true);
     try {
       const model = await must(window.studio.providers.addModel(connection.id, id));
+      if (!isCurrent()) return;
       setModels((current) => [...current.filter((item) => item.id !== model.id), model]);
       setManualId("");
       setSearch("");
@@ -224,14 +291,18 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
         }`
       });
     } catch (cause) {
-      setManualResult({ error: true, text: cause instanceof Error ? cause.message : String(cause) });
+      if (isCurrent()) setManualResult({ error: true, text: cause instanceof Error ? cause.message : String(cause) });
     } finally {
-      setChecking(false);
+      if (isCurrent()) {
+        manualCheckRef.current = null;
+        setChecking(false);
+      }
     }
   };
 
   const save = async (): Promise<void> => {
-    if (!connection || !chosen || saving) return;
+    const visit = visitRef.current?.signal;
+    if (!visit || visit.aborted || !connection || !chosen || savingRef.current || manualCheckRef.current) return;
     if (handoff) {
       // Revalidation on confirmation: the connection must still be present and usable, and the
       // chosen model still listed and able to run the agent. Otherwise nothing is picked.
@@ -255,22 +326,28 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
     if (contributor && !allowContributor) return;
     if (onPick) {
       if (contributor && !book.allowContributorTraining) {
+        savingRef.current = true;
         setSaving(true);
         setError(null);
         try {
           await must(window.studio.books.update(book.id, { allowContributorTraining: true }));
         } catch (cause) {
-          setError(cause instanceof Error ? cause.message : String(cause));
-          setSaving(false);
+          if (!visit.aborted) setError(cause instanceof Error ? cause.message : String(cause));
           return;
+        } finally {
+          if (!visit.aborted) {
+            savingRef.current = false;
+            setSaving(false);
+          }
         }
-        setSaving(false);
       }
+      if (visit.aborted) return;
       onPick({ connectionId: connection.id, modelId: chosen });
-      onClose();
+      if (!visit.aborted) closeVisit();
       return;
     }
     if (!onSaved) return;
+    savingRef.current = true;
     setSaving(true);
     setError(null);
     try {
@@ -281,33 +358,38 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
         defaultModelId: chosen,
         allowContributorTraining: contributor ? allowContributor : book.allowContributorTraining
       });
+      if (visit.aborted) return;
       onSaved(result.book);
+      if (visit.aborted) return;
       if (result.status === "conflict") {
         onConflictCopy?.();
         return setError(keptCopyText());
       }
-      onClose();
+      closeVisit();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (!visit.aborted) setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setSaving(false);
+      if (!visit.aborted) {
+        savingRef.current = false;
+        setSaving(false);
+      }
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()}>
+    <Dialog open={open} onOpenChange={(next) => !next && closeVisit()}>
       <DialogContent
         title={turnMode ? "Model for this turn" : "Model for this book"}
-        description={
+        description={`${
           turnMode
             ? "Use this model for the next message only. The book default stays the same."
             : "The writing agent uses this model until you change it."
-        }
+        }${handoffPending ? " Loading connections…" : ""}`}
         className="w-[calc(100vw-48px)] max-w-[600px]"
       >
-        {handoff && !connectionsLoaded ? (
-          <p className="flex items-center gap-2 py-6 text-(length:--text-subheadline-size) text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" /> Loading connections…
+        {handoffPending ? (
+          <p role="status" className="flex items-center gap-2 py-6 text-(length:--text-subheadline-size) text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" aria-hidden /> Loading connections…
           </p>
         ) : handoff && (handoffConnections?.length ?? 0) === 0 ? (
           <div className="py-6">
@@ -335,7 +417,12 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
                   <button
                     key={item.id}
                     type="button"
+                    disabled={saving}
                     onClick={() => {
+                      if (item.id !== connectionId) {
+                        manualCheckRef.current = null;
+                        setChecking(false);
+                      }
                       setConnectionId(item.id);
                       setChosen(null);
                       setManualOpen(false);
@@ -393,7 +480,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
                     <button
                       key={model.id}
                       type="button"
-                      disabled={!usable}
+                      disabled={!usable || saving}
                       onClick={() => setChosen(model.id)}
                       className={`flex w-full items-start justify-between gap-3 rounded-[var(--corner-sm)] px-3 py-2 text-left transition-colors ${
                         model.id === chosen ? "bg-[var(--accent)]" : usable ? "hover:bg-[var(--accent)]" : "opacity-60"
@@ -476,7 +563,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
                     spellCheck={false}
                     className="min-w-0 flex-1 rounded-[var(--corner-md)] border border-[var(--input)] bg-[var(--card)] px-3 py-1.5 font-(family-name:--font-code) text-(length:--text-caption-size) outline-none placeholder:font-(family-name:--font-ui) placeholder:text-muted-foreground focus-visible:border-[var(--ring)]"
                   />
-                  <Button type="submit" size="sm" variant="secondary" disabled={checking || !manualId.trim()} data-testid="manual-model-add">
+                  <Button type="submit" size="sm" variant="secondary" disabled={saving || checking || !manualId.trim()} data-testid="manual-model-add">
                     {checking ? <Loader2 size={13} className="animate-spin" /> : null}
                     Add model
                   </Button>
@@ -504,6 +591,7 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
                   <input
                     type="checkbox"
                     checked={allowContributor}
+                    disabled={saving}
                     onChange={(event) => setAllowContributor(event.target.checked)}
                     className="mt-0.5 size-4 accent-[var(--primary)]"
                     data-testid="allow-contributor"
@@ -519,16 +607,16 @@ export function ModelPickerDialog({ open, book, onClose, onSaved, onPick, initia
 
         <DialogFooter>
           {manualAllowed && connection !== null && !manualVisible ? (
-            <Button variant="ghost" className="mr-auto" onClick={() => setManualOpen(true)} data-testid="enter-model-id">
+            <Button variant="ghost" className="mr-auto" onClick={() => setManualOpen(true)} disabled={saving} data-testid="enter-model-id">
               Enter a model id
             </Button>
           ) : null}
-          <Button variant="secondary" onClick={onClose} disabled={saving}>
+          <Button variant="secondary" onClick={closeVisit} disabled={saving}>
             Cancel
           </Button>
           <Button
             onClick={() => void save()}
-            disabled={!connection || !chosen || saving || connections.length === 0 || (contributor && !allowContributor) || (handoff !== undefined && loading)}
+            disabled={!connection || !chosen || saving || checking || connections.length === 0 || (contributor && !allowContributor) || (handoff !== undefined && loading)}
           >
             {saving ? <Loader2 size={15} className="animate-spin" /> : null}
             {turnMode ? "Use for this turn" : "Use this model"}
