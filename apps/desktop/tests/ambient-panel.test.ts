@@ -126,6 +126,7 @@ let speakFails = false;
 let speakGate: { promise: Promise<void>; resolve: () => void } | null = null;
 /** When false, utterances stay open until a test ends them, which makes pausing observable. */
 let utteranceAutoEnd = true;
+let deviceStartFailure: "constructor" | "speak" | null = null;
 let pendingEnds: Array<() => void> = [];
 let pendingErrors: Array<() => void> = [];
 
@@ -281,6 +282,7 @@ beforeEach(() => {
   speakGate = null;
   operationListenersSet = [];
   utteranceAutoEnd = true;
+  deviceStartFailure = null;
   pendingEnds = [];
   pendingErrors = [];
   synthesisPauseCalls = 0;
@@ -296,17 +298,21 @@ beforeEach(() => {
     lang = "en-US";
     onend: (() => void) | null = null;
     onerror: (() => void) | null = null;
-    constructor(readonly text: string) {}
+    constructor(readonly text: string) {
+      if (deviceStartFailure === "constructor") throw new Error("private device startup detail");
+    }
   };
   Object.defineProperty(window, "speechSynthesis", {
     value: {
       speak: (utterance: { text: string; onend?: (() => void) | null; onerror?: (() => void) | null }) => {
+        if (!utteranceAutoEnd) {
+          const { onend, onerror } = utterance;
+          pendingEnds.push(() => onend?.());
+          pendingErrors.push(() => onerror?.());
+        }
+        if (deviceStartFailure === "speak") throw new Error("private device startup detail");
         spoken.push(utterance.text);
         if (utteranceAutoEnd) utterance.onend?.();
-        else {
-          pendingEnds.push(() => utterance.onend?.());
-          pendingErrors.push(() => utterance.onerror?.());
-        }
       },
       cancel: () => {},
       pause: () => {
@@ -1169,6 +1175,55 @@ describe("reading the prose", () => {
     expect(voiceSpoken).toEqual([]);
   });
 
+  for (const failure of ["constructor", "speak"] as const) {
+    test(`a synchronous device ${failure} failure settles and can be retried`, async () => {
+      deviceStartFailure = failure;
+      utteranceAutoEnd = false;
+      const { voice } = (window as unknown as { studio: ReturnType<typeof studio> }).studio;
+      const providerCancel = mock(voice.cancel);
+      voice.cancel = providerCancel;
+      const { view } = render();
+      await testing.waitFor(() => expect(view.getByTestId("ambient-line").textContent).toBe(status.say));
+      await testing.fireEvent.click(view.getByTestId("ambient-toggle"));
+      const read = view.getByTestId("ambient-action-read_aloud");
+
+      await testing.act(async () => { await testing.fireEvent.click(read); });
+      const note = view.getByTestId("ambient-note");
+      expect(note.getAttribute("role")).toBe("status");
+      expect(note.textContent).toBe("This device could not play the speech. Try reading again.");
+      expect(view.getByTestId("ambient-line").textContent).toBe(status.say);
+      expect(view.queryByTestId("ambient-pause")).toBeNull();
+      expect(view.queryByTestId("ambient-stop-speaking")).toBeNull();
+      expect(spoken).toEqual([]);
+      expect(pendingEnds).toHaveLength(failure === "speak" ? 1 : 0);
+      expect(pendingErrors).toHaveLength(pendingEnds.length);
+      const [failedEnd] = pendingEnds;
+      const [failedError] = pendingErrors;
+
+      deviceStartFailure = null;
+      await testing.act(async () => { await testing.fireEvent.click(read); });
+      expect(spoken).toEqual(["The Light. The storm came in low."]);
+      expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Pause reading");
+      expect(view.queryByTestId("ambient-note")).toBeNull();
+
+      if (failure === "speak") {
+        await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+        await testing.act(async () => { failedEnd?.(); failedError?.(); });
+        expect(view.getByTestId("ambient-pause").getAttribute("aria-label")).toBe("Resume reading");
+        expect(view.queryByTestId("ambient-note")).toBeNull();
+        await testing.fireEvent.click(view.getByTestId("ambient-pause"));
+        expect(synthesisResumeCalls).toBe(1);
+      }
+
+      await testing.act(async () => { pendingEnds.at(-1)?.(); });
+      expect(view.queryByTestId("ambient-pause")).toBeNull();
+      expect(view.queryByTestId("ambient-stop-speaking")).toBeNull();
+      expect(view.queryByTestId("ambient-voice-receipt")).toBeNull();
+      expect(voiceSpoken).toEqual([]);
+      expect(providerCancel).not.toHaveBeenCalled();
+    });
+  }
+
   test("holds and goes on with the voice service's reply the same way", async () => {
     speakersAvailable = true;
     installFakeAudio();
@@ -1238,6 +1293,8 @@ describe("the voice receipt line", () => {
     });
     expect(spoken).toEqual(["The Light. The storm came in low."]);
     expect(view.queryByTestId("ambient-voice-receipt")).toBeNull();
+    expect(view.queryByTestId("ambient-pause")).toBeNull();
+    expect(view.queryByTestId("ambient-stop-speaking")).toBeNull();
   });
 
   test("stopping synthesis asks the host to cancel and never plays audio", async () => {
