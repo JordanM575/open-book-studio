@@ -25,6 +25,7 @@ Update the `Unreleased` section before every commit.
 - Exercise two separate browser tabs contending for the same Web Lock in the storage matrix.
 
 ### Repository verification
+- Report bounded test identities on coverage failures when the Bun report and checked-in test declarations agree.
 - Isolate default synthetic desktop checks from protected storage. Keep the fake-provider check on its in-memory vault.
 - Keep plan-step focus and dictation callback dependencies explicit, and guard persisted test values before reading their fields.
 - Generate synthetic reader IPC redaction values at runtime and check for partial marker leaks.
