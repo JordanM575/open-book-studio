@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, mock, spyOn, test } f
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { IPC, type ManuscriptExportCancelResult, type ManuscriptExportReceipt, type Result } from "@ai-book-studio/core/ipc";
+import { IPC, type ManuscriptExportCancelResult, type ManuscriptExportReceipt, type Result, type StudioApi } from "@ai-book-studio/core/ipc";
 import { MATTER_LIMITS, matterHash, newMatterSection, readMatter } from "@ai-book-studio/core/matter";
 import { agentMessageSchema } from "@ai-book-studio/core/agent/messages";
 import { PROVIDER_LIST } from "@ai-book-studio/core/providers/registry";
@@ -37,11 +37,21 @@ const answers = {
 const asked = { open: [] as unknown[], save: [] as unknown[], message: [] as unknown[], windows: [] as unknown[] };
 
 let registerIpc!: typeof import("../src/main/ipc").registerIpc;
+let exposedStudio: StudioApi | undefined;
+let heldMessage: ((options: unknown) => Promise<{ response: number }>) | undefined;
+const invoked: Array<[string, ...unknown[]]> = [];
 
 beforeAll(async () => {
   mockElectron(tmpdir(), {
     handle: (channel, handler) => {
       handlers.set(channel, handler);
+    },
+    exposeInMainWorld: (name, api) => {
+      if (name === "studio") exposedStudio = api as StudioApi;
+    },
+    invoke: (channel, ...args) => {
+      invoked.push([channel, ...args]);
+      return call(channel, args[0]);
     },
     showItemInFolder: (path) => {
       shown.push(path);
@@ -59,6 +69,7 @@ beforeAll(async () => {
     showMessageBox: async (options, window) => {
       asked.message.push(options);
       asked.windows.push(window);
+      if (heldMessage) return heldMessage(options);
       return answers.message.shift() ?? { response: 1 };
     }
   });
@@ -84,6 +95,9 @@ afterEach(async () => {
   for (const list of [answers.open, answers.save, answers.message, asked.open, asked.save, asked.message, asked.windows, shown]) {
     list.length = 0;
   }
+  heldMessage = undefined;
+  exposedStudio = undefined;
+  invoked.length = 0;
   await Promise.all(cleanups.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -1576,6 +1590,83 @@ describe("library folders and archives", () => {
 });
 
 describe("exports", () => {
+  test("preload PDF cancellation while replacement consent is pending rejects a late approval", async () => {
+    const { root, library } = await setup();
+    const { bookId } = await book(library);
+    const otherBook = await library.createBook({ title: "Other synthetic book", description: "" });
+    const sourceRoot = join(root, "books", bookId);
+    const snapshot = async () => Promise.all((await filesUnder(sourceRoot)).sort().map(async (path) => [path, await readFile(path)]));
+    const before = await snapshot();
+    const exports = await temp("studio-ipc-late-consent-");
+    const destination = join(exports, "prior.pdf");
+    await writeFile(destination, "%PDF-1.4\n% SYNTHETIC PRIOR OUTPUT\n%%EOF\n");
+    const prior = await readFile(destination);
+    const inventory = await readdir(exports);
+    delete process.env.STUDIO_EXPORT_PATH;
+    answers.save.push({ canceled: false, filePath: destination });
+
+    const prompted = Promise.withResolvers<unknown>();
+    const consent = Promise.withResolvers<{ response: number }>();
+    heldMessage = async (options) => {
+      prompted.resolve(options);
+      return consent.promise;
+    };
+    const pdf = spyOn(await import("../src/main/pdf"), "renderPdfInHiddenWindow")
+      .mockResolvedValue(new TextEncoder().encode("%PDF-1.7\n% SYNTHETIC\n%%EOF\n"));
+    const writer = spyOn(await import("../src/main/export-publication"), "createExportWriter");
+    const attemptId = "33333333-3333-4333-8333-333333333333";
+    let pending: ReturnType<StudioApi["books"]["exportPdf"]> | undefined;
+    try {
+      // A unique module URL avoids sharing the preload module instance with other test files.
+      const preloadEntry: string = "../src/preload/index.ts?pdf-late-consent-ipc";
+      await import(preloadEntry);
+      if (!exposedStudio) throw new Error("The preload did not expose studio");
+      const api = exposedStudio;
+      pending = api.books.exportPdf(bookId, attemptId);
+      const prompt = await Promise.race([
+        prompted.promise,
+        pending.then((outcome) => { throw new Error("PDF export settled before replacement consent", { cause: outcome }); })
+      ]);
+      expect(prompt).toEqual(expect.objectContaining({ message: "“prior.pdf” already exists. Replace it?" }));
+      expect(await api.books.exportCancel({ bookId: otherBook.id, attemptId })).toEqual({
+        ok: true, data: { status: "already-settled", attemptId }
+      });
+      expect(await api.books.exportCancel({ bookId, attemptId })).toEqual({
+        ok: true, data: { status: "accepted", attemptId }
+      });
+      consent.resolve({ response: 0 });
+      expect(await pending).toEqual({
+        ok: true,
+        data: { status: "cancelled", message: "The export was cancelled before it was published. Nothing was written." }
+      });
+      expect(await api.books.exportCancel({ bookId, attemptId })).toEqual({
+        ok: true, data: { status: "already-settled", attemptId }
+      });
+      expect(invoked).toEqual([
+        [IPC.books.exportPdf, { bookId, attemptId }],
+        [IPC.books.exportCancel, { bookId: otherBook.id, attemptId }],
+        [IPC.books.exportCancel, { bookId, attemptId }],
+        [IPC.books.exportCancel, { bookId, attemptId }]
+      ]);
+      expect(pdf).toHaveBeenCalledTimes(1);
+      expect(pdf.mock.calls[0]?.[0]).toContain("Mara waited for the ebb.");
+      expect(asked.save).toHaveLength(1);
+      expect(asked.message).toHaveLength(1);
+      expect(writer).toHaveBeenCalledTimes(0);
+      expect(await readFile(destination)).toEqual(prior);
+      expect(await readdir(exports)).toEqual(inventory);
+      expect(await snapshot()).toEqual(before);
+    } finally {
+      consent.resolve({ response: 1 });
+      try {
+        if (pending) await pending;
+      } finally {
+        writer.mockRestore();
+        pdf.mockRestore();
+      }
+    }
+  });
+
   test("all manuscript channels return published paths with snapshot warnings, never receipts for cancel or failure", async () => {
     const { root, library } = await setup();
     const { bookId, one } = await book(library);
