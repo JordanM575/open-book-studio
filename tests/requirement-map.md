@@ -225,9 +225,9 @@ can perform and why. **GAP** names what covers nothing yet and why.
 | FR-016 | Network off by default in fast tests | GAP: no default-off guard or preload; only per-test injected fetch mocks |
 | FR-017 | Recorded fixtures with date and version | GAP: provider fixtures are synthetic inline constants with no recorded-exchange provenance |
 | FR-018 | Legacy suite generates its own exports | COVER: `apps/desktop/tests/legacy-import.test.ts`, `packages/core/tests/manuscript-import.test.ts` |
-| FR-019 | Live checks opt-in, skip, never leak | COVER: `scripts/check-keys.mjs` |
-| FR-020 | Live checks use cheapest call, spend cap | GAP: LIVE_SPEND_CAP_CENTS declared in .env.example but never read; no cap enforcement |
-| FR-021 | Distinct auth, quota, network, provider errors | GAP: T024 open; check-keys prints raw HTTP status and timeout labels only |
+| FR-019 | Live checks opt-in, skip, never leak | COVER: `scripts/check-keys.mjs`, `scripts/live-provider-check.ts`, `packages/core/src/providers/live-check.ts`, `packages/core/tests/live-check.test.ts` |
+| FR-020 | Live checks use cheapest call, spend cap | COVER: `packages/core/src/providers/live-check.ts` `admitRequest`/`parseSpendCapCents` (LIVE_SPEND_CAP_CENTS hard stop, refuse-if-could-exceed, unknown-cost blocks, D-116), `scripts/live-provider-check.ts`, `packages/core/tests/live-check.test.ts` |
+| FR-021 | Distinct auth, quota, network, provider errors | COVER: `packages/core/src/providers/live-check.ts` `classifyLiveError`/`classifyHttpResponse` (auth/quota/network/provider, providerCode preserved), `packages/core/tests/live-check.test.ts`, T026 `LiveFailureArtifact` |
 | FR-022 | 90% core, 70% interface coverage gates | GAP: only a global 85/92 functions/lines ratchet in `scripts/coverage-check.mjs`, no per-area or branch gate |
 | FR-023 | Every FR mapped to test or manual | COVER: this ledger (`tests/requirement-map.md`) |
 | FR-024 | Fast suite under 5 min, default command | GAP: T029 open; `bun run verify` exists but no time budget is enforced |
