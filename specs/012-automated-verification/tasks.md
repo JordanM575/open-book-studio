@@ -258,13 +258,27 @@ results and Linux job evidence. Older task-local counts below remain evidence of
 
 ## Phase 6 — Live providers
 
-- [ ] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
+- [x] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
       configured provider, with `LIVE_SPEND_CAP_CENTS` as a hard stop. Skip absent keys with a reason;
-      classify auth, quota, network and provider errors separately.
+      classify auth, quota, network and provider errors separately. Current evidence:
+      `bun run live:providers` → `scripts/live-providers.mjs` (gated on `LIVE_PROVIDER_TESTS=1`; one
+      cheapest read-only GET per configured provider priced 0 through the ledger; absent keys skipped
+      with a reason; nothing secret printed/persisted; OpenRouter free-model availability verified
+      read-only at runtime; paid fallback would be reserved under cap). Spend cap FR-020 in
+      `scripts/live-spend.mjs`. Classification FR-021 in `scripts/live-artifact.mjs`.
+      `apps/desktop/tests/live-spend.test.ts`, `apps/desktop/tests/live-artifact.test.ts`.
+      Verified: `bun run typecheck` PASS; focused Bun tests 21 pass. Live network NOT exercised in
+      this environment (no `.env`, no keys); nothing spent.
 - [ ] T025 Record the manual ChatGPT plan pass and the release-day provider checklist; do not automate a
       browser session or store a real account identifier.
-- [ ] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
-      redacted, latency and error class.
+- [x] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
+      redacted, latency and error class. Current evidence: `scripts/live-artifact.mjs`
+      `liveFailureArtifact` (artifactVersion, kind=live-test-failure, provider, model, requestShape,
+      latencyMs, errorClass, message, status, at; authorization header values replaced `[redacted]`;
+      key-shaped strings redacted via shared `redactLine`; recursively redacted `extra`), reusing the
+      `scripts/failure-artifacts.mjs` redactor; `scripts/live-providers.mjs` writes redacted JSON only
+      on failure under `out/live-failure-artifacts/`, prints its path; green/skipped leave nothing.
+      `apps/desktop/tests/live-artifact.test.ts`. Verified: `bun run typecheck` PASS; tests pass.
 
 ## Phase 7 — Diagnostics, quarantine and budgets
 

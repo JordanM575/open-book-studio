@@ -7,6 +7,25 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Opt-in live provider checks with a hard spend cap (spec 012 T024/T026, FR-020/FR-021)
+
+- Add `bun run live:providers` (`scripts/live-providers.mjs`): opt-in live provider checks gated on
+  `LIVE_PROVIDER_TESTS=1`, one cheapest read-only call per configured provider, absent keys skipped
+  with a reason, nothing printed or persisted that is secret.
+- Enforce `LIVE_SPEND_CAP_CENTS` as a hard stop in whole cents (default 5): `scripts/live-spend.mjs`
+  reserves worst-case cost before sending, refuses anything that would exceed the cap or cannot be
+  bounded, re-checks actual cost on settle, and read-only checks are priced at 0 but still ledgered.
+  Malformed/negative/Infinity cap values are rejected, not treated as no cap.
+- Add a redacted live-test failure artifact (`scripts/live-artifact.mjs`, spec 012 T026): provider,
+  model, request shape with authorization/key-shaped strings stripped, latency, error class; written
+  under `out/live-failure-artifacts/` only on failure. Errors classified distinctly:
+  auth / quota / network / provider / cap (FR-021).
+- Prefer free OpenRouter models for live checks where possible; read-only runtime verification of
+  free-model availability; any paid fallback stays under the spend cap. `OPENROUTER_API_KEY` is read
+  from `.env` only and never printed.
+- Cover the spend ledger and artifact with Bun tests; close requirement-map gaps for FR-020/FR-021;
+  mark spec 012 T024 and T026.
+
 ### Saved-review receipt and draft recovery corrections
 
 - Verify complete intended report-conflict copies at the store, handler and receiver, including a

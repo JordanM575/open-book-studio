@@ -226,8 +226,8 @@ can perform and why. **GAP** names what covers nothing yet and why.
 | FR-017 | Recorded fixtures with date and version | GAP: provider fixtures are synthetic inline constants with no recorded-exchange provenance |
 | FR-018 | Legacy suite generates its own exports | COVER: `apps/desktop/tests/legacy-import.test.ts`, `packages/core/tests/manuscript-import.test.ts` |
 | FR-019 | Live checks opt-in, skip, never leak | COVER: `scripts/check-keys.mjs` |
-| FR-020 | Live checks use cheapest call, spend cap | GAP: LIVE_SPEND_CAP_CENTS declared in .env.example but never read; no cap enforcement |
-| FR-021 | Distinct auth, quota, network, provider errors | GAP: T024 open; check-keys prints raw HTTP status and timeout labels only |
+| FR-020 | Live checks use cheapest call, spend cap | COVER: `bun run live:providers` (`scripts/live-providers.mjs`, opt-in `LIVE_PROVIDER_TESTS=1`, one cheapest read-only call per configured provider priced 0); `scripts/live-spend.mjs` reads `LIVE_SPEND_CAP_CENTS` (default 5) as a hard stop in cents, reserves worst-case before sending, refuses anything that would exceed it or cannot be bounded, re-checks actual on settle, rejects malformed/negative/Infinity caps; `apps/desktop/tests/live-spend.test.ts`. `LIVE_SPEND_CAP_CENTS` was previously declared in `.env.example` but never read. |
+| FR-021 | Distinct auth, quota, network, provider errors | COVER: `scripts/live-artifact.mjs` `classifyLiveError` (auth / quota / network / provider / cap) + redacted T026 artifact, used by `scripts/live-providers.mjs`; `apps/desktop/tests/live-artifact.test.ts`. `scripts/check-keys.mjs` additionally retains raw HTTP status / timeout labels. |
 | FR-022 | 90% core, 70% interface coverage gates | GAP: only a global 85/92 functions/lines ratchet in `scripts/coverage-check.mjs`, no per-area or branch gate |
 | FR-023 | Every FR mapped to test or manual | COVER: this ledger (`tests/requirement-map.md`) |
 | FR-024 | Fast suite under 5 min, default command | GAP: T029 open; `bun run verify` exists but no time budget is enforced |
