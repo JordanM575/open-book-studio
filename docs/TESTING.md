@@ -154,6 +154,38 @@ with `{ ...process.env }`, so the app inherits it, and every provider request co
 `NODE_OPTIONS` and the `HEADROOM_*` variables first. A check must measure the product, not the
 agent's proxy.
 
+
+### Spec 012 T024 live providers (read-only, spend-capped)
+
+Separate from `bun run keys:check` (no spend) and `bun run live:check` (app-level Meta pass),
+`bun run live:providers` performs **one cheapest read-only call per configured provider key**:
+
+```bash
+LIVE_PROVIDER_TESTS=1 LIVE_SPEND_CAP_CENTS=5 bun run live:providers
+```
+
+- **Opt-in only** (`LIVE_PROVIDER_TESTS=1`); never part of `bun run verify`. Without it, nothing runs.
+- Keys are read from the process environment and the product root `.env` (and `.env.local`, the repo's
+  own convention). A provider with no key is **skipped with a reason**, not failed. If `.env` is
+  absent, only environment keys are checked.
+- **No key material is printed, logged, copied or persisted**; only key names appear. Authorization
+  headers are redacted in every artifact.
+- Cheapest read-only call per provider: OpenRouter `GET /models`, OpenAI `GET /v1/models`, Anthropic
+  `GET /v1/models`, Gemini `GET /v1beta/models`, Meta `GET {META_API_BASE_URL}/models`. No content is
+  created. No model is billed.
+- **OpenRouter free models** are preferred where possible; `:free` availability is verified at
+  runtime from the catalogue. Free is not unlimited; any paid fallback stays under the cap. (The
+  repo's free-TTS model `fish-audio/s2.1-pro-free:free`, when used by a feature, is still rate-limited.)
+- **`LIVE_SPEND_CAP_CENTS` is a hard stop in US cents.** A request whose reserved estimate would
+  exceed the cap is refused before it starts; an invalid cap refuses the run. Read-only calls reserve
+  0c, so the ledger stays at zero.
+- **Auth, quota, network and provider errors are classified distinctly.**
+- **T026 artifact:** a failing check writes a redacted `live-check-failure` artifact under
+  `out/live-checks/` recording provider, model, request shape with authorization redacted, latency,
+  error class and a redacted message. No secrets.
+- **ChatGPT plan access stays a documented manual check** (T025); it is not automated through a
+  browser session and no real account identifier is stored.
+
 ## Coverage limits
 
 The floor is a ratchet, not a ceiling. An aggregate pass does not prove every interface path. Use

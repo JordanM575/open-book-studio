@@ -33,6 +33,7 @@
     "package:dir": "bun --filter @ai-book-studio/desktop package",
     "dist": "bun --filter @ai-book-studio/desktop dist",
     "keys:check": "bun scripts/check-keys.mjs",
+    "live:providers": "bun scripts/live-providers.mjs",
     "tokens": "bun scripts/build-tokens.mjs",
     "verify": "node scripts/verify.mjs",
     "postinstall": "node scripts/check-electron.mjs",
