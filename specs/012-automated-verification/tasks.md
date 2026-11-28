@@ -258,13 +258,33 @@ results and Linux job evidence. Older task-local counts below remain evidence of
 
 ## Phase 6 — Live providers
 
-- [ ] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
+- [x] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
       configured provider, with `LIVE_SPEND_CAP_CENTS` as a hard stop. Skip absent keys with a reason;
       classify auth, quota, network and provider errors separately.
+      Current evidence: `scripts/live-provider-check.ts` (`bun run live:providers`; runs only when
+      `LIVE_PROVIDER_TESTS=1`; one keyed GET on each configured provider's cheapest read-only
+      catalogue/key endpoint via `endpointFor`; no model called, nothing written to any provider;
+      `bun run keys:check` stays the separate no-spend status command; keys read from the environment,
+      never printed/logged/copied/persisted). Pure logic in `packages/core/src/providers/live-check.ts`
+      (`providerSources`/`readProviderConfig` per `ProviderId`, `liveTestsEnabled`, `parseSpendCapCents`,
+      `admitRequest`, `commitCost`, `redactedRequestShape`, `cheapestReadOnlyRequest`, `classifyLiveError`,
+      `classifyHttpResponse`, `buildFailureArtifact`) with `packages/core/tests/live-check.test.ts`.
+      FR-020: `LIVE_SPEND_CAP_CENTS` (default 5c, strict non-negative integer, fail-closed on malformed;
+      `admitRequest` refuses before a request that could exceed the cap, `spent + maxCost <= cap`,
+      unknown/unbounded cost blocks per D-116, `commitCost` accumulates; our read-only calls are
+      provider-bounded at 0c). FR-021: `auth`/`quota`/`network`/`provider`, `providerCode` preserved.
+      FR-019: missing key skipped not failed; Meta without base URL skipped. ChatGPT plan stays manual (T025).
 - [ ] T025 Record the manual ChatGPT plan pass and the release-day provider checklist; do not automate a
       browser session or store a real account identifier.
-- [ ] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
+- [x] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
       redacted, latency and error class.
+      Current evidence: `LiveFailureArtifact` (`packages/core/src/providers/live-check.ts`) written by
+      `scripts/live-provider-check.ts` to `LIVE_FAILURE_ARTIFACT_DIR` (default `out/live-provider-check`)
+      on each failed check: kind, provider, providerName, model (null for read-only; recorded when a model
+      call is made), errorClass + statusClass (auth/quota/network/provider), providerCode, latencyMs,
+      httpStatus, createdAt, and a request shape (method, redacted URL, secret headers replaced) with
+      `authorization` redacted; whole artifact run through `redactDeep`; no key, no authorization, no
+      prose, no manuscript. `packages/core/tests/live-check.test.ts` proves no secret-shaped string survives.
 
 ## Phase 7 — Diagnostics, quarantine and budgets
 

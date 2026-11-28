@@ -7,6 +7,11 @@ All notable changes to Open Book Studio are recorded here. The format follows
 Update the `Unreleased` section before every commit.
 
 ## [Unreleased]
+### Live provider verification
+- Add opt-in live provider checks behind `LIVE_PROVIDER_TESTS=1` (`bun run live:providers`): one cheapest read-only call per configured provider, missing keys skipped, `bun run keys:check` unchanged. Spec 012 T024, FR-019/020/021.
+- Enforce `LIVE_SPEND_CAP_CENTS` as a hard stop for live checks: strict non-negative-integer parse (fail closed), refuse any request that could exceed the cap or has unknown cost, stop before exceeding. FR-020, D-116.
+- Add a redacted T026 live-test failure artifact: provider, model, error class, latency, HTTP status and request shape with authorization redacted, no secrets. Spec 012 T026.
+- Classify live errors distinctly as auth, quota, network and provider. FR-021.
 ### Glasses companion
 - Register assistant tools from the book catalog's read and non-destructive write tiers and verify the same boundary in the mounted check.
 

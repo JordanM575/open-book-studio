@@ -132,6 +132,24 @@ never the writer's opinion of what it wrote.
 
 ## The live layer
 
+## The live layer
+
+### Opt-in live provider checks (spec 012, `LIVE_PROVIDER_TESTS=1`)
+
+`bun run live:providers` (`scripts/live-provider-check.ts`) is a separate opt-in command: it runs
+**only** when `LIVE_PROVIDER_TESTS=1`, and otherwise skips cleanly. Per configured model provider it
+makes **one cheapest read-only call** (a keyed `GET` on the provider's catalogue/key endpoint; no
+model is called, nothing is written to any provider, no paid fallback). A missing key is **skipped**,
+not failed; `bun run keys:check` remains the separate no-spend status command. Keys are read from the
+environment (a top-level `.env`, loaded by Bun, when present) and are never printed, logged, copied or
+persisted. `LIVE_SPEND_CAP_CENTS` (default `5`, strict non-negative integer, fail-closed on malformed)
+is a **hard stop**: a request that could exceed the cap, or whose cost cannot be bounded, is refused
+before it is sent; spend stops before exceeding. Errors are classified **auth / quota / network /
+provider**. On failure a redacted **T026 artifact** (provider, model, error class, latency, request
+shape with `authorization` redacted, no secrets) is written to `LIVE_FAILURE_ARTIFACT_DIR`
+(default `out/live-provider-check`). ChatGPT-plan access is a documented manual check (T025), not
+automated. No live check runs in `bun run verify`; no `.env` ⇒ live checks skipped.
+
 `bun run live:check` runs **inside the app**, so it uses the key from the operating system's
 keychain through the app's own vault. It copies the committed sample into a temporary folder, works
 there, and deletes it, so the author's own book is never opened.
