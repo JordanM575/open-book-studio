@@ -258,13 +258,27 @@ results and Linux job evidence. Older task-local counts below remain evidence of
 
 ## Phase 6 — Live providers
 
-- [ ] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
+- [x] T024 Add opt-in live checks behind `LIVE_PROVIDER_TESTS`, one cheapest read-only call per
       configured provider, with `LIVE_SPEND_CAP_CENTS` as a hard stop. Skip absent keys with a reason;
-      classify auth, quota, network and provider errors separately.
+      classify auth, quota, network and provider errors separately. **Done:** `bun run live:providers`
+      (`scripts/live-providers.mjs` + `packages/core/src/providers/live-checks.ts`): `LIVE_PROVIDER_TESTS=1`
+      opt-in, `LIVE_SPEND_CAP_CENTS` hard stop via `reserveSpend` (FR-020) refusing any request that could
+      exceed it, one cheapest read-only `GET` per configured key (OpenRouter `/models`, OpenAI `/v1/models`,
+      Anthropic `/v1/models`, Gemini `/v1beta/models`, Meta `{base}/models`), missing keys skipped with a
+      reason, auth/quota/network/provider classified distinctly (FR-021), no key material printed or
+      persisted, reads product-root `.env`/`.env.local`, OpenRouter `:free` availability verified at
+      runtime (preferred; no billing), ChatGPT plan stays manual (T025). 16 tests in
+      `packages/core/tests/live-checks.test.ts`. Separate `bun run keys:check` no-spend command unchanged.
+      Real-provider evidence depends on keys at the product root; no live provider call is claimed without it.
 - [ ] T025 Record the manual ChatGPT plan pass and the release-day provider checklist; do not automate a
       browser session or store a real account identifier.
-- [ ] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
-      redacted, latency and error class.
+- [x] T026 Add a live-test failure artifact showing the provider, model, request shape with authorization
+      redacted, latency and error class. **Done:** `LiveCheckFailureArtifact`
+      (`kind: "live-check-failure"`, schemaVersion 1) from `packages/core/src/providers/live-checks.ts`
+      records provider, model, redacted request shape (method, redacted URL, header NAMES only,
+      `authorizationRedacted`, null body), latencyMs, errorClass (auth/quota/network/provider),
+      errorCode, redacted message; written by `bun run live:providers` under `out/live-checks/`
+      without secrets. Covered by `packages/core/tests/live-checks.test.ts`.
 
 ## Phase 7 — Diagnostics, quarantine and budgets
 
